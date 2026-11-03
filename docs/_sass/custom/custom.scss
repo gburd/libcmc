@@ -1,0 +1,45 @@
+// libcmc site overrides on just-the-docs.
+
+// Code blocks: the theme's default line height reads as double-spaced.
+.main-content {
+  pre,
+  code,
+  pre.highlight,
+  figure.highlight pre,
+  div.highlighter-rouge pre.highlight {
+    line-height: 1.3;
+  }
+}
+
+// Man pages rendered by mandoc (docs/gen_man_pages.sh), in .manpage.
+.manpage {
+  font-size: 0.85rem;
+  line-height: 1.4;
+
+  h1.Sh,
+  h2.Ss {
+    font-size: 0.95rem;
+    margin-top: 1.1em;
+    border-bottom: 1px solid #e6e6e6;
+    padding-bottom: 0.2em;
+  }
+
+  table.head,
+  table.foot {
+    color: #999;
+    font-size: 0.75rem;
+    width: 100%;
+  }
+
+  code.Nm { color: #b5006e; font-weight: 600; }
+  code.Fn { color: #0b5fa5; font-weight: 600; }
+  var.Ft  { color: #2e7d32; }
+  var.Fa  { color: #6a1b9a; }
+  code.In { color: #a15c00; }
+  code.Dv,
+  code.Er { color: #b5006e; }
+  var.Va  { color: #6a1b9a; }
+  code.Fl { color: #a15c00; }
+
+  code, var, pre { font-family: $mono-font-family; }
+}

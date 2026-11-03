@@ -13,15 +13,21 @@ configurations of a published protocol model, libcmc gives the same
 verdicts, the same shortest counterexample depths, and exactly the same
 distinct-state counts as TLC (`calib/hc`).
 
-Why a new tool rather than TLA+, Spin, LTSmin, CBMC, GenMC or
-Stateright: `docs/WHY.md`.
+Documentation, with a guide that builds a first model and the manual
+pages: <https://gregburd.codeberg.page/libcmc/> (mirrored at
+<https://gburd.github.io/libcmc/>).  Why a new tool rather than TLA+,
+Spin, LTSmin, CBMC, GenMC or Stateright: `docs/WHY.md`.
 
 ## Build
 
     make            # build/libcmc.a, build/cmc, build/test_cmc
-    make check      # engine tests, bug gates, purity gate, fast calibration
+    make check      # engine tests, bug gates, purity and docs gates, fast calibration
+    make install    # libcmc.a, cmc.h and the man pages, under PREFIX=/usr/local
 
-C11 and libc only.  gcc and clang, `-Wall -Wextra -Werror`.
+C11 and libc only.  gcc and clang, `-Wall -Wextra -Werror`.  With Nix,
+`nix build` gives the library and man pages, `nix flake check` runs
+`make check` under gcc and clang, and `nix develop` has the tools for the
+docs site.
 
 ## Use
 
@@ -31,7 +37,8 @@ C11 and libc only.  gcc and clang, `-Wall -Wextra -Werror`.
    effects through `cmc_out_push()`: send, set or cancel a timer, persist,
    wake, reply.  The first `durable_size` bytes of the state are durable.
    They change only through `apply_persist`, which the engine calls when a
-   persist is flushed.  `test/toy/` is a complete small example.
+   persist is flushed.  `docs/_includes/snippets/quickstart.c` is a
+   complete model in one file, and the guide walks through it.
 2. Write properties: `CMC_INVARIANT`, `CMC_ACTION_PROPERTY`,
    `CMC_WITNESS_PROP`, `CMC_QUIESCENT_PROP`, `CMC_EVENTUALLY_PROP`.
 3. Write a ten-line `main()` that calls `cmc_main()` with your model table
@@ -57,13 +64,21 @@ C11 and libc only.  gcc and clang, `-Wall -Wextra -Werror`.
 | `test/` | engine tests, the toy core with planted bugs, purity probes |
 | `calib/hc/` | calibration: HummingConsensus.tla, its C port, the TLC cfgs, `calibrate.sh` |
 | `scripts/` | the purity gate and its teeth |
-| `docs/` | design, decision record, review, measurements |
+| `man/` | `cmc(1)`, `libcmc(3)`, `cmc(7)` |
+| `docs/` | the documentation site: guide, design, decision record, review, measurements |
 
 ## Status
 
 Version 0, extracted from pg_chain on 2026-11-03.  Single-threaded.
 There is no symmetry reduction or on-disk queue yet.  Clocks, partitions
 and multi-core nodes are planned (`docs/DESIGN.md`, "Roadmap").
+
+## CI
+
+GitHub Actions runs `make check` under gcc and clang, the MemorySanitizer
+gate, the Nix build, and weekly the full calibration.  Codeberg runs one
+small `make check` job.  Both forges build the documentation site, check
+its links, and publish it to Pages.
 
 ## License
 

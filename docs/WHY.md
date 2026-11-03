@@ -1,4 +1,10 @@
-# Why libcmc exists
+---
+title: "Why libcmc"
+nav_order: 5
+permalink: /why/
+lede: >-
+  Why a new checker rather than TLA+, Spin, LTSmin, CBMC, GenMC or Stateright.
+---
 
 libcmc model-checks C protocol code by exploring every interleaving of
 the C functions that ship, not of a separate model.  This file records

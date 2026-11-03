@@ -19,3 +19,5 @@ repository hygiene.
 
 - `libcmc-change`: any change to `src/`, `include/cmc.h`, the gates, or
   the calibration.
+
+See .agent-steering-domains.md for domain-specific steering (local).

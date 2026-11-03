@@ -3,12 +3,14 @@
 #
 #   make                     libcmc.a, the cmc binary and the engine tests
 #   make check               fast gates: engine tests, toy bug gate, purity
-#                            gate and its teeth, fast calibration rows
+#                            gate and its teeth, docs gate, fast calibration
 #   make check-msan          the engine tests under MemorySanitizer (clang)
 #   make check-calibration   every HC row against TLC (about 9 minutes)
 #   make check-hc-bugs       planted HC port bugs must fail calibration
 #   make check-all           all of the above
 #   make CC=clang check
+#   make install             libcmc.a, cmc.h and the man pages under $(PREFIX)
+#   make docs-site           the documentation site, into docs/_site
 #
 # Build output goes to $(B) (default build/, gitignored).  Logs and
 # replay files go to $(CMC_SCRATCH) (default ~/tmp/cmc-build).
@@ -22,6 +24,8 @@ CFLAGS ?= $(OPT) -g
 WARN = -std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Wshadow \
        -Wstrict-prototypes -Wmissing-prototypes -Wno-missing-field-initializers
 ALL_CFLAGS = $(WARN) -Iinclude $(CFLAGS)
+PREFIX ?= /usr/local
+DESTDIR ?=
 export CMC_SCRATCH
 
 LIB    = $(B)/libcmc.a
@@ -33,8 +37,9 @@ PURE   = $(B)/hc_core.o $(B)/toy0.o $(B)/toy1.o $(B)/toy2.o $(B)/toy3.o
 PURE_SRC = calib/hc/hc_core.c calib/hc/hc_core.h test/toy/toy_core.c test/toy/toy.h
 MSAN_B ?= build-msan
 
-.PHONY: all check check-unit check-purity check-msan check-calibration \
-        check-calibration-fast check-hc-bugs check-all clean
+.PHONY: all check check-unit check-purity check-docs check-msan \
+        check-calibration check-calibration-fast check-hc-bugs check-all \
+        install docs-site clean
 
 all: $(LIB) $(B)/cmc $(B)/test_cmc
 
@@ -73,9 +78,14 @@ check-purity: $(PURE)
 	scripts/purity_gate.sh "$(PURE)" "$(PURE_SRC)"
 	scripts/purity_teeth.sh $(CC) $(B)
 
-check-unit: $(B)/test_cmc $(B)/cmc check-purity
+check-unit: $(B)/test_cmc $(B)/cmc check-purity check-docs
 	CMC_BUILD=$(B) $(B)/test_cmc
 	test/toy_gate.sh $(B)/cmc
+
+# man pages lint clean and cover the API and every option; the guide's
+# model builds and behaves as the guide says (test/docs_gate.sh)
+check-docs: $(LIB)
+	CC=$(CC) test/docs_gate.sh $(B)
 
 check: check-unit check-calibration-fast
 
@@ -108,5 +118,21 @@ check-hc-bugs:
 
 check-all: check-unit check-msan check-calibration check-hc-bugs
 
+install: $(LIB)
+	mkdir -p $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \
+		$(DESTDIR)$(PREFIX)/share/man/man1 $(DESTDIR)$(PREFIX)/share/man/man3 \
+		$(DESTDIR)$(PREFIX)/share/man/man7
+	cp $(LIB) $(DESTDIR)$(PREFIX)/lib/
+	cp include/cmc.h $(DESTDIR)$(PREFIX)/include/
+	cp man/man1/cmc.1 $(DESTDIR)$(PREFIX)/share/man/man1/
+	cp man/man3/libcmc.3 $(DESTDIR)$(PREFIX)/share/man/man3/
+	cp man/man7/cmc.7 $(DESTDIR)$(PREFIX)/share/man/man7/
+
+# needs mandoc, ruby and bundler (nix develop has them)
+docs-site:
+	sh docs/gen_man_pages.sh
+	cd docs && bundle install --quiet && bundle exec jekyll build --destination _site
+
 clean:
-	rm -f $(B)/*.o $(B)/*.a $(B)/cmc $(B)/test_cmc $(B)/*.replay $(B)/probe/*
+	rm -f $(B)/*.o $(B)/*.a $(B)/cmc $(B)/test_cmc $(B)/quickstart $(B)/quickstart-bug \
+		$(B)/*.replay $(B)/probe/*

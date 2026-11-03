@@ -1,4 +1,11 @@
-# 11: Model checking the code that ships (implementation-level model checking)
+---
+title: "Survey and original design"
+parent: Background
+nav_order: 1
+permalink: /background/survey/
+lede: >-
+  The survey of implementation-level model checking that libcmc grew out of (historical).
+---
 
 > **Historical record**, copied from pg_chain (`~/ws/pg_chain`, `docs/research/11-implementation-model-checking.md`).  It was written while libcmc was `chainmc` in pg_chain's `test/mc/`.  The
 > names map as follows: `chainmc` is now `cmc`, `mc_`/`Mc`/`MC_` is now

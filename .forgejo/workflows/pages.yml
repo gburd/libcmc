@@ -1,0 +1,70 @@
+name: Deploy Codeberg Pages
+
+# Builds the documentation site (docs/, Jekyll, the man pages rendered by
+# mandoc), checks every link and anchor in it, and deploys it to Codeberg
+# Pages: https://gregburd.codeberg.page/libcmc/
+# .github/workflows/pages.yml publishes the same site to GitHub Pages.
+# Runs only when the documentation changes.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'man/**'
+      - 'include/cmc.h'
+      - '.forgejo/workflows/pages.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mandoc ruby-full ruby-bundler build-essential
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: Render the man pages
+        run: sh docs/gen_man_pages.sh
+
+      - name: Build the site
+        working-directory: docs
+        env:
+          JEKYLL_ENV: production
+          BUNDLE_PATH: vendor/bundle
+        run: |
+          bundle config set --local path vendor/bundle
+          bundle install
+          bundle exec jekyll build --destination _site
+
+      - name: Verify the site
+        working-directory: docs
+        run: |
+          test -s _site/index.html
+          grep -q 'libcmc' _site/index.html
+          test -s _site/reference/man/cmc.1/index.html
+          echo "site: $(find _site -name '*.html' | wc -l) pages"
+
+      - name: Check links and anchors (lychee)
+        working-directory: docs
+        env:
+          BUNDLE_PATH: vendor/bundle
+        run: |
+          bundle exec jekyll build --baseurl "" --destination _site_check
+          LYCHEE_VER=lychee-v0.24.2
+          curl -fsSL "https://github.com/lycheeverse/lychee/releases/download/${LYCHEE_VER}/lychee-x86_64-unknown-linux-gnu.tar.gz" |
+            tar xz --strip-components=1 lychee-x86_64-unknown-linux-gnu/lychee
+          ./lychee --config lychee.toml --no-progress \
+            --root-dir "$PWD/_site_check" '_site_check/**/*.html'
+
+      - name: Deploy to Codeberg Pages
+        uses: https://codeberg.org/git-pages/action@v2
+        with:
+          site: 'https://${{ forge.repository_owner }}.codeberg.page/libcmc/'
+          token: ${{ forge.token }}
+          source: docs/_site/

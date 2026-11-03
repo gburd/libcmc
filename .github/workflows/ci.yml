@@ -1,0 +1,80 @@
+name: CI
+
+# The gates in `make check` (engine tests, the toy bug gate, the purity
+# gate and its teeth, the docs gate, the fast calibration rows) under gcc
+# and clang, the MemorySanitizer gate, and the Nix build.  The full
+# calibration against TLC and the calibration's own planted bugs take
+# about 9 minutes and 7 GB, so they run weekly and on demand.
+#
+# .forgejo/workflows/ci.yml is the small Codeberg side of this.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: make check (${{ matrix.cc }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y mandoc ${{ matrix.cc }}
+      - name: make check
+        run: make CC=${{ matrix.cc }} check
+      - name: Install, then build the guide's model against the installed files
+        run: |
+          d="$RUNNER_TEMP/dest"
+          make CC=${{ matrix.cc }} install DESTDIR="$d" PREFIX=/usr
+          ${{ matrix.cc }} -std=c11 -I"$d/usr/include" docs/_includes/snippets/quickstart.c \
+            "$d/usr/lib/libcmc.a" -o "$RUNNER_TEMP/quickstart"
+          "$RUNNER_TEMP/quickstart" --model quickstart --all-props --crashes 1
+          MANPATH="$d/usr/share/man" man -w cmc libcmc
+
+  msan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      # MemorySanitizer needs the older mmap layout on 6.x kernels with
+      # high ASLR entropy, or it fails at startup.
+      - name: Lower ASLR entropy for MSan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+      - name: make check-msan
+        run: make check-msan
+
+  nix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: nix flake check (make check in the sandbox, gcc and clang)
+        run: nix flake check -L
+
+  calibration:
+    # The 22 calibration rows against TLC, and the planted bugs that must
+    # break them.  Weekly, and on demand.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check-calibration
+        run: make check-calibration
+      - name: make check-hc-bugs
+        run: make check-hc-bugs

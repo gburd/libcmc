@@ -1,1 +1,18 @@
 /build*/
+
+# direnv: .envrc is per-checkout (it loads the flake and local agent steering)
+.envrc
+.direnv/
+
+# nix build
+result
+result-*
+
+# documentation site: generated pages, build output, local bundle
+docs/reference/man/
+docs/_site/
+docs/_site_check/
+docs/.jekyll-cache/
+docs/.jekyll-metadata
+docs/.bundle/
+docs/vendor/

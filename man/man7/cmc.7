@@ -1,0 +1,214 @@
+.\" Copyright 2026 Greg Burd
+.\" SPDX-License-Identifier: Apache-2.0
+.Dd November 3, 2026
+.Dt CMC 7
+.Os
+.Sh NAME
+.Nm cmc
+.Nd the libcmc model: cores, worlds, the environment and its rules
+.Sh DESCRIPTION
+libcmc is an explicit-state model checker for protocol code written in
+C.
+A protocol's logic is written once, as pure step functions.
+The product calls them; the checker links the same object files and
+explores every interleaving of messages, timers, disk writes, client
+requests and crashes, up to a bound.
+The code checked is the code that runs.
+.Pp
+This page describes the model the engine explores.
+.Xr libcmc 3
+gives the interface, and
+.Xr cmc 1
+the command line.
+.Ss Cores and worlds
+A
+.Em core
+is a vtable over a fixed-size, pointer-free state per node.
+The engine treats that state as opaque bytes.
+A
+.Em world
+is every node's state followed by the environment the engine owns:
+.Bl -tag -width "persists" -compact
+.It node states
+The first
+.Va durable_size
+bytes of each are durable.
+.It header
+Remaining budgets; per node, the clients left, armed timers, pending
+wakes, pending persists and pending connection resets.
+.It network
+The messages in flight.
+.It persists
+Each node's pending disk writes, oldest first.
+.It replies
+The ghost log of client replies, in emission order.
+.El
+.Pp
+Every part is kept canonical, so two worlds are the same state exactly
+when their bytes are equal.
+The engine hashes the bytes into a 128-bit fingerprint and stores the
+fingerprints of the states it has seen.
+.Ss Where actions come from
+In a message-passing core, an action becomes possible only through
+something a core emitted, or through an environment budget.
+The engine never reads a core's state to decide what can happen next:
+.Bl -tag -width "CRASH(n, j)" -compact
+.It DELIVER
+A message is in flight (FIFO: only the head of its channel).
+.It DROP
+Drop budget is left.
+In FIFO mode a drop resets the connection.
+.It DUP
+Dup budget is left; bag mode only.
+.It FIRE(n, t)
+Node n armed timer t and has not cancelled it.
+.It FLUSH(n)
+Node n has a pending persist; the oldest completes first.
+.It WAKE(n, w)
+Node n emitted a wake of waiter w.
+.It CLIENT(n)
+Node n has client budget left.
+.It CRASH(n, j)
+Crash budget is left; the first j of the node's pending persists reach
+disk.
+.It RESET(n, p)
+A crash or a drop left node n a pending reset of its connection to p.
+.El
+.Pp
+An action is one call to the node's
+.Fn step
+with the matching event.
+The engine then queues the sends, arms or cancels the timers, queues the
+persists and wakes, and appends the replies.
+.Pp
+This rule is what separates libcmc from a simulator that consults the
+system under test: an oracle that reads a core's state to schedule it
+can hide exactly the bugs, such as lost wake-ups, that the check exists
+to find.
+Properties may read core state; the code that computes possible actions
+never calls them.
+.Ss Durability and crashes
+The engine owns the durable bytes.
+On FLUSH it applies the oldest pending record through the core's
+.Fn apply_persist ,
+then delivers
+.Dv CMC_EV_FLUSHED
+to
+.Fn step .
+.Fn step
+must leave the durable bytes unchanged on every event; the engine
+compares them before and after each call.
+.Pp
+CRASH(n, j) applies the first j pending records, zeroes the volatile
+bytes, the timers, the wakes and the remaining persists, empties every
+channel to and from n, marks a reset pending at each peer, and delivers
+.Dv CMC_EV_RESTART .
+Branching over j covers a write that reached disk before its completion
+was observed.
+.Ss Network
+.Bl -tag -width "fifo" -compact
+.It fifo
+The default: one ordered channel per pair of nodes, as with TCP.
+It never duplicates.
+.It bag
+An unordered multiset that may duplicate, for transports without order.
+It allows more behaviour than FIFO, so a counterexample found in bag
+mode may be spurious for a protocol that relies on FIFO order.
+.El
+.Ss Search
+Breadth-first search, the default, has the semantics of TLC run with
+one worker: a shortest counterexample, a depth that counts the initial
+state as 1, and exact counts of distinct and generated states.
+Depth-first search stops at a depth bound and reports a search that hit
+it as incomplete.
+Simulation runs seeded random walks.
+Replay runs a saved counterexample through the real cores.
+.Ss Calibration mode
+A TLA+ specification of shared registers has no messages.
+A core that ports one sets
+.Fn direct_actions :
+the world is then one state, and the possible actions are the
+specification's
+.Sy Next
+disjuncts, applied through
+.Dv CMC_EV_ACTION .
+Only calibration cores do this.
+The engine is calibrated this way against TLC on 22 configurations of a
+published consensus specification, and must give the same verdicts,
+counterexample depths and distinct-state counts.
+.Sh RULES
+These are the rules that keep a pass meaningful.
+A change to the engine that breaks one is a bug, whatever else it
+improves.
+.Bl -enum
+.It
+No omniscient oracle.
+Actions are enabled only by what a core emitted or by a budget.
+.It
+The world is the state.
+Everything that affects future behaviour lives in the world bytes, kept
+canonical, and nothing else does: not padding, not uninitialised bytes,
+not a global in the core.
+.It
+The engine owns durability.
+Only
+.Fn apply_persist
+changes durable bytes, and a crash may keep any prefix of the pending
+persists.
+.It
+Limits are errors.
+Going past a cap is reported as a violation, never truncated.
+.It
+TLC semantics.
+Breadth-first search gives shortest counterexamples and exact counts,
+and the calibration rows match TLC.
+.El
+.Sh GATES
+.Bl -tag -width "purity gate"
+.It Fl -det
+Runs every step twice from copies of the same state and compares the
+outputs and the next states: a non-deterministic core fails.
+.It purity gate
+.Pa scripts/purity_gate.sh
+inspects a core's object files and sources: no calls but
+.Fn mem* ,
+no writable or thread-local data, no clock, randomness, system-call or
+CPU-identification instructions, no
+.Ql asm ,
+and no direct writes to
+.Fa out->o .
+.Pa scripts/purity_teeth.sh
+checks that the gate rejects a probe for each of these.
+.It MemorySanitizer
+Uninitialised reads, which
+.Fl -det
+cannot see.
+.It planted bugs
+Each
+.Ql #if
+bug site in a core's shipped source must be caught, with the expected
+property, by search, by simulation and by replay.
+.It calibration
+The engine itself, against TLC.
+.El
+.Sh LIMITS
+At most 8 nodes, 32 bytes per message or persist record, 16 effects per
+step, 2048 possible actions per state, 16 timers and 8 waiters per node,
+256 bytes of core settings, and 255 for each budget and cap.
+.Sh SEE ALSO
+.Xr cmc 1 ,
+.Xr libcmc 3
+.Pp
+.Pa docs/DESIGN.md
+and
+.Pa docs/WHY.md
+in the source tree, and the guide at
+.Lk https://gregburd.codeberg.page/libcmc/
+.Sh HISTORY
+libcmc was written for pg_chain, a PostgreSQL extension whose
+replication protocol cores it checks, and extracted into its own project
+on November 3, 2026.
+Its design follows CMC (Musuvathi et al., OSDI 2002) and Stateright,
+and takes bounded liveness from MaceMC.
+.Sh AUTHORS
+.An Greg Burd Aq Mt greg@burd.me

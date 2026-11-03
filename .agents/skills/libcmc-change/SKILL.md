@@ -33,8 +33,10 @@ description: >
    `make check-calibration` (about 9 min) and `make check-hc-bugs`.  If you
    touched memory handling, run `make check-msan`.  Done = every gate green,
    and the calibration table says "every row matches TLC".
-5. **Record.**  An API change goes in `CHANGELOG.md`.  A design change
-   goes in `docs/DESIGN.md`.  A new measurement goes in
+5. **Record.**  An API change goes in `CHANGELOG.md` and
+   `man/man3/libcmc.3`; a new option in `man/man1/cmc.1`
+   (`make check-docs` fails until it is there).  A design change goes in
+   `docs/DESIGN.md`, and in `man/man7/cmc.7` if it changes the model.  A new measurement goes in
    `docs/measurements/YYYY-MM-DD-<topic>.md`, with its raw output beside
    it.
 

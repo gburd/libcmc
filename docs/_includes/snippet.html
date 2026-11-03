@@ -1,0 +1,28 @@
+{%- comment -%}
+  Show a tested source file, or one region of it, from docs/_includes/snippets/.
+
+    {% include snippet.html file="quickstart.c" region="step" %}
+
+  A region is the lines between  /* !region NAME */  and
+  /* !endregion NAME */ .  Without a region the whole file is shown.
+  test/docs_gate.sh builds and runs every snippet the guide uses, so
+  what this shows is code that compiles and does what the page says.
+{%- endcomment -%}
+{%- assign _f = include.file -%}
+{%- assign _region = include.region | default: "full" -%}
+{%- capture _raw -%}{%- include snippets/{{ _f }} -%}{%- endcapture -%}
+{%- assign _begin = "/* !region " | append: _region | append: " */" -%}
+{%- assign _end = "/* !endregion " | append: _region | append: " */" -%}
+{%- if _raw contains _begin -%}
+  {%- assign _after = _raw | split: _begin | last -%}
+  {%- assign _body = _after | split: _end | first -%}
+{%- else -%}
+  {%- assign _body = _raw -%}
+{%- endif -%}
+{%- assign _lines = _body | split: "
+" -%}
+```c
+{% for _l in _lines %}{% unless _l contains "!region" or _l contains "!endregion" %}{{ _l }}
+{% endunless %}{% endfor %}```
+
+[Tested source: `docs/_includes/snippets/{{ _f }}`](https://codeberg.org/gregburd/libcmc/src/branch/main/docs/_includes/snippets/{{ _f }}){: .fs-2 }

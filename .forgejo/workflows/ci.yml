@@ -1,0 +1,31 @@
+name: CI
+
+# One small job: `make check` with gcc (about 35 s on 2 CPUs, 1 GB of RAM).
+# Codeberg's hosted runners are shared and asked to be used sparingly
+# (https://codeberg.org/actions/meta), so the clang, MemorySanitizer, Nix
+# and full-calibration jobs run on the GitHub mirror
+# (.github/workflows/ci.yml), which Codeberg pushes to on every commit.
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - 'docs/_config.yml'
+      - 'docs/_layouts/**'
+      - 'docs/_sass/**'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    steps:
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make mandoc
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+      - name: make check
+        run: make check

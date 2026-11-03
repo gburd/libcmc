@@ -60,6 +60,33 @@ limit is "no violation found in N states", never "passes".
   and commits.  Add files by name, never with `git add -A`.
 - Build trees (`build*/`) are gitignored.  Agent notes go in `.agent/`,
   which is local and never committed.
-- Users: pg_chain (`~/ws/pg_chain`) vendors this tree under `test/mc/`
-  or links `libcmc.a`.  A change to `include/cmc.h` is an API change:
-  note it in `CHANGELOG.md`.
+- Users: pg_chain (`~/ws/pg_chain`) links `libcmc.a`.  A change to
+  `include/cmc.h` is an API change: note it in `CHANGELOG.md`, and
+  update `man/man3/libcmc.3`.
+
+## Documentation
+
+- The man pages (`man/`, mdoc) are the reference: `cmc(1)` for every
+  `cmc_main()` option, `libcmc(3)` for every function and macro in
+  `cmc.h`, `cmc(7)` for the model and its rules.  `make check-docs`
+  (part of `make check`) lints them with mandoc and fails on an option,
+  function or property macro they do not mention.
+- The site (`docs/`, Jekyll with just-the-docs) is published to GitHub
+  Pages and Codeberg Pages by `.github/workflows/pages.yml` and
+  `.forgejo/workflows/pages.yml`.  Every page passes a link and anchor
+  check before it deploys.
+- Code shown in the guide is a region of a file under
+  `docs/_includes/snippets/`, which `make check-docs` builds, runs, and
+  checks against what the guide says.  Never paste code into a page that
+  no snippet backs; a snippet must not contain `{{` or `{%` (Liquid).
+
+## CI
+
+- GitHub Actions carries the CI: `make check` with gcc and clang, the
+  MemorySanitizer gate, `nix flake check`, and weekly the full
+  calibration with its planted bugs.
+- Codeberg runs one `make check` job on `codeberg-small` and the Pages
+  deploy.  Its hosted runners are shared and asked to be used sparingly
+  (<https://codeberg.org/actions/meta>); Codeberg turned Actions off on
+  another of these projects for running too many pipelines.  Do not add
+  jobs or matrices there, and batch fixes into few pushes.

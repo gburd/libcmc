@@ -1,0 +1,304 @@
+.\" Copyright 2026 Greg Burd
+.\" SPDX-License-Identifier: Apache-2.0
+.Dd November 3, 2026
+.Dt CMC 1
+.Os
+.Sh NAME
+.Nm cmc
+.Nd explicit-state model checker for C protocol cores
+.Sh SYNOPSIS
+.Nm
+.Fl -model Ar name
+.Op Fl -tlc-cfg Ar file | Fl -cfg Ar key Ns = Ns Ar value Ns Op , Ns ...
+.Op Fl -inv Ar name Ns Op , Ns ...
+.Op Fl -prop Ar name Ns Op , Ns ...
+.Op Fl -all-props
+.Op Fl -bfs | Fl -dfs Ar depth | Fl -simulate
+.Op Fl -seed Ar n
+.Op Fl -walks Ar k
+.Op Fl -depth Ar d
+.Op Fl -det
+.Op Fl -max-states Ar n
+.Op Fl -time Ar seconds
+.Op Fl -trace-out Ar file
+.Op Fl -progress Ar seconds
+.Op Fl -quiet
+.Op Fl -coverage
+.Op Fl -clients Ar n
+.Op Fl -drops Ar n
+.Op Fl -dups Ar n
+.Op Fl -crashes Ar n
+.Op Fl -net-cap Ar n
+.Op Fl -persist-cap Ar n
+.Op Fl -reply-cap Ar n
+.Op Fl -net Cm fifo | bag
+.Op Fl -live-steps Ar k
+.Nm
+.Fl -replay Ar file
+.Op Fl -inv Ar names | Fl -all-props
+.Nm
+.Fl -model Ar name
+.Fl -list
+.Sh DESCRIPTION
+.Nm
+explores every interleaving of a set of protocol nodes, the network
+between them, their timers, their disk writes and their crashes, up to
+the budgets given on the command line, and checks the named properties
+in every state it reaches.
+The nodes run the C step functions that the product itself links; see
+.Xr cmc 7
+for the model and
+.Xr libcmc 3
+for the interface a core implements.
+.Pp
+There is no single
+.Nm
+binary.
+A program that uses libcmc writes a
+.Fn main
+that passes its table of models to
+.Fn cmc_main ,
+and links against
+.Pa libcmc.a ;
+that program is its
+.Nm .
+The binary built by this repository,
+.Pa build/cmc ,
+carries the models
+.Cm hc
+(the calibration core),
+.Cm toy ,
+and
+.Cm toy-bug1
+to
+.Cm toy-bug3 .
+.Pp
+Output follows the wording of TLC, the TLA+ model checker, so the two can
+be compared line by line.
+Depth counts the initial state as 1.
+.Ss Choosing the model and properties
+.Bl -tag -width Ds
+.It Fl -model Ar name
+The model to check, by its name in the program's model table.
+Required, except with
+.Fl -replay .
+.It Fl -cfg Ar key Ns = Ns Ar value Ns Op , Ns ...
+Core settings, passed to the core's
+.Fn cfg_set .
+May be given more than once; later settings override earlier ones,
+including those read by
+.Fl -tlc-cfg .
+.It Fl -tlc-cfg Ar file
+Read a TLC
+.Pa .cfg
+file: its
+.Sy CONSTANTS
+become core settings, and its
+.Sy INVARIANTS
+and
+.Sy PROPERTIES
+become the properties to check.
+.It Fl -inv Ar name Ns Op , Ns ... , Fl -prop Ar name Ns Op , Ns ...
+Check these properties.
+The two options are synonyms; each property's kind comes from the model.
+.It Fl -all-props
+Check every property of the model.
+.It Fl -list
+Print the model's property names and exit.
+.El
+.Pp
+A model may mark its first properties as always checked.
+At least one property must be named, or
+.Fl -all-props
+given.
+.Ss Choosing the search
+.Bl -tag -width Ds
+.It Fl -bfs
+Breadth-first search, the default.
+It finds a shortest counterexample, and its state counts are exact.
+.It Fl -dfs Ar depth
+Depth-first search to
+.Ar depth
+states.
+A search that reaches the bound without finishing is reported as
+incomplete, never as a pass.
+.It Fl -simulate
+Seeded random walks, not exhaustive.
+Walk
+.Va i
+uses seed
+.Ar n Ns + Ns Va i ;
+a violation is reported with the
+.Fl -seed
+and
+.Fl -walks Cm 1
+that reproduce it.
+.It Fl -seed Ar n
+First seed for
+.Fl -simulate .
+Default 0.
+.It Fl -walks Ar k
+Number of walks for
+.Fl -simulate .
+Default 1000.
+.It Fl -depth Ar d
+Length of each walk, in states.
+Default 100.
+.It Fl -replay Ar file
+Run a replay file written by
+.Fl -trace-out
+through the real cores, printing each state.
+The model, settings and budgets are taken from the file; an option on
+the command line that conflicts with the file is refused.
+.It Fl -det
+Determinism gate: run every step twice from copies of the same state and
+fail if the two runs differ in their outputs or their next state.
+.It Fl -max-states Ar n
+Stop after
+.Ar n
+distinct states.
+.It Fl -time Ar seconds
+Stop after
+.Ar seconds
+of wall time.
+.El
+.Ss Choosing the environment
+These options apply to message-passing cores (actor mode).
+Each budget is a count over the whole run, from 0 to 255.
+.Bl -tag -width Ds
+.It Fl -clients Ar n
+Client requests each node may receive.
+Default 1.
+.It Fl -drops Ar n
+Messages the network may lose.
+With
+.Fl -net Cm fifo ,
+a drop resets the connection and both ends are told.
+Default 0.
+.It Fl -dups Ar n
+Messages the network may duplicate.
+Needs
+.Fl -net Cm bag .
+Default 0.
+.It Fl -crashes Ar n
+Crashes, of any node.
+A crash keeps any prefix of the node's pending disk writes, loses the
+rest and the volatile state, resets its connections and restarts it.
+Default 0.
+.It Fl -net-cap Ar n
+Messages in flight at once.
+Default 8.
+.It Fl -persist-cap Ar n
+Pending disk writes per node.
+Default 2.
+.It Fl -reply-cap Ar n
+Client replies recorded in the ghost log.
+Default 8.
+.It Fl -net Cm fifo | bag
+.Cm fifo ,
+the default, has one ordered channel per pair of nodes, as TCP does, and
+never duplicates.
+.Cm bag
+is an unordered multiset that may duplicate.
+.It Fl -live-steps Ar k
+Bound, in steps of the fair schedule, for eventually-properties.
+Default 1000.
+.El
+.Pp
+Going past a cap is reported as an engine error, never silently
+truncated.
+.Ss Output
+.Bl -tag -width Ds
+.It Fl -trace-out Ar file
+On a violation, write the counterexample as a replay file.
+.It Fl -progress Ar seconds
+Print a progress line every
+.Ar seconds
+during breadth-first search; 0 turns it off.
+Default 60.
+.It Fl -quiet
+Do not print the counterexample.
+.It Fl -coverage
+Print, for each action kind, the states it generated and the new
+distinct states it found.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa *.replay
+Replay files.
+A header names the model, settings and budgets; each following
+.Ql act
+line is one action in hexadecimal, with its description as a comment.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+No property was violated, and the search was complete for its mode:
+breadth-first or depth-first search finished, the walks ran, or the
+replay ended.
+.It 1
+A property was violated, an engine rule was broken (determinism,
+durability, a cap), or a witness was never reached.
+.It 2
+Incomplete: a state, time or depth limit stopped the search before it
+finished, with no violation found.
+.It 3
+Usage error, a bad setting, or a replay file that cannot be run.
+.El
+.Sh EXAMPLES
+Check every property of the toy lock server:
+.Bd -literal -offset indent
+$ build/cmc --model toy --all-props
+\&...
+Model checking completed. No error has been found.
+\&...
+49 states generated, 34 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 11.
+.Ed
+.Pp
+Find the planted bug in
+.Cm toy-bug1 ,
+save the counterexample, and replay it:
+.Bd -literal -offset indent
+$ build/cmc --model toy-bug1 --inv Mutex --trace-out bug1.replay
+Error: Invariant Mutex is violated.
+  2 clients in the critical section
+\&...
+$ build/cmc --replay bug1.replay --inv Mutex
+.Ed
+.Pp
+Check a calibration configuration against its TLC result:
+.Bd -literal -offset indent
+$ build/cmc --model hc \e
+    --tlc-cfg calib/hc/cfg/hc_paper_cp_n3_s1.cfg --det
+.Ed
+.Pp
+Search a large space by random walks first:
+.Bd -literal -offset indent
+$ ./mycmc --model mymodel --all-props --crashes 1 --drops 1 \e
+    --simulate --seed 7 --walks 100000 --depth 60
+.Ed
+.Sh SEE ALSO
+.Xr libcmc 3 ,
+.Xr cmc 7
+.Pp
+The guide and design notes:
+.Lk https://gregburd.codeberg.page/libcmc/
+.Sh AUTHORS
+.An Greg Burd Aq Mt greg@burd.me
+.Sh CAVEATS
+A pass covers only the budgets given.
+Raise
+.Fl -clients ,
+.Fl -drops
+and
+.Fl -crashes
+until the bugs you planted are caught, and treat a run stopped by
+.Fl -max-states
+or
+.Fl -time
+as "no violation found in N states".
+.Pp
+.Fl -net Cm bag
+allows behaviour a FIFO transport never shows, so a counterexample found
+in bag mode may be spurious for a protocol that relies on FIFO order.

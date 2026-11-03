@@ -1,0 +1,25 @@
+# lychee link-checker configuration for the libcmc docs site.  The Pages
+# workflows build the site with an empty baseurl and check every link and
+# anchor in the generated HTML: internal ones (file://, so do not set
+# `scheme`, which would skip them) and external ones.
+
+accept = [200, 206, 429]
+include_fragments = "full"
+timeout = 20
+max_retries = 2
+retry_wait_time = 2
+
+exclude = [
+    "^https?://localhost",
+    "^https?://127\\.0\\.0\\.1",
+    # the site itself (cited by the man pages): this run checks it locally
+    "^https://gregburd\\.codeberg\\.page/libcmc",
+    "^https://gburd\\.github\\.io/libcmc",
+    # line-range anchors into the forge's source view are not fetchable
+    "codeberg\\.org/.*/src/branch/main/.*#",
+    "github\\.com/.*/blob/.*#",
+    # these hosts refuse or rate-limit CI scrapers
+    "^https://(www\\.)?usenix\\.org",
+    "^https://dl\\.acm\\.org",
+    "^https://doi\\.org",
+]

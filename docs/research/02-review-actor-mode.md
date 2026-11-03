@@ -1,4 +1,11 @@
-# 12. Adversarial review of `chainmc` (eb0db74)
+---
+title: "Adversarial review of actor mode"
+parent: Background
+nav_order: 2
+permalink: /background/review/
+lede: >-
+  Five ways a real bug could pass, found by review, each now a regression test (historical).
+---
 
 > **Historical record**, copied from pg_chain (`~/ws/pg_chain`, `docs/research/12-chainmc-review.md`).  It was written while libcmc was `chainmc` in pg_chain's `test/mc/`.  The
 > names map as follows: `chainmc` is now `cmc`, `mc_`/`Mc`/`MC_` is now

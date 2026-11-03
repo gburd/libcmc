@@ -1,0 +1,81 @@
+name: Docs
+
+# Builds the documentation site (docs/, Jekyll with just-the-docs, the man
+# pages rendered by mandoc), checks every link and anchor in it, and
+# deploys it to GitHub Pages: https://gburd.github.io/libcmc/
+# .forgejo/workflows/pages.yml publishes the same site to Codeberg Pages.
+#
+# Needs Pages enabled in the repository settings with "GitHub Actions" as
+# the source.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'man/**'
+      - 'include/cmc.h'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mandoc
+        run: sudo apt-get update && sudo apt-get install -y mandoc
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          working-directory: docs
+          bundler-cache: true
+      - name: Render the man pages
+        run: sh docs/gen_man_pages.sh
+      - name: Build the site
+        working-directory: docs
+        env:
+          JEKYLL_ENV: production
+        run: bundle exec jekyll build --destination _site
+      - name: Verify the site
+        working-directory: docs
+        run: |
+          test -s _site/index.html
+          grep -q 'libcmc' _site/index.html
+          test -s _site/reference/man/cmc.1/index.html
+          echo "site: $(find _site -name '*.html' | wc -l) pages"
+      - name: Build a copy with an empty baseurl for the link check
+        working-directory: docs
+        run: bundle exec jekyll build --baseurl "" --destination _site_check
+      - name: Check links and anchors
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: >-
+            --config docs/lychee.toml
+            --no-progress
+            --root-dir ${{ github.workspace }}/docs/_site_check
+            'docs/_site_check/**/*.html'
+          fail: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

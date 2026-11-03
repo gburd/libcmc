@@ -1,0 +1,511 @@
+.\" Copyright 2026 Greg Burd
+.\" SPDX-License-Identifier: Apache-2.0
+.Dd November 3, 2026
+.Dt LIBCMC 3
+.Os
+.Sh NAME
+.Nm libcmc ,
+.Nm cmc_main ,
+.Nm cmc_options_default ,
+.Nm cmc_run_new ,
+.Nm cmc_check ,
+.Nm cmc_result_free ,
+.Nm cmc_run_free ,
+.Nm cmc_world_size ,
+.Nm cmc_print_trace ,
+.Nm cmc_write_replay ,
+.Nm cmc_describe_action ,
+.Nm cmc_out_push ,
+.Nm cmc_cfg ,
+.Nm cmc_nnodes ,
+.Nm cmc_node ,
+.Nm cmc_nreplies ,
+.Nm cmc_reply ,
+.Nm cmc_requests ,
+.Nm cmc_why ,
+.Nm cmc_world_init ,
+.Nm cmc_enabled ,
+.Nm cmc_apply ,
+.Nm cmc_fingerprint
+.Nd model-check C protocol cores
+.Sh LIBRARY
+.Pa libcmc.a
+.Sh SYNOPSIS
+.In cmc.h
+.Ss Running the checker
+.Ft int
+.Fn cmc_main "int argc" "char **argv" "const CmcModelEntry *models" "size_t nmodels"
+.Ft void
+.Fn cmc_options_default "CmcOptions *o"
+.Ft "CmcRun *"
+.Fn cmc_run_new "const CmcModel *m" "const char *cfg" "const char *const *props" "const CmcOptions *o" "char *err" "size_t errlen"
+.Ft void
+.Fn cmc_check "CmcRun *r" "CmcResult *res"
+.Ft void
+.Fn cmc_result_free "CmcResult *res"
+.Ft void
+.Fn cmc_run_free "CmcRun *r"
+.Ft size_t
+.Fn cmc_world_size "const CmcRun *r"
+.Ft void
+.Fn cmc_print_trace "CmcRun *r" "const CmcAction *acts" "int n" "FILE *f"
+.Ft int
+.Fn cmc_write_replay "CmcRun *r" "const char *path" "const CmcAction *acts" "int n"
+.Ft void
+.Fn cmc_describe_action "CmcRun *r" "CmcAction a" "FILE *f"
+.Ss Writing a core
+.Ft "CmcOutput *"
+.Fn cmc_out_push "CmcOut *out" "uint8_t kind"
+.Ss Writing properties
+.Fn CMC_INVARIANT name fn
+.Fn CMC_ACTION_PROPERTY name fn
+.Fn CMC_WITNESS_PROP name fn
+.Fn CMC_QUIESCENT_PROP name fn
+.Fn CMC_EVENTUALLY_PROP name fn
+.Ft "const void *"
+.Fn cmc_cfg "const CmcWorld *w"
+.Ft int
+.Fn cmc_nnodes "const CmcWorld *w"
+.Ft "const void *"
+.Fn cmc_node "const CmcWorld *w" "int node"
+.Ft int
+.Fn cmc_nreplies "const CmcWorld *w"
+.Ft void
+.Fn cmc_reply "const CmcWorld *w" "int i" "int *node" "uint32_t *arg"
+.Ft int
+.Fn cmc_requests "const CmcWorld *w" "int node"
+.Ft void
+.Fn cmc_why "CmcWhy *why" "const char *fmt" "..."
+.Ss Lower level
+.Ft void
+.Fn cmc_world_init "CmcRun *r" "uint8_t *w"
+.Ft int
+.Fn cmc_enabled "CmcRun *r" "const uint8_t *w" "CmcAction *acts" "int max"
+.Ft int
+.Fn cmc_apply "CmcRun *r" "uint8_t *w" "CmcAction a"
+.Ft void
+.Fn cmc_fingerprint "const uint8_t *p" "size_t n" "uint64_t fp[2]"
+.Sh DESCRIPTION
+libcmc checks protocol logic written as pure C step functions.
+The product calls those functions to run the protocol; libcmc links the
+same object files and explores every order in which messages, timers,
+disk writes, client requests and crashes can reach them.
+.Xr cmc 7
+describes the model, and
+.Xr cmc 1
+the command line.
+.Pp
+A program supplies three things:
+.Bl -enum -compact
+.It
+A
+.Vt CmcCore :
+the step code and the size of a node's state.
+.It
+A
+.Vt CmcModel :
+a core plus the properties to check against it.
+.It
+A
+.Fn main
+that calls
+.Fn cmc_main ,
+or that drives
+.Fn cmc_run_new
+and
+.Fn cmc_check
+itself.
+.El
+.Ss The core
+.Bd -literal
+typedef struct CmcCore {
+	const char *name;
+	size_t	state_size;	/* bytes per node */
+	size_t	durable_size;	/* leading bytes that survive a crash */
+	size_t	cfg_size;	/* at most 256 */
+	void	(*cfg_default)(void *cfg);
+	int	(*cfg_set)(void *cfg, const char *key, const char *val);
+	int	(*nnodes)(const void *cfg);
+	void	(*init)(const void *cfg, int node, void *state);
+	void	(*step)(const void *cfg, int node, void *state,
+		    const CmcEvent *ev, CmcOut *out);
+	void	(*apply_persist)(const void *cfg, int node, void *durable,
+		    const uint8_t *body, uint16_t len);
+	void	(*describe)(const void *cfg, int node, const void *state,
+		    FILE *f);			/* optional */
+	void	(*describe_msg)(const void *cfg, const uint8_t *body,
+		    FILE *f);			/* optional */
+	int	(*direct_actions)(const void *cfg, const void *state,
+		    CmcAction *acts, int max);	/* calibration only */
+	void	(*describe_action)(const void *cfg, CmcAction a,
+		    FILE *f);			/* calibration only */
+	int	(*clients)(const void *cfg, int node);	/* optional */
+} CmcCore;
+.Ed
+.Pp
+A node's state is
+.Fa state_size
+bytes, fixed, with no pointers.
+The engine copies, compares and hashes it as bytes, so the core keeps
+it canonical: padding and unused slots zeroed, sets sorted.
+.Pp
+.Fn cfg_default
+fills the core's settings;
+.Fn cfg_set
+applies one
+.Ar key Ns = Ns Ar value
+and returns 0, or \-1 to reject it.
+.Fn nnodes
+returns the number of nodes, 1 to
+.Dv CMC_MAX_NODES
+(8).
+.Fn init
+sets a node's initial state.
+.Pp
+.Fn step
+handles one event at one node.
+It must be total and deterministic, and may read only its arguments: no
+clock, randomness, globals, I/O or allocation.
+It changes the state in place and emits effects with
+.Fn cmc_out_push .
+It must not change the first
+.Fa durable_size
+bytes; only
+.Fn apply_persist ,
+which the engine calls when a persist reaches disk, may change them.
+A core with a non-zero
+.Fa durable_size
+must supply
+.Fn apply_persist .
+.Pp
+.Fn clients ,
+if set, says which nodes take client requests; it reads the settings,
+never the state.
+.Fn describe
+and
+.Fn describe_msg
+print states and message bodies in traces.
+.Fn direct_actions
+and
+.Fn describe_action
+exist for calibration cores that port a shared-memory TLA+ specification
+.Pq Xr cmc 7 ;
+a message-passing core leaves them
+.Dv NULL .
+.Ss Events and effects
+.Fn step
+receives a
+.Vt CmcEvent :
+.Bd -literal
+typedef struct CmcEvent {
+	uint8_t	kind;		/* CmcEventKind */
+	uint8_t	src;		/* RECV, CONN_RESET: the peer */
+	uint16_t len;		/* RECV, FLUSHED: bytes in body */
+	uint32_t arg;		/* TIMER, WAKE: the id; CLIENT: request number */
+	CmcAction action;	/* ACTION (calibration only) */
+	const uint8_t *body;	/* RECV: the message; FLUSHED: the record */
+} CmcEvent;
+.Ed
+.Pp
+.Bl -tag -width CMC_EV_CONN_RESET -compact
+.It Dv CMC_EV_RECV
+A message from
+.Fa src .
+.It Dv CMC_EV_TIMER
+Timer
+.Fa arg
+fired.
+.It Dv CMC_EV_FLUSHED
+The persist record in
+.Fa body
+is now durable.
+.It Dv CMC_EV_WAKE
+Waiter
+.Fa arg
+was woken.
+.It Dv CMC_EV_CLIENT
+A client request,
+.Fa arg
+counting from 0 at this node.
+.It Dv CMC_EV_RESTART
+The node crashed: its volatile bytes are zeroed and it is starting
+again.
+.It Dv CMC_EV_CONN_RESET
+The connection to
+.Fa src
+was reset, and the messages on it are gone.
+.It Dv CMC_EV_ACTION
+Calibration cores only.
+.El
+.Pp
+.Fn cmc_out_push
+appends an effect of the given kind to
+.Fa out ,
+zeroes it and returns it for the core to fill in.
+.Bl -tag -width CMC_OUT_CANCEL_TIMER -compact
+.It Dv CMC_OUT_SEND
+Send
+.Fa body
+.Pq Fa len No bytes, at most Dv CMC_MSG_MAX , No 32
+to
+.Fa dst .
+.It Dv CMC_OUT_SET_TIMER
+Arm timer
+.Fa arg ,
+0 to 15.
+.It Dv CMC_OUT_CANCEL_TIMER
+Disarm timer
+.Fa arg .
+.It Dv CMC_OUT_PERSIST
+Queue
+.Fa body
+as a disk write.
+.It Dv CMC_OUT_WAKE
+Queue a wake of waiter
+.Fa arg ,
+0 to 7.
+.It Dv CMC_OUT_REPLY
+Answer a client with
+.Fa arg .
+The engine appends the reply to the ghost log that properties read.
+.El
+.Pp
+A core never writes
+.Fa out->o
+directly; the purity gate rejects source that does.
+Past
+.Dv CMC_OUT_MAX
+(16) effects in one step,
+.Fn cmc_out_push
+returns a scratch entry and the engine reports the overflow as a
+violation.
+.Ss Properties
+A property is a
+.Vt CmcProp ,
+made with one of the macros below from a name and a function.
+State properties have the type
+.Bd -literal -offset indent
+bool fn(const CmcWorld *w, CmcWhy *why);
+.Ed
+.Pp
+and action properties
+.Bd -literal -offset indent
+bool fn(const CmcWorld *pre, CmcAction a, const CmcWorld *post,
+    CmcWhy *why);
+.Ed
+.Pp
+.Bl -tag -width CMC_ACTION_PROPERTY -compact
+.It Fn CMC_INVARIANT
+Holds in every reachable state.
+.It Fn CMC_ACTION_PROPERTY
+Holds on every transition, including those to states already seen.
+.It Fn CMC_WITNESS_PROP
+Holds in some reachable state.
+A witness never reached fails the run: it means the other properties
+may hold only because the interesting states were never reached.
+.It Fn CMC_QUIESCENT_PROP
+Holds in every state where nothing can happen, or where the only
+possible actions are timers that fire and change nothing.
+.It Fn CMC_EVENTUALLY_PROP
+Bounded liveness: from every reachable state, the fair schedule (no
+faults, no new clients) reaches a state where it holds within
+.Va live_steps
+steps.
+.El
+.Pp
+A property returns
+.Dv false
+to report a violation, and may explain it with
+.Fn cmc_why ,
+which formats like
+.Xr printf 3 .
+.Pp
+Properties read the world through accessors.
+.Fn cmc_node
+returns node
+.Fa node Ns 's
+state and
+.Fn cmc_cfg
+the core's settings.
+.Fn cmc_nreplies
+and
+.Fn cmc_reply
+read the ghost log of client replies, in the order they were emitted.
+.Fn cmc_requests
+returns the number of client requests delivered to a node, counted by
+the environment rather than by the core.
+Properties may read core state; the engine never calls them to decide
+which actions are possible.
+.Ss The model
+.Bd -literal
+typedef struct CmcModel {
+	const char *name;
+	const CmcCore *core;
+	const CmcProp *props;
+	int	nprops;
+	int	nalways;	/* the first nalways props are always checked */
+} CmcModel;
+
+typedef struct CmcModelEntry {
+	const char *name;	/* the --model name */
+	const CmcModel *m;
+} CmcModelEntry;
+.Ed
+.Ss Running a check
+.Fn cmc_main
+parses the command line described in
+.Xr cmc 1 ,
+runs the check, prints TLC-style output, and returns the verdict, which
+the caller returns from
+.Fn main .
+.Pp
+To drive the engine directly, fill a
+.Vt CmcOptions
+with
+.Fn cmc_options_default ,
+change what is needed, and call
+.Fn cmc_run_new
+with the model, a settings string
+.Ql key=value,...
+and a
+.Dv NULL Ns -terminated
+list of property names, or
+.Dv NULL
+for all of them.
+On failure it returns
+.Dv NULL
+and writes the reason to
+.Fa err .
+.Pp
+.Fn cmc_check
+runs the search and fills
+.Fa res .
+On a violation,
+.Fa res->prop
+names the property
+.Po
+.Ql cmc:engine
+for a broken engine rule
+.Pc ,
+.Fa res->why
+explains it, and
+.Fa res->trace
+holds the
+.Fa res->trace_len No \- 1
+actions from the initial state.
+.Fn cmc_print_trace
+prints them state by state, and
+.Fn cmc_write_replay
+saves them in the format
+.Fl -replay
+reads.
+.Fn cmc_result_free
+frees the trace;
+.Fn cmc_run_free
+frees the run.
+.Pp
+.Fn cmc_world_size
+returns the bytes in one world: every node's state plus the environment.
+.Fn cmc_describe_action
+prints one action.
+.Ss Lower level
+.Fn cmc_world_init
+writes the initial world into
+.Fa w ,
+which holds
+.Fn cmc_world_size
+bytes.
+.Fn cmc_enabled
+lists the actions possible in
+.Fa w
+and returns their number, or \-1 if there are more than
+.Fa max .
+.Fn cmc_apply
+applies one action in place.
+.Fn cmc_fingerprint
+is the 128-bit hash the visited-state table uses.
+These exist for the engine's own tests.
+.Sh RETURN VALUES
+.Fn cmc_main
+returns a
+.Vt CmcVerdict :
+.Dv CMC_PASS
+(0),
+.Dv CMC_VIOLATION
+(1),
+.Dv CMC_INCOMPLETE
+(2) or
+.Dv CMC_ERROR
+(3), the exit statuses listed in
+.Xr cmc 1 .
+.Pp
+.Fn cmc_run_new
+returns
+.Dv NULL
+on a bad setting, an unknown property, a bound out of range, a
+durable part without
+.Fn apply_persist ,
+or a duplicating FIFO network.
+.Fn cmc_apply
+returns 0, or \-1 if the action is not possible or a core broke an
+engine rule.
+.Fn cmc_write_replay
+returns 0, or \-1 if the file cannot be written.
+.Sh EXAMPLES
+A complete model, with the core, two properties and
+.Fn main ,
+is in
+.Pa docs/_includes/snippets/quickstart.c
+in the source tree.
+The skeleton:
+.Bd -literal
+#include "cmc.h"
+
+static const CmcCore my_core = {
+	.name = "mine",
+	.state_size = sizeof(MyState),
+	.durable_size = offsetof(MyState, first_volatile),
+	.cfg_default = my_cfg_default,
+	.cfg_set = my_cfg_set,
+	.nnodes = my_nnodes,
+	.init = my_init,
+	.step = my_step,
+	.apply_persist = my_apply_persist,
+};
+
+static const CmcProp my_props[] = {
+	CMC_INVARIANT(NoLostAck, no_lost_ack),
+	CMC_WITNESS_PROP(Acked, acked),
+};
+
+static const CmcModel my_model = {
+	.name = "mine", .core = &my_core,
+	.props = my_props, .nprops = 2,
+};
+
+int
+main(int argc, char **argv)
+{
+	static const CmcModelEntry models[] = {
+		{"mine", &my_model},
+	};
+
+	return cmc_main(argc, argv, models, 1);
+}
+.Ed
+.Pp
+Build it against the library:
+.Bd -literal -offset indent
+cc -std=c11 -Ilibcmc/include mine.c mine_core.o \e
+    libcmc/build/libcmc.a -o mycmc
+.Ed
+.Sh SEE ALSO
+.Xr cmc 1 ,
+.Xr cmc 7
+.Sh STANDARDS
+The library is C11 and uses only libc.
+.Sh AUTHORS
+.An Greg Burd Aq Mt greg@burd.me
+.Sh BUGS
+The library is single-threaded and has no symmetry reduction; the
+visited set and the search queue live in memory.

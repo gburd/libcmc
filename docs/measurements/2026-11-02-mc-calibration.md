@@ -1,4 +1,11 @@
-# 2026-11-02: chainmc calibration against TLC (HummingConsensus)
+---
+title: "Calibration against TLC"
+parent: Background
+nav_order: 3
+permalink: /background/calibration/
+lede: >-
+  22 configurations of HummingConsensus: verdicts, depths and exact state counts against TLC.
+---
 
 > **Historical record**, copied from pg_chain (`~/ws/pg_chain`, `docs/measurements/2026-11-02-mc-calibration.md`).  It was written while libcmc was `chainmc` in pg_chain's `test/mc/`.  The
 > names map as follows: `chainmc` is now `cmc`, `mc_`/`Mc`/`MC_` is now

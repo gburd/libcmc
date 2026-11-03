@@ -1,4 +1,11 @@
-# libcmc design
+---
+title: "Design"
+parent: Reference
+nav_order: 1
+permalink: /reference/design/
+lede: >-
+  The engine as built: the world encoding, where actions come from, durability, search, properties and gates.
+---
 
 This describes the engine as built (`include/cmc.h`, `src/cmc.c`).  The
 original design, written before the code, is
