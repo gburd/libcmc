@@ -19,7 +19,10 @@
         # elsewhere the check phase is off rather than half-run.
         mkLibcmc = stdenv: stdenv.mkDerivation {
           pname = "libcmc";
-          version = "0-unstable-${self.lastModifiedDate or "19700101"}";
+          # the one version string is CMC_VERSION in include/cmc.h
+          version = builtins.head (builtins.match
+            ".*#define CMC_VERSION[[:space:]]+\"([^\"]+)\".*"
+            (builtins.readFile ./include/cmc.h));
           src = lib.cleanSource ./.;
 
           nativeBuildInputs = [ pkgs.mandoc ];

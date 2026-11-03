@@ -1,0 +1,81 @@
+name: Release
+
+# Pushing a tag vX.Y.Z publishes a Codeberg release.  The tag must be v
+# followed by CMC_VERSION in include/cmc.h, and CHANGELOG.md must have a
+# section for it.  The source tarball and man pages are `git archive`s of
+# the tag, the same files that .github/workflows/release.yml tests (make
+# check, install, the guide's model against the installed files) and
+# publishes on GitHub, where the full CI also gates the release.  (The
+# gzip bytes, and so the checksums, can differ between git versions.)
+# This job runs make check on the tarball and nothing heavier, to keep
+# Codeberg's shared runners free.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: codeberg-small
+    timeout-minutes: 5
+    steps:
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc make mandoc curl jq
+
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+
+      - name: The tag must be v followed by CMC_VERSION
+        id: ver
+        run: |
+          ver=$(sed -n 's/^#define CMC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' include/cmc.h)
+          echo "tag ${GITHUB_REF_NAME}, CMC_VERSION $ver"
+          test -n "$ver" && test "${GITHUB_REF_NAME}" = "v$ver"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Source tarball, man pages and notes
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          git archive --format=tar.gz --prefix="libcmc-$VER/" "$GITHUB_REF_NAME" \
+            > "libcmc-$VER.tar.gz"
+          git archive --format=tar.gz --prefix="libcmc-man-$VER/" "$GITHUB_REF_NAME" man \
+            > "libcmc-man-$VER.tar.gz"
+          sha256sum "libcmc-$VER.tar.gz" "libcmc-man-$VER.tar.gz" > SHA256SUMS
+          sh scripts/release-notes.sh "$VER" > notes.md
+
+      - name: make check on the tarball
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          work=$(mktemp -d)
+          tar -xzf "libcmc-$VER.tar.gz" -C "$work"
+          make -C "$work/libcmc-$VER" check
+          test "$("$work/libcmc-$VER/build/cmc" --version)" = "cmc (libcmc) $VER"
+
+      - name: Create the release and attach the files
+        env:
+          FORGE_API: ${{ forge.server_url }}/api/v1
+          FORGE_TOKEN: ${{ forge.token }}
+          REPO: ${{ forge.repository }}
+          TAG: ${{ github.ref_name }}
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          body=$(jq -Rs . < notes.md)
+          rel=$(curl -sS -X POST -H "Authorization: token $FORGE_TOKEN" \
+            -H 'Content-Type: application/json' "$FORGE_API/repos/$REPO/releases" \
+            -d "{\"tag_name\":\"$TAG\",\"name\":\"libcmc $VER\",\"body\":$body}" | jq -r '.id // empty')
+          if [ -z "$rel" ]; then
+            rel=$(curl -sS -H "Authorization: token $FORGE_TOKEN" \
+              "$FORGE_API/repos/$REPO/releases/tags/$TAG" | jq -r '.id')
+          fi
+          test -n "$rel" && test "$rel" != null
+          for f in "libcmc-$VER.tar.gz" "libcmc-man-$VER.tar.gz" SHA256SUMS; do
+            curl -sSf -X POST -H "Authorization: token $FORGE_TOKEN" \
+              "$FORGE_API/repos/$REPO/releases/$rel/assets?name=$f" -F "attachment=@$f" > /dev/null
+            echo "attached $f"
+          done

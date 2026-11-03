@@ -33,6 +33,10 @@
 #include <stdio.h>
 #include <string.h>
 
+/* The release (semantic versioning).  The release workflows require the
+ * tag to be v followed by exactly this string. */
+#define CMC_VERSION		"0.1.0"
+
 #define CMC_MAX_NODES	8
 #define CMC_MSG_MAX		32		/* bytes per message body / persist record */
 #define CMC_OUT_MAX		16		/* outputs per step */

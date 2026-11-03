@@ -69,7 +69,7 @@ docs site.
 
 ## Status
 
-Version 0, extracted from pg_chain on 2026-11-03.  Single-threaded.
+Release 0.1.0, extracted from pg_chain on 2026-11-03.  Single-threaded.
 There is no symmetry reduction or on-disk queue yet.  Clocks, partitions
 and multi-core nodes are planned (`docs/DESIGN.md`, "Roadmap").
 

@@ -80,6 +80,22 @@ limit is "no violation found in N states", never "passes".
   checks against what the guide says.  Never paste code into a page that
   no snippet backs; a snippet must not contain `{{` or `{%` (Liquid).
 
+## Releases
+
+Semantic versioning, tags `vX.Y.Z`.  To cut one:
+
+1. Set `CMC_VERSION` in `include/cmc.h`, and give `CHANGELOG.md` a
+   `## X.Y.Z (date)` section (it becomes the release notes).
+2. Run `make check-all` with gcc and clang, commit, push, and wait for
+   CI to pass on both forges.
+3. Create a signed annotated tag `vX.Y.Z` on that commit and push it to
+   origin (Codeberg); the push mirror carries it to GitHub.
+4. `.github/workflows/release.yml` runs every CI job at the tag, the
+   full calibration included, tests the source tarball, and publishes
+   the GitHub release.  `.forgejo/workflows/release.yml` publishes the
+   Codeberg release from the same tag.  Both refuse a tag that is not
+   `v` + `CMC_VERSION`, or a version with no `CHANGELOG.md` section.
+
 ## CI
 
 - GitHub Actions carries the CI: `make check` with gcc and clang, the

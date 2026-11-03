@@ -1165,6 +1165,19 @@ test_min4_negative_bounds(void)
 	}
 }
 
+/* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
+ * read it, and the tag must be v followed by it */
+static void
+test_version(void)
+{
+	unsigned	maj,
+				min,
+				pat;
+	char		extra;
+
+	CHECK(sscanf(CMC_VERSION, "%u.%u.%u%c", &maj, &min, &pat, &extra) == 3);
+}
+
 int
 main(void)
 {
@@ -1185,6 +1198,7 @@ main(void)
 	test_min1_dfs_witness();
 	test_min3_quiescent_depth();
 	test_min4_negative_bounds();
+	test_version();
 	if (failures)
 	{
 		fprintf(stderr, "test_cmc: %d failure(s)\n", failures);

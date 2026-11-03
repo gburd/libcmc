@@ -15,6 +15,9 @@ on:
   schedule:
     - cron: '17 4 * * 1'
   workflow_dispatch:
+  # release.yml calls this workflow, so a tag is published only after
+  # every job here passes at the tagged commit (calibration included).
+  workflow_call:
 
 permissions:
   contents: read
@@ -68,8 +71,12 @@ jobs:
 
   calibration:
     # The 22 calibration rows against TLC, and the planted bugs that must
-    # break them.  Weekly, and on demand.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # break them.  Weekly, on demand, and before a release.
+    # (a called workflow sees the caller's event, so a release is a push of
+    # a tag ref; ci.yml itself only runs on pushes to main)
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

@@ -1,8 +1,9 @@
 #!/bin/sh
 # docs_gate.sh BUILDDIR: the documentation is a gate, like the code.
 #   1. every man page passes mandoc lint (skipped, loudly, without mandoc);
-#   2. every public function and macro in include/cmc.h, and every option
-#      cmc_main() parses, is documented in the man pages;
+#   2. every public function, macro, constant and enum value in
+#      include/cmc.h, and every option cmc_main() parses, is documented
+#      in the man pages;
 #   3. no snippet holds Liquid markup, which Jekyll would expand;
 #   4. the guide's model (docs/_includes/snippets/quickstart.c) builds
 #      against libcmc.a and does what the guide says: the correct server
@@ -32,6 +33,11 @@ for f in $(grep -oE '\bcmc_[a-z_]+ *\(' "$HERE/include/cmc.h" | tr -d ' (' | sor
 		sed 's/^#define //; s/($//'); do
 	grep -qE "^\.Nm $f( ,)?\$|^\.Fn $f( |\$)" $HERE/man/man3/libcmc.3 ||
 		{ echo "docs: $f is not in libcmc(3)"; fail=1; }
+done
+# every other CMC_ name the header defines: constants and enum values
+for n in $(grep -oE '\bCMC_[A-Z_]+\b' "$HERE/include/cmc.h" | grep -vx 'CMC_H' | sort -u); do
+	grep -qE "(^\.(Dv|Fn) |[ (])$n( |,|\$|\))" $HERE/man/man3/libcmc.3 ||
+		{ echo "docs: $n is not in libcmc(3)"; fail=1; }
 done
 for o in $(grep -oE 'strcmp\(a, "--[a-z-]+"\)' "$HERE/src/cmc_cli.c" | grep -oE -- '--[a-z-]+' | sort -u); do
 	grep -qE "^\.(It|Op) Fl -${o#--}( |\$)" "$HERE/man/man1/cmc.1" ||

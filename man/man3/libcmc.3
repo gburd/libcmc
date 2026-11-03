@@ -313,6 +313,16 @@ faults, no new clients) reaches a state where it holds within
 steps.
 .El
 .Pp
+Each macro fills in a
+.Vt CmcProp
+whose kind is
+.Dv CMC_INV ,
+.Dv CMC_ACTION_PROP ,
+.Dv CMC_WITNESS ,
+.Dv CMC_QUIESCENT
+or
+.Dv CMC_EVENTUALLY .
+.Pp
 A property returns
 .Dv false
 to report a violation, and may explain it with
@@ -336,6 +346,18 @@ returns the number of client requests delivered to a node, counted by
 the environment rather than by the core.
 Properties may read core state; the engine never calls them to decide
 which actions are possible.
+.Ss Version
+.Dv CMC_VERSION
+is the release as a string,
+.Ql MAJOR.MINOR.PATCH ,
+following semantic versioning.
+A change to
+.In cmc.h
+that breaks a core, a model or a caller written against an earlier
+release of the same major version is not made outside a major release;
+before 1.0.0, a minor release may make one, and
+.Pa CHANGELOG.md
+says so.
 .Ss The model
 .Bd -literal
 typedef struct CmcModel {
@@ -351,6 +373,70 @@ typedef struct CmcModelEntry {
 	const CmcModel *m;
 } CmcModelEntry;
 .Ed
+.Ss Actions
+A
+.Vt CmcAction
+is a 64-bit word.
+.Fn CMC_ACT kind a b c d
+packs one;
+.Fn CMC_ACT_KIND ,
+.Fn CMC_ACT_A ,
+.Fn CMC_ACT_B ,
+.Fn CMC_ACT_C
+and
+.Fn CMC_ACT_D
+unpack its kind (the top byte), three byte fields and a 32-bit field.
+An action property receives the action between its two worlds.
+In a message-passing core the kind is one of
+.Bl -tag -width CMC_A_DELIVER -compact
+.It Dv CMC_A_DELIVER
+a = destination, b = source, d = index of the message in the network.
+.It Dv CMC_A_DROP
+The same fields; the message is lost.
+.It Dv CMC_A_DUP
+The same fields; the message is duplicated.
+.It Dv CMC_A_FIRE
+a = node, b = timer.
+.It Dv CMC_A_FLUSH
+a = node: its oldest pending persist completes.
+.It Dv CMC_A_WAKE
+a = node, b = waiter.
+.It Dv CMC_A_CLIENT
+a = node.
+.It Dv CMC_A_CRASH
+a = node, b = how many pending persists reached disk.
+.It Dv CMC_A_RESET
+a = node, b = the peer whose connection was reset.
+.El
+.Pp
+A calibration core defines its own kinds.
+.Ss Options
+.Bd -literal
+typedef struct CmcOptions {
+	CmcSearch search;	/* CMC_BFS, CMC_DFS, CMC_SIMULATE, CMC_REPLAY */
+	int	max_depth;	/* DFS bound; simulation walk length */
+	uint64_t seed;		/* simulation: first seed */
+	uint64_t walks;		/* simulation: number of walks */
+	uint64_t max_states;	/* 0: none; reaching it is incomplete */
+	double	time_limit;	/* seconds; 0: none */
+	bool	det;		/* determinism gate */
+	bool	stop_on_witness; /* stop once every witness is reached */
+	bool	quiet;		/* print no trace or progress */
+	bool	coverage;	/* count states per action kind */
+	int	progress_s;	/* progress line period; 0: off */
+	const char *trace_out;	/* write a replay file on a violation */
+	const char *replay_in;	/* CMC_REPLAY: the file */
+	int	client_budget, drop_budget, dup_budget, crash_budget;
+	int	net_cap, persist_cap, reply_cap;
+	CmcNet	net;		/* CMC_NET_FIFO or CMC_NET_BAG */
+	int	live_steps;	/* bound for eventually-properties */
+	FILE	*out;		/* progress output; NULL: stdout */
+} CmcOptions;
+.Ed
+.Pp
+The fields are the options of
+.Xr cmc 1 ,
+which gives their defaults.
 .Ss Running a check
 .Fn cmc_main
 parses the command line described in
@@ -499,6 +585,23 @@ Build it against the library:
 cc -std=c11 -Ilibcmc/include mine.c mine_core.o \e
     libcmc/build/libcmc.a -o mycmc
 .Ed
+.Sh LIMITS
+.Bl -tag -width CMC_MAX_ACTIONS -compact
+.It Dv CMC_MAX_NODES
+8 nodes.
+.It Dv CMC_MSG_MAX
+32 bytes per message or persist record.
+.It Dv CMC_OUT_MAX
+16 effects per step.
+.It Dv CMC_MAX_ACTIONS
+2048 possible actions per state.
+.It Dv CMC_MAX_TIMERS
+16 timers per node.
+.It Dv CMC_MAX_WAKES
+8 waiters per node.
+.El
+.Pp
+Going past a limit is reported as a violation, never truncated.
 .Sh SEE ALSO
 .Xr cmc 1 ,
 .Xr cmc 7

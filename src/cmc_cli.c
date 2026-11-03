@@ -35,6 +35,7 @@ usage(void)
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
 			"         [--net fifo|bag] [--live-steps K]\n"
+			"       cmc --version\n"
 			"models:");
 	for (size_t k = 0; k < nmodels; k++)
 		fprintf(stderr, " %s", models[k].name);
@@ -235,7 +236,12 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		const char *a = argv[i];
 
 #define ARG() (i + 1 < argc ? argv[++i] : (usage(), ""))
-		if (!strcmp(a, "--model"))
+		if (!strcmp(a, "--version"))
+		{
+			printf("cmc (libcmc) %s\n", CMC_VERSION);
+			return 0;
+		}
+		else if (!strcmp(a, "--model"))
 		{
 			const char *name = ARG();
 

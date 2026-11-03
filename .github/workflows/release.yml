@@ -1,0 +1,106 @@
+name: Release
+
+# Pushing a tag vX.Y.Z publishes a GitHub release.  Each job needs the one
+# before it, so nothing is published unless all of them pass:
+#   ci          every job in ci.yml at the tagged commit, the full
+#               calibration against TLC included
+#   verify-tag  the tag is v followed by CMC_VERSION in include/cmc.h, and
+#               CHANGELOG.md has a section for that version
+#   build       the source tarball (git archive of the tag) and the man
+#               pages; the tarball is unpacked and tested as a user would:
+#               make check, make install, and the guide's model built
+#               against the installed files
+#   publish     the release, with the tested files and the CHANGELOG
+#               section as its notes
+# .forgejo/workflows/release.yml publishes the same files on Codeberg.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  verify-tag:
+    needs: ci
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag must be v followed by CMC_VERSION
+        id: ver
+        run: |
+          ver=$(sed -n 's/^#define CMC_VERSION[[:space:]]*"\([^"]*\)".*/\1/p' include/cmc.h)
+          echo "tag ${GITHUB_REF_NAME}, CMC_VERSION $ver"
+          test -n "$ver" && test "${GITHUB_REF_NAME}" = "v$ver"
+          sh scripts/release-notes.sh "$ver" > /dev/null
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: verify-tag
+    runs-on: ubuntu-24.04
+    env:
+      VER: ${{ needs.verify-tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y mandoc
+      - name: Source tarball and man pages
+        run: |
+          # Codeberg's release archives the same tag: the same files (the
+          # gzip bytes can differ between git versions)
+          git archive --format=tar.gz --prefix="libcmc-$VER/" "$GITHUB_REF_NAME" \
+            > "libcmc-$VER.tar.gz"
+          git archive --format=tar.gz --prefix="libcmc-man-$VER/" "$GITHUB_REF_NAME" man \
+            > "libcmc-man-$VER.tar.gz"
+          sh scripts/release-notes.sh "$VER" > notes.md
+      - name: Test the tarball as a user would
+        run: |
+          set -eu
+          work=$(mktemp -d)
+          tar -xzf "libcmc-$VER.tar.gz" -C "$work"
+          cd "$work/libcmc-$VER"
+          make check
+          make install DESTDIR="$work/inst" PREFIX=/usr
+          test "$(build/cmc --version)" = "cmc (libcmc) $VER"
+          cc -std=c11 -I"$work/inst/usr/include" docs/_includes/snippets/quickstart.c \
+            "$work/inst/usr/lib/libcmc.a" -o "$work/quickstart"
+          "$work/quickstart" --model quickstart --all-props --crashes 1
+          tar -tzf "$GITHUB_WORKSPACE/libcmc-man-$VER.tar.gz" | grep -qx "libcmc-man-$VER/man/man3/libcmc.3"
+      - name: Checksums
+        run: sha256sum "libcmc-$VER.tar.gz" "libcmc-man-$VER.tar.gz" > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            libcmc-${{ env.VER }}.tar.gz
+            libcmc-man-${{ env.VER }}.tar.gz
+            SHA256SUMS
+            notes.md
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [ci, verify-tag, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VER: ${{ needs.verify-tag.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" \
+            --title "libcmc $VER" --notes-file notes.md --verify-tag \
+            "libcmc-$VER.tar.gz" "libcmc-man-$VER.tar.gz" SHA256SUMS
