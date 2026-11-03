@@ -1,0 +1,7 @@
+libcmc
+Copyright 2026 Greg Burd
+
+libcmc is written in C.  calib/hc/HummingConsensus.tla and its C port
+model the humming consensus protocol of Machi
+(https://github.com/basho/machi, Copyright Basho Technologies, Apache
+License 2.0); no Machi code is copied.

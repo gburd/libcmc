@@ -1,0 +1,269 @@
+# Raw output, 2026-11-02: chainmc calibration against TLC (HummingConsensus.tla).
+# Host: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz, 48 cores, 185 GB, Linux 6.18.60; shared dev host (load 20-76 during runs).
+# chainmc built with clang 21.1.8 -O2 -g (test/mc/Makefile defaults); gcc 16.2.0 build gave identical results on the fast rows.
+# TLC: TLC2 2.19 rev 5a47802 (nixpkgs tlaplus 1.7.4), OpenJDK 1.8.0_504, -Xmx32g, -workers 1 -deadlock (spec/tla/tlc.sh).
+# Repo base commit ab95949 plus the uncommitted test/mc/ tree.
+
+######## 1. check-mc-calibration (test/mc/calibrate.sh build/chainmc all), determinism gate on
+ 17:51:40  up  4:32,  32 users,  load average: 19.99, 23.47, 27.31
+cfg                                          expected                     got                          depth   exp   distinct   expected   generated    expected   wall_s
+hc_paper_cp_n3                               S1_Agreement                 S1_Agreement                     6     6       1193          -        2981           -     0.00 ok
+hc_paper_cp_n3_s1                            S1_AgreementNonNone          S1_AgreementNonNone              7     7      14341          -       43620           -     0.02 ok
+hc_code_ap_n3_S1                             S1_AgreementNonNone          S1_AgreementNonNone              6     6       1200          -        3168           -     0.00 ok
+hc_paper_ap_n3_s1                            S1_AgreementNonNone          S1_AgreementNonNone              6     6       1206          -        3124           -     0.00 ok
+hc_paper_cp_n3_S2_NoSplitBrainServing        S2_NoSplitBrainServing       S2_NoSplitBrainServing           5     5        365          -         842           -     0.00 ok
+hc_paper_ap_n3_S2w                           S2w_NoConcurrentWriteChains  S2w_NoConcurrentWriteChains      6     6       1206          -        3124           -     0.00 ok
+hc_paper_cp_n3_S2r_NoStaleRead               S2r_NoStaleRead              S2r_NoStaleRead                  9     9     118080          -      440453           -     0.21 ok
+hc_code_cp_n3_S2r_NoStaleRead                S2r_NoStaleRead              S2r_NoStaleRead                  9     9      99357          -      394715           -     0.18 ok
+hc_codeCZ_cp_n3_S2r                          S2r_NoStaleRead              S2r_NoStaleRead                 11    11     564157          -     2760688           -     1.33 ok
+hc_paper_ap_n3_S3a                           S3a_NoLostAckActive          S3a_NoLostAckActive              9     9      81813          -      319648           -     0.13 ok
+hc_paper_cp_n3_W                             W_AckAfterReconfig           W_AckAfterReconfig               9     9     118080          -      440453           -     0.19 ok
+hc_paper_cp_n3_S3_NoLostAck                  S3_NoLostAck                 S3_NoLostAck                    12    12    2442641          -    12365010           -     5.39 ok
+hc_code_cp_n3_S3_NoLostAck                   S3_NoLostAck                 S3_NoLostAck                    12    12    1388080          -     7579702           -     3.18 ok
+hc_codeZ_cp_n3_S3                            S3_NoLostAck                 S3_NoLostAck                    12    12    1431275          -     7820327           -     3.64 ok
+hc_codeZ_cp_n3_S3a                           S3a_NoLostAckActive          S3a_NoLostAckActive             13    13    2374450          -    14110969           -     6.37 ok
+hc_codeC_cp_n3_S3                            S3_NoLostAck                 S3_NoLostAck                    14    14    3179823          -    20379192           -     8.92 ok
+hc_code_cp_n3_S1_AgreementNonNone            PASS                         PASS                            24    24    7412120    7412120    64710625    64710625    31.17 ok
+hc_code_cp_n3_S3a                            PASS                         PASS                            24    24    7412120    7412120    64710625    64710625    28.21 ok
+hc_codeC_cp_n3_S3a                           PASS                         PASS                            28    28    9428240    9428240    82484959    82484959    38.42 ok
+hc_codeCZ_cp_n3_S1                           PASS                         PASS                            32    32   15523080   15523080   136045719   136045719    63.41 ok
+hc_paper_cp_n3_S2w_NoConcurrentWriteChains   PASS                         PASS                            30    30   35895280   35895280   323513489   323513489   152.21 ok
+hc_paper_cp_n3_S3a                           PASS                         PASS                            30    30   35895280   35895280   323513489   323513489   145.82 ok
+check-mc-calibration: every row matches TLC
+
+real	8m10.189s
+user	7m48.306s
+sys	0m17.436s
+ 17:59:50  up  4:40,  32 users,  load average: 22.98, 23.07, 25.53
+
+######## 2. TLC -workers 1 reference runs (summary lines)
+hc_code_ap_n3_S1	Error: Invariant S1_AgreementNonNone is violated.	3168 states generated, 1200 distinct states found, 974 states left on queue.	depth=6	wall_s=1
+hc_codeC_cp_n3_S3a	Model checking completed. No error has been found.	82484959 states generated, 9428240 distinct states found, 0 states left on queue.	depth=28	wall_s=2681
+hc_codeC_cp_n3_S3	Error: Invariant S3_NoLostAck is violated.	22187049 states generated, 3425701 distinct states found, 1059860 states left on queue.	depth=14	wall_s=651
+hc_code_cp_n3_S1_AgreementNonNone	Model checking completed. No error has been found.	64710625 states generated, 7412120 distinct states found, 0 states left on queue.	depth=24	wall_s=1978
+hc_code_cp_n3_S2r_NoStaleRead	Error: Invariant S2r_NoStaleRead is violated.	394715 states generated, 99357 distinct states found, 66572 states left on queue.	depth=9	wall_s=15
+hc_code_cp_n3_S3_NoLostAck	Error: Invariant S3_NoLostAck is violated.	8501278 states generated, 1540447 distinct states found, 696871 states left on queue.	depth=12	wall_s=246
+hc_codeCZ_cp_n3_S1	Model checking completed. No error has been found.	136045719 states generated, 15523080 distinct states found, 0 states left on queue.	depth=32	wall_s=4522
+hc_codeCZ_cp_n3_S2r	Error: Invariant S2r_NoStaleRead is violated.	2760688 states generated, 564157 distinct states found, 310408 states left on queue.	depth=11	wall_s=89
+hc_codeZ_cp_n3_S3a	Error: Invariant S3a_NoLostAckActive is violated.	15600891 states generated, 2598076 distinct states found, 1007936 states left on queue.	depth=13	wall_s=493
+hc_codeZ_cp_n3_S3	Error: Invariant S3_NoLostAck is violated.	8773972 states generated, 1590151 distinct states found, 732759 states left on queue.	depth=12	wall_s=258
+hc_paper_ap_n3_s1	Error: Invariant S1_AgreementNonNone is violated.	3124 states generated, 1206 distinct states found, 980 states left on queue.	depth=6	wall_s=2
+hc_paper_ap_n3_S2w	Error: Invariant S2w_NoConcurrentWriteChains is violated.	3124 states generated, 1206 distinct states found, 980 states left on queue.	depth=6	wall_s=2
+hc_paper_ap_n3_S3a	Error: Invariant S3a_NoLostAckActive is violated.	319648 states generated, 81813 distinct states found, 58960 states left on queue.	depth=9	wall_s=10
+hc_paper_cp_n3_s1	Error: Invariant S1_AgreementNonNone is violated.	52665 states generated, 17179 distinct states found, 13174 states left on queue.	depth=7	wall_s=4
+hc_paper_cp_n3_S2_NoSplitBrainServing	Error: Invariant S2_NoSplitBrainServing is violated.	842 states generated, 365 distinct states found, 297 states left on queue.	depth=5	wall_s=1
+hc_paper_cp_n3_S2r_NoStaleRead	Error: Invariant S2r_NoStaleRead is violated.	440453 states generated, 118080 distinct states found, 82009 states left on queue.	depth=9	wall_s=14
+hc_paper_cp_n3_S2w_NoConcurrentWriteChains			depth=	
+hc_paper_cp_n3_S3_NoLostAck	Error: Invariant S3_NoLostAck is violated.	14204436 states generated, 2779865 distinct states found, 1444072 states left on queue.	depth=12	wall_s=394
+hc_paper_cp_n3	Error: Invariant S1_Agreement is violated.	2981 states generated, 1193 distinct states found, 967 states left on queue.	depth=6	wall_s=1
+hc_paper_cp_n3_W	Error: Invariant W_AckAfterReconfig is violated.	440453 states generated, 118080 distinct states found, 82009 states left on queue.	depth=9	wall_s=13
+# hc_paper_cp_n3_S2w_NoConcurrentWriteChains -workers 1 was still running at write-up; last progress line:
+Progress(16) at 2026-11-02 18:00:11: 115,643,900 states generated (1,997,515 s/min), 16,612,909 distinct states found (237,737 ds/min), 4,473,360 states left on queue.
+
+######## 3. TLC vs chainmc on extra small configurations (TLC -workers 4 -coverage; chainmc --cfg tlc_mult=TRUE): exhaustive, TypeOK only
+n2e3code:  N = 2  MaxEpoch = 3  CPMode = TRUE  UnanimityRule = "code"  Confirm = FALSE  Zerf = FALSE 
+  TLC:     4545 states generated, 1856 distinct states found, 0 states left on queue
+  chainmc: 4545 states generated, 1856 distinct states found, 0 states left on queue
+n2e4code:  N = 2  MaxEpoch = 4  CPMode = TRUE  UnanimityRule = "code"  Confirm = FALSE  Zerf = FALSE 
+  TLC:     89443 states generated, 34360 distinct states found, 0 states left on queue
+  chainmc: 89443 states generated, 34360 distinct states found, 0 states left on queue
+n2e3ap:  N = 2  MaxEpoch = 3  CPMode = FALSE  UnanimityRule = "paper"  Confirm = FALSE  Zerf = FALSE 
+  TLC:     29039 states generated, 7760 distinct states found, 0 states left on queue
+  chainmc: 29039 states generated, 7760 distinct states found, 0 states left on queue
+n2e4cz:  N = 2  MaxEpoch = 4  CPMode = TRUE  UnanimityRule = "code"  Confirm = TRUE  Zerf = TRUE 
+  TLC:     184735 states generated, 66536 distinct states found, 0 states left on queue
+  chainmc: 184735 states generated, 66536 distinct states found, 0 states left on queue
+n3e2paper:  N = 3  MaxEpoch = 2  CPMode = TRUE  UnanimityRule = "paper"  Confirm = FALSE  Zerf = FALSE 
+  TLC:     330843 states generated, 37840 distinct states found, 0 states left on queue
+  chainmc: 330843 states generated, 37840 distinct states found, 0 states left on queue
+n3e2cz:  N = 3  MaxEpoch = 2  CPMode = TRUE  UnanimityRule = "code"  Confirm = TRUE  Zerf = TRUE 
+  TLC:     204901 states generated, 23760 distinct states found, 0 states left on queue
+  chainmc: 204901 states generated, 23760 distinct states found, 0 states left on queue
+n3e2ap:  N = 3  MaxEpoch = 2  CPMode = FALSE  UnanimityRule = "code"  Confirm = FALSE  Zerf = FALSE 
+  TLC:     340717 states generated, 36800 distinct states found, 0 states left on queue
+  chainmc: 340717 states generated, 36800 distinct states found, 0 states left on queue
+
+######## 4. Without tlc_mult (one successor per Adopt binding): distinct identical, generated lower
+64680415 states generated, 7412120 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 24.
+Finished in 22.40s
+
+######## 5. hc_bug_gate.sh (planted bugs in the HC port must fail calibration)
+Error: Invariant S1_AgreementNonNone is violated.
+  non-none priv[a][e] /= priv[b][e] (a=1 b=3 e=2)
+11303 states generated, 4349 distinct states found, 3571 states left on queue.
+The depth of the complete state graph search is 6.
+  Estimated probability of a 128-bit fingerprint collision (n^2/2^129): 7.65e-26
+63003721 states generated, 7213400 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 24.
+Error: Invariant TypeOK is violated.
+  acked entry 0 is not <<Writes, props \cup {P1}>>
+2369452 states generated, 605730 distinct states found, 396574 states left on queue.
+The depth of the complete state graph search is 10.
+bug 101: code-cp S1: Invariant S1_AgreementNonNone is violated, 4349 distinct (correct: PASS, 7412120): caught
+bug 102: code-cp S1: No error has been found, 7213400 distinct (correct: PASS, 7412120): caught
+bug 103: code-cp S1: Invariant TypeOK is violated, 605730 distinct (correct: PASS, 7412120): caught
+hc_bug_gate: ok
+
+######## 6. check-mc-toy (engine unit tests, toy bug gate, purity gate)
+check-mc-purity: ok (5 core objects)
+test_mc: all engine tests passed
+control: PASS, 34 distinct states
+toy-bug1: Mutex at depth 7: caught; simulate caught it
+toy-bug2: AllReplied at depth 9: caught; simulate caught it
+toy-bug3: PhaseMonotone at depth 5: caught; simulate caught it
+toy_gate: ok
+
+######## 7. counterexample A as chainmc prints it (hc_paper_cp_n3_s1)
+Error: Invariant S1_AgreementNonNone is violated.
+  non-none priv[a][e] /= priv[b][e] (a=2 b=3 e=2)
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+  net = {1-2, 1-3, 2-3}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 3: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  props:
+  acked:
+
+State 2: <NetChange net-mask=0x3>
+  net = {1-2, 1-3}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 3: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  props:
+  acked:
+
+State 3: <Propose(2) [e2 a2 <1,2|>]>
+  net = {1-2, 1-3}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e1 a1 <1,2,3|>] conf={1} hist={} WEDGED
+    pub: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 3: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  props: [e2 a2 <1,2|>]
+  acked:
+
+State 4: <Propose(3) [e2 a3 <1,3|>]>
+  net = {1-2, 1-3}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e1 a1 <1,2,3|>] conf={1} hist={} WEDGED
+    pub: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 3: cur=[e1 a1 <1,2,3|>] conf={1} hist={} WEDGED
+    pub: [e1 a1 <1,2,3|>] [e2 a3 <1,3|>] -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  props: [e2 a2 <1,2|>] [e2 a3 <1,3|>]
+  acked:
+
+State 5: <NetChange net-mask=0>
+  net = {}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e1 a1 <1,2,3|>] conf={1} hist={} WEDGED
+    pub: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 3: cur=[e1 a1 <1,2,3|>] conf={1} hist={} WEDGED
+    pub: [e1 a1 <1,2,3|>] [e2 a3 <1,3|>] -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  props: [e2 a2 <1,2|>] [e2 a3 <1,3|>]
+  acked:
+
+State 6: <Adopt(2) [e2 a2 <1,2|>]>
+  net = {}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e2 a2 <1,2|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    priv: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    stamp:
+  node 3: cur=[e1 a1 <1,2,3|>] conf={1} hist={} WEDGED
+    pub: [e1 a1 <1,2,3|>] [e2 a3 <1,3|>] -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  props: [e2 a2 <1,2|>] [e2 a3 <1,3|>]
+  acked:
+
+State 7: <Adopt(3) [e2 a3 <1,3|>]>
+  net = {}
+  node 1: cur=[e1 a1 <1,2,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] - -
+    priv: [e1 a1 <1,2,3|>] - -
+    stamp:
+  node 2: cur=[e2 a2 <1,2|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    priv: [e1 a1 <1,2,3|>] [e2 a2 <1,2|>] -
+    stamp:
+  node 3: cur=[e2 a3 <1,3|>] conf={1} hist={}
+    pub: [e1 a1 <1,2,3|>] [e2 a3 <1,3|>] -
+    priv: [e1 a1 <1,2,3|>] [e2 a3 <1,3|>] -
+    stamp:
+  props: [e2 a2 <1,2|>] [e2 a3 <1,3|>]
+  acked:
+43620 states generated, 14341 distinct states found, 11027 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 0.02s
+
+######## 8. witnesses, DFS, simulation, replay
+Witness Reach_AckAfterReconfig: reached
+Witness Reach_RepairJoinsUPI: reached
+  Reach_AckAfterReconfig first reached at depth 11
+  Reach_RepairJoinsUPI first reached at depth 11
+134960913 states generated, 15523080 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 32.
+Finished in 60.16s
+Error: Invariant W_RepairJoinsUPI is violated.
+  a full-length UPI at epoch >= 3 after an ack
+23510881 states generated, 6120537 distinct states found, 4271259 states left on queue.
+The depth of the complete state graph search is 11.
+Finished in 13.17s
+11963789 states generated, 37840 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 60.
+Finished in 2.79s
+Error: Invariant S1_AgreementNonNone is violated.
+  non-none priv[a][e] /= priv[b][e] (a=1 b=3 e=3) [walk 1: --seed 2 --walks 1 reproduces it]
+Replay file written to /home/gburd/tmp/mc-build/hcA.replay (33 actions).
+74 states generated, 0 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 34.
+Finished in 0.00s
+Error: Invariant S1_AgreementNonNone is violated.
+  non-none priv[a][e] /= priv[b][e] (a=1 b=3 e=3)
+34 states generated, 0 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 34.
+Finished in 0.00s
