@@ -30,6 +30,3 @@ product ships.
   as the library function `cmc_main()`, with `cmc --version`.
 - Man pages `cmc(1)`, `libcmc(3)` and `cmc(7)`; `make install`; a Nix
   flake; documentation at <https://gregburd.codeberg.page/libcmc/>.
-
-libcmc was extracted from pg_chain's `test/mc/`, where it was named
-`chainmc`, with the API prefix renamed from `mc_` to `cmc_`.

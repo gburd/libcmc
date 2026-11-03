@@ -127,7 +127,7 @@ is reported as an engine violation, never truncated.
 
 ## Roadmap
 
-Ordered by what the first user (pg_chain's protocol cores) needs:
+Ordered by what replication and consensus cores need first:
 
 1. Clocks: per-node monotonic time with drift bounded by ρ, a `TICK`
    action and a time-carrying `CLOCK` event (needed for leases).

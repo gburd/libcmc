@@ -14,11 +14,11 @@ sources, and `02-review-actor-mode.md` the adversarial review.
 
 ## The requirement
 
-The first user, pg_chain (`~/ws/pg_chain`), asked for "TLA+ like model
-validation that uses the sources we build directly so that the model
-and the code can never diverge: the code validated is the code that is
-run".  Its protocol logic must also be 100 % C, and no other language
-may be a test oracle or sit on the product path.
+The request was for "TLA+ like model validation that uses the sources
+we build directly so that the model and the code can never diverge: the
+code validated is the code that is run".  The protocol logic must also
+be 100 % C, and no other language may be a test oracle or sit on the
+product path.
 
 From that, four needs:
 

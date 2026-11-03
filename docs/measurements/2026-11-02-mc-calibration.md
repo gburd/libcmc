@@ -7,33 +7,25 @@ lede: >-
   22 configurations of HummingConsensus: verdicts, depths and exact state counts against TLC.
 ---
 
-> **Historical record**, copied from pg_chain (`~/ws/pg_chain`, `docs/measurements/2026-11-02-mc-calibration.md`).  It was written while libcmc was `chainmc` in pg_chain's `test/mc/`.  The
-> names map as follows: `chainmc` is now `cmc`, `mc_`/`Mc`/`MC_` is now
-> `cmc_`/`Cmc`/`CMC_`, `test/mc/mc.c` is now `src/cmc.c`, `test/mc/hc/` is now `calib/hc/`, and
-> `spec/tla/cfg/` is now `calib/hc/cfg/`.  "PLAN" means pg_chain's
-> `docs/PLAN.md`.  The current design is `docs/DESIGN.md`.
-
-
-PLAN §11 ("How `chainmc` stays honest", rev 3.3) and §12 M-1a/M-1b;
-research/11 §4a (design) and §4b.1 (calibration table).  Raw output:
+The design is in the survey, §4a, and the calibration table in its §4b.1.  Raw output:
 `2026-11-02-mc-calibration-raw.txt` (same directory).
 
-**Verdict: calibrated.**  On all 22 rows chainmc gives the same verdict
+**Verdict: calibrated.**  On all 22 rows cmc gives the same verdict
 and the same BFS depth as TLC.  On the 6 exhaustive passing rows it also
 gives exactly the same distinct-state count and the same states-generated
 count, and on 7 more small configurations it matches both counts exactly.
-The research/11 §4b table needed two corrections, explained below: TLC
+The survey's §4b table needed two corrections, explained below: TLC
 depths taken from multi-worker runs are not shortest, and one PASS depth
 was misreported.
 
 ## What was run
 
-- chainmc: `test/mc/` at base commit ab95949 plus the uncommitted tree.
+- cmc: the engine as of 2026-11-02.
   Built with clang 21.1.8 `-O2 -g -std=c11 -Wall -Wextra -Werror`
-  (test/mc/Makefile).  gcc 16.2.0 builds clean too and gives identical
+  (the Makefile's flags).  gcc 16.2.0 builds clean too and gives identical
   results on the fast rows.  Single-threaded BFS, no worker pool.
 - TLC: TLC2 2.19 rev 5a47802 (nixpkgs tlaplus 1.7.4), OpenJDK 1.8.0_504,
-  `-Xmx32g -workers 1 -deadlock`, through `spec/tla/tlc.sh`.  These are
+  `-Xmx32g -workers 1 -deadlock`, through `calib/hc/tlc.sh`.  These are
   new runs made for this calibration.  Their output is in
   `~/tmp/mc-build/tlc/*.w1.txt`, and the summary lines are in the raw
   file §2.
@@ -42,10 +34,10 @@ was misreported.
   average was 20-76 during the runs (other users' jobs and concurrent TLC
   runs), so wall times are indicative only.  The verdicts and counts do not
   depend on the host.
-- Command: `make -C test/mc check-mc-calibration`, which runs
-  `calibrate.sh build/chainmc all`.  For each row it runs
-  `chainmc --model hc --tlc-cfg spec/tla/cfg/<cfg>.cfg --cfg tlc_mult=TRUE
-  --det`.  chainmc reads the same TLC `.cfg` files TLC read (CONSTANTS,
+- Command: `make check-calibration`, which runs
+  `calib/hc/calibrate.sh build/cmc all`.  For each row it runs
+  `cmc --model hc --tlc-cfg calib/hc/cfg/<cfg>.cfg --cfg tlc_mult=TRUE
+  --det`.  cmc reads the same TLC `.cfg` files TLC read (CONSTANTS,
   INVARIANTS, PROPERTIES), and the determinism gate is on.
 - Bounds (from the cfg files): N=3, MaxEpoch=3, Writes={w1}, links = any
   subset of the 3 pairs.  The variant switches are CPMode, UnanimityRule,
@@ -61,7 +53,7 @@ taken at the moment of a violation depend on order within a BFS level,
 so only PASS rows are required to match them.  They matched in several
 FAIL rows anyway (marked =).
 
-| cfg (spec/tla/cfg/) | property | TLC verdict / depth / distinct | chainmc verdict / depth / distinct | chainmc wall (s) | TLC 1-worker wall (s) |
+| cfg (calib/hc/cfg/) | property | TLC verdict / depth / distinct | cmc verdict / depth / distinct | cmc wall (s) | TLC 1-worker wall (s) |
 |---|---|---|---|---|---|
 | hc_paper_cp_n3 | S1_Agreement | FAIL / 6 / 1,193 | FAIL / 6 / 1,193 = | 0.00 | 1 |
 | hc_paper_cp_n3_s1 (**A**) | S1_AgreementNonNone | FAIL / 7 / 17,179 | FAIL / 7 / 14,341 | 0.02 | 4 |
@@ -99,7 +91,7 @@ Further exact matches, on configurations chosen for this calibration
 (exhaustive, TypeOK only; raw §3).  Every pair agrees on both distinct
 states and states generated:
 
-| N | E | variant | TLC = chainmc distinct / generated |
+| N | E | variant | TLC = cmc distinct / generated |
 |---|---|---|---|
 | 2 | 3 | code cp | 1,856 / 4,545 |
 | 2 | 4 | code cp | 34,360 / 89,443 |
@@ -115,32 +107,32 @@ Propose(3), NetChange, Adopt(2), Adopt(3), giving
 `priv[2][2] = <1,2> ≠ priv[3][2] = <1,3>` (raw §7).  B′, C and S2r have
 the same action-name sequences as TLC's 1-worker traces.
 
-Throughput: chainmc does about 2.1-2.5 M generated states/s on one core
+Throughput: cmc does about 2.1-2.5 M generated states/s on one core
 under load 20-76, against TLC's about 33 K/s on one worker on the same
-host.  So single-threaded chainmc finished the 15.5 M-state run in 63 s,
+host.  So single-threaded cmc finished the 15.5 M-state run in 63 s,
 where TLC took 4,522 s (1 worker) and 475-841 s (6-16 workers).  No worker
 pool was needed.  The 35.9 M-state run used 6.4 GB RSS (world 376 B,
 table entry 48 B).
 
 ## Discrepancies and their explanations
 
-1. **Multi-worker TLC depths are not shortest.**  research/11 §4b, taken
-   from 2026-11-01-tla-humming.md, lists A at depth 9, B′ at 14, C at 14,
+1. **Multi-worker TLC depths are not shortest.**  The survey's §4b, taken
+   from the TLC runs of 2026-11-01, lists A at depth 9, B′ at 14, C at 14,
    paper-cp S2r at 11 and code+C S3 at 15.  Those runs used 2-16 workers.
    Parallel TLC does not guarantee a shortest counterexample, and its
    reported depth varies with scheduling.  The same state space gave depth
    25 in one run and 24 in another (code-cp S1 vs S3a), and 32 vs 33
    (code+C+Z).  With `-workers 1`, TLC gives A = 7, B′ = 12, C = 13,
-   S2r = 9 and code+C S3 = 14, and chainmc matches every one.  The
+   S2r = 9 and code+C S3 = 14, and cmc matches every one.  The
    2026-11-01 traces themselves are longer (A had 9 states), which fits
-   non-shortest search.  I did not tune chainmc to the old numbers.
+   non-shortest search.  I did not tune cmc to the old numbers.
 2. **PASS depths.**  For the same three state spaces as above, 1-worker
-   TLC gives 24 and 32, and chainmc agrees.  For code+C S3a, TLC said 29
-   with 6 workers, but 1-worker TLC and chainmc both give 28.  For paper-cp
-   S2w, TLC said 32 with 16 workers and chainmc says 30.  The 1-worker
+   TLC gives 24 and 32, and cmc agrees.  For code+C S3a, TLC said 29
+   with 6 workers, but 1-worker TLC and cmc both give 28.  For paper-cp
+   S2w, TLC said 32 with 16 workers and cmc says 30.  The 1-worker
    TLC run had not finished at write-up, so 30 is not yet TLC-confirmed,
    but the distinct and generated counts match exactly.
-3. **"States generated" without `tlc_mult`.**  By default chainmc
+3. **"States generated" without `tlc_mult`.**  By default cmc
    produces one successor per distinct action binding.  TLC produces one
    successor per true leaf of a disjunction (`\/`) inside an action body.
    In Adopt, the `MajOK` disjunction (3 leaves) and the `FinalReview`
@@ -151,7 +143,7 @@ table entry 48 B).
    states and depths are the same either way: 7,412,120 / 64,680,415 /
    24 without the knob (raw §4).
 4. **Paper-cp S3a now has an answer.**  TLC hit its 20-minute box on it
-   (≥26.7 M distinct).  chainmc finished it: PASS, 35,895,280 distinct,
+   (≥26.7 M distinct).  cmc finished it: PASS, 35,895,280 distinct,
    depth 30.  That is the same state space and the same counts as the S2w
    run, because the reachable states depend only on the constants.  So
    under the paper rule in CP mode, no acked write is lost from an
@@ -167,10 +159,10 @@ table entry 48 B).
 
 ## The checker's own teeth
 
-- Every invariant that TLC found violated, chainmc found violated, at the
-  same depth.  chainmc found no counterexample that TLC missed.  For
-  paper-cp S3a, TLC never finished, and chainmc finished with no violation.
-- Planted bugs in the HC port (`hc_bug_gate.sh`, `-DPGCHAIN_MC_BUG=n`;
+- Every invariant that TLC found violated, cmc found violated, at the
+  same depth.  cmc found no counterexample that TLC missed.  For
+  paper-cp S3a, TLC never finished, and cmc finished with no violation.
+- Planted bugs in the HC port (`calib/hc/hc_bug_gate.sh`, `-DCMC_BUG=n`;
   raw §5) all fail calibration:
   - 101 drops A21's "every member answered": code-cp S1 fails at depth 6.
   - 102 makes MajOK ignore the repairing list: still PASS, but with
@@ -178,15 +170,15 @@ table entry 48 B).
     slip that no invariant notices.
   - 103 keeps sets unsorted (non-canonical): TypeOK fails, and dedup
     splits states.
-- Toy core (`check-mc-toy`; raw §6).  The correct core passes with
+- Toy core (`test/toy_gate.sh`; raw §6).  The correct core passes with
   exactly 34 distinct states and depth 11; 33 of them are derived by hand
-  in `toy/toy_core.c`, plus one that splits by reply order.  Each planted
+  in `test/toy/toy_core.c`, plus one that splits by reply order.  Each planted
   bug is caught by BFS (shortest trace), by `--simulate` and by
   `--replay` of the written trace:
   - bug 1 (no holder check): Mutex at depth 7.
   - bug 2 (lost wake): AllReplied (quiescence) at depth 9.
   - bug 3 (phase regresses): action property PhaseMonotone at depth 5.
-- Engine gates (`test_mc.c`).  These are triggered:
+- Engine gates (`test/test_cmc.c`).  These are triggered:
   - The determinism gate: a core that reads a global.
   - The durable-state rule: durable bytes changed outside FLUSHED.
   - Non-omniscience: scrambling all core-state bytes of reachable worlds
@@ -205,8 +197,8 @@ table entry 48 B).
 - Message-passing cores at scale.  HC uses the documented calibration
   exception: its actions are the TLA+ actions.  The actor-mode
   environment (SEND, timers, PERSIST/FLUSHED, WAKE, CLIENT, DROP, DUP,
-  CRASH) is exercised only by the toy and by small test cores.  M-1c
-  is where it gets real load.
+  CRASH) is exercised only by the toy and by small test cores.  Real
+  protocol cores are where it gets real load.
 - No worker pool, no symmetry reduction, no on-disk frontier.  The queue
   holds full worlds in RAM (about 1.5 GB at the frontier peak of the
   35.9 M run).  Bounded liveness is limited to the quiescence check; there
@@ -214,17 +206,17 @@ table entry 48 B).
 - The paper-cp S2w depth (30) is waiting on the 1-worker TLC run.  The
   N=4 and E=4 simulation configs were not compared, except
   W_RepairJoinsUPI.
-- These are development-host runs, not EC2 (steering: model results that
-  count would be rerun there).  Model counts and verdicts do not depend
+- These are development-host runs, not a dedicated measurement host.
+  Model counts and verdicts do not depend
   on the host, but the wall times do.  Verdict on the wall times: NOISY.
 
 ## Reproduce
 
 ```
-make -C test/mc check-mc-toy                 # ~2 s
-make -C test/mc check-mc-calibration-fast    # 16 FAIL rows, ~40 s
-make -C test/mc check-mc-calibration         # + 6 PASS rows, ~8 min, ~7 GB RAM
-make -C test/mc check-mc-hc-bugs             # ~1.5 min
-test/mc/build/chainmc --model hc --tlc-cfg spec/tla/cfg/hc_paper_cp_n3_s1.cfg   # counterexample A
-~/tmp/mc-build/tlc/run1.sh <cfg>             # TLC -workers 1 reference (not in repo)
+make check-unit                 # engine tests and the toy gate, ~1 s
+make check-calibration-fast     # the 16 FAIL rows, ~30 s
+make check-calibration          # + the 6 PASS rows, ~8 min, ~7 GB RAM
+make check-hc-bugs              # ~30 s
+build/cmc --model hc --tlc-cfg calib/hc/cfg/hc_paper_cp_n3_s1.cfg   # counterexample A
+(cd calib/hc && ./tlc.sh HummingConsensus.tla cfg/<cfg>.cfg -workers 1)   # the TLC reference
 ```

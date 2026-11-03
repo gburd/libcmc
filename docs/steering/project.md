@@ -60,9 +60,8 @@ limit is "no violation found in N states", never "passes".
   and commits.  Add files by name, never with `git add -A`.
 - Build trees (`build*/`) are gitignored.  Agent notes go in `.agent/`,
   which is local and never committed.
-- Users: pg_chain (`~/ws/pg_chain`) links `libcmc.a`.  A change to
-  `include/cmc.h` is an API change: note it in `CHANGELOG.md`, and
-  update `man/man3/libcmc.3`.
+- A change to `include/cmc.h` is an API change: note it in
+  `CHANGELOG.md`, and update `man/man3/libcmc.3`.
 
 ## Documentation
 

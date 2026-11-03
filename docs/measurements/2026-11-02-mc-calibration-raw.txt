@@ -1,10 +1,10 @@
-# Raw output, 2026-11-02: chainmc calibration against TLC (HummingConsensus.tla).
+# Raw output, 2026-11-02: cmc calibration against TLC (HummingConsensus.tla).
 # Host: Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz, 48 cores, 185 GB, Linux 6.18.60; shared dev host (load 20-76 during runs).
-# chainmc built with clang 21.1.8 -O2 -g (test/mc/Makefile defaults); gcc 16.2.0 build gave identical results on the fast rows.
-# TLC: TLC2 2.19 rev 5a47802 (nixpkgs tlaplus 1.7.4), OpenJDK 1.8.0_504, -Xmx32g, -workers 1 -deadlock (spec/tla/tlc.sh).
-# Repo base commit ab95949 plus the uncommitted test/mc/ tree.
+# cmc built with clang 21.1.8 -O2 -g (the Makefile defaults); gcc 16.2.0 build gave identical results on the fast rows.
+# TLC: TLC2 2.19 rev 5a47802 (nixpkgs tlaplus 1.7.4), OpenJDK 1.8.0_504, -Xmx32g, -workers 1 -deadlock (calib/hc/tlc.sh).
+# The engine as of 2026-11-02.
 
-######## 1. check-mc-calibration (test/mc/calibrate.sh build/chainmc all), determinism gate on
+######## 1. check-calibration (calib/hc/calibrate.sh build/cmc all), determinism gate on
  17:51:40  up  4:32,  32 users,  load average: 19.99, 23.47, 27.31
 cfg                                          expected                     got                          depth   exp   distinct   expected   generated    expected   wall_s
 hc_paper_cp_n3                               S1_Agreement                 S1_Agreement                     6     6       1193          -        2981           -     0.00 ok
@@ -60,28 +60,28 @@ hc_paper_cp_n3_W	Error: Invariant W_AckAfterReconfig is violated.	440453 states 
 # hc_paper_cp_n3_S2w_NoConcurrentWriteChains -workers 1 was still running at write-up; last progress line:
 Progress(16) at 2026-11-02 18:00:11: 115,643,900 states generated (1,997,515 s/min), 16,612,909 distinct states found (237,737 ds/min), 4,473,360 states left on queue.
 
-######## 3. TLC vs chainmc on extra small configurations (TLC -workers 4 -coverage; chainmc --cfg tlc_mult=TRUE): exhaustive, TypeOK only
+######## 3. TLC vs cmc on extra small configurations (TLC -workers 4 -coverage; cmc --cfg tlc_mult=TRUE): exhaustive, TypeOK only
 n2e3code:  N = 2  MaxEpoch = 3  CPMode = TRUE  UnanimityRule = "code"  Confirm = FALSE  Zerf = FALSE 
   TLC:     4545 states generated, 1856 distinct states found, 0 states left on queue
-  chainmc: 4545 states generated, 1856 distinct states found, 0 states left on queue
+  cmc: 4545 states generated, 1856 distinct states found, 0 states left on queue
 n2e4code:  N = 2  MaxEpoch = 4  CPMode = TRUE  UnanimityRule = "code"  Confirm = FALSE  Zerf = FALSE 
   TLC:     89443 states generated, 34360 distinct states found, 0 states left on queue
-  chainmc: 89443 states generated, 34360 distinct states found, 0 states left on queue
+  cmc: 89443 states generated, 34360 distinct states found, 0 states left on queue
 n2e3ap:  N = 2  MaxEpoch = 3  CPMode = FALSE  UnanimityRule = "paper"  Confirm = FALSE  Zerf = FALSE 
   TLC:     29039 states generated, 7760 distinct states found, 0 states left on queue
-  chainmc: 29039 states generated, 7760 distinct states found, 0 states left on queue
+  cmc: 29039 states generated, 7760 distinct states found, 0 states left on queue
 n2e4cz:  N = 2  MaxEpoch = 4  CPMode = TRUE  UnanimityRule = "code"  Confirm = TRUE  Zerf = TRUE 
   TLC:     184735 states generated, 66536 distinct states found, 0 states left on queue
-  chainmc: 184735 states generated, 66536 distinct states found, 0 states left on queue
+  cmc: 184735 states generated, 66536 distinct states found, 0 states left on queue
 n3e2paper:  N = 3  MaxEpoch = 2  CPMode = TRUE  UnanimityRule = "paper"  Confirm = FALSE  Zerf = FALSE 
   TLC:     330843 states generated, 37840 distinct states found, 0 states left on queue
-  chainmc: 330843 states generated, 37840 distinct states found, 0 states left on queue
+  cmc: 330843 states generated, 37840 distinct states found, 0 states left on queue
 n3e2cz:  N = 3  MaxEpoch = 2  CPMode = TRUE  UnanimityRule = "code"  Confirm = TRUE  Zerf = TRUE 
   TLC:     204901 states generated, 23760 distinct states found, 0 states left on queue
-  chainmc: 204901 states generated, 23760 distinct states found, 0 states left on queue
+  cmc: 204901 states generated, 23760 distinct states found, 0 states left on queue
 n3e2ap:  N = 3  MaxEpoch = 2  CPMode = FALSE  UnanimityRule = "code"  Confirm = FALSE  Zerf = FALSE 
   TLC:     340717 states generated, 36800 distinct states found, 0 states left on queue
-  chainmc: 340717 states generated, 36800 distinct states found, 0 states left on queue
+  cmc: 340717 states generated, 36800 distinct states found, 0 states left on queue
 
 ######## 4. Without tlc_mult (one successor per Adopt binding): distinct identical, generated lower
 64680415 states generated, 7412120 distinct states found, 0 states left on queue.
@@ -114,7 +114,7 @@ toy-bug2: AllReplied at depth 9: caught; simulate caught it
 toy-bug3: PhaseMonotone at depth 5: caught; simulate caught it
 toy_gate: ok
 
-######## 7. counterexample A as chainmc prints it (hc_paper_cp_n3_s1)
+######## 7. counterexample A as cmc prints it (hc_paper_cp_n3_s1)
 Error: Invariant S1_AgreementNonNone is violated.
   non-none priv[a][e] /= priv[b][e] (a=2 b=3 e=2)
 Error: The behavior up to this point is:

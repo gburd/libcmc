@@ -7,10 +7,10 @@ lede: >-
   The research libcmc grew out of, the review that hardened it, and its calibration.
 ---
 
-These pages were written while libcmc was `chainmc`, part of pg_chain
-(a PostgreSQL extension for chain replication), and are kept as
-written.  Where they name `chainmc`, `mc_`, `test/mc/` or `PLAN`, read
-`cmc`, `cmc_`, this repository and pg_chain's plan.
+The survey that led to libcmc's design, the adversarial review of its
+actor mode with the fix for each finding, and its calibration against
+TLC, all from 2026-11-02.  The current design is
+[Design]({{ '/reference/design/' | relative_url }}).
 
 - [Survey and original design]({{ '/background/survey/' | relative_url }})
 - [Adversarial review of actor mode]({{ '/background/review/' | relative_url }})
