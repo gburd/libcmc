@@ -127,3 +127,53 @@ libcmc checks step-function cores, not arbitrary deployed code.  A fork
 of CBMC is still not the answer (`docs/WHY.md`): it needs the same
 environment model written as harness code, does not scale to protocol
 depth, and refuses threaded shared-pointer code.
+
+## M1: canonical state and a real search (2026-11-04)
+
+M0 ran one path with one branch.  M1 takes the first milestone above --
+canonical memory -- together with the smallest search that forces it: a
+state reached by two different orders must be recognised as one, or an
+exhaustive search over a reconverging protocol never terminates.  That
+is M1's kill criterion.
+
+**The checkable state is a declared region.**  Canonicalising a whole
+glibc process image (an ASLR'd heap, stack, TLS, loader state) is the
+research problem; M1 does not attempt it.  Instead the target names its
+protocol state: `unsigned char cmc_state[N]` in BSS, which it zeroes at
+startup and owns entirely.  The checker finds that region's address by
+reading the `cmc_state` symbol from the binary with `nm` -- the target
+carries no libcmc header and no checker API, so it is still code written
+as it ships.  The fingerprint is `hash(cmc_state[0..N) || environment
+bytes)`, the same 128-bit scheme actor mode uses.  For M1 the demo is
+built `-no-pie` so the BSS address is fixed at link time; a PIE would add
+reading the load bias from `/proc/PID/maps`, deferred.
+
+**The search is stateless prefix replay** (MoDist, NSDI 2009), not
+process snapshots.  The checker keeps a worklist of action prefixes.  To
+explore a prefix it launches a fresh server under interception, replays
+exactly that sequence of environment choices, reaches the end state,
+hashes the declared region plus the environment, and -- if the
+fingerprint is new -- enumerates the enabled next actions and pushes
+each extended prefix.  No stopped processes are held; the cost is one
+re-execution per state, which is the price of not snapshotting.  BFS
+order gives shortest counterexamples, as in actor mode.
+
+**The demo that forces dedup** (`demo/kv.c`): a server holding two
+independent bytes `a`, `b` in `cmc_state`.  The client may SET a or SET b,
+one message each.  Reachable states are `00, 10, 01, 11`; `11` is reached
+both by `10 -> 11` and by `01 -> 11`.  A correct checker finds exactly
+four distinct states, the diamond merged.  Built `-DBUG`, SET a also
+zeroes b, so the order "set b, then set a" loses b; the invariant "a byte
+once set stays set" catches it with a replayable prefix.  This is the
+actor-mode toy lock-server's role, for process mode.
+
+**Pass:** correct `kv` gives four distinct states with at least one
+dedup hit (the diamond closed), invariant holds; `kv-bug` reports the
+invariant violated with a prefix that reproduces it.  **Fail:** the two
+orders to `11` hash differently (no merge, over-count, or a search that
+does not terminate) -- then canonicalisation is the blocker and the
+measurement says so.
+
+Still out of M1: a real allocator's heap in the region, several nodes,
+the clock, threads, and wiring libcmc's own engine onto the frontier.
+

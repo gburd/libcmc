@@ -1,0 +1,19 @@
+# Raw output, 2026-11-04: process-mode M0+M1 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (  prefix: SET-b SET-a;distinct states so far: 4;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge)
+
+# M1 symbol lookup (non-PIE, fixed address):
+# cmc_state @ 0x0000000000404011
+# PIE refused:
+# ./kv-pie is a PIE; M1 needs -no-pie (the symbol address is fixed only then)

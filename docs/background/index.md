@@ -16,3 +16,4 @@ TLC, all from 2026-11-02.  The current design is
 - [Adversarial review of actor mode]({{ '/background/review/' | relative_url }})
 - [Calibration against TLC]({{ '/background/calibration/' | relative_url }})
 - [Process mode M0]({{ '/background/process-mode-m0/' | relative_url }}) -- a prototype toward checking code written as it ships
+- [Process mode M1]({{ '/background/process-mode-m1/' | relative_url }}) -- canonical state and a real search over interleavings

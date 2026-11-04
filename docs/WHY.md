@@ -121,9 +121,12 @@ program's memory.  This is CMC's method (OSDI 2002) and MoDist's (NSDI
 the properties, replay and the TLC calibration.  The step-function mode
 stays as the fast path for deep exhaustive search, not a requirement.
 
-A feasibility prototype (M0) catches the "acknowledge before durable" bug
-in an ordinary blocking TCP server with a real `fsync`, no step function
-(`experiments/process-mode/`, `docs/measurements/2026-11-04-process-mode-m0.md`).
-The hard part beyond it is canonicalising memory so equal states hash
-equal; if that cannot be made to scale, the step-function mode remains
-the shipping answer.
+A feasibility prototype catches the "acknowledge before durable" bug in
+an ordinary blocking TCP server with a real `fsync`, no step function
+(M0), and a second milestone runs a terminating breadth-first search over
+the interleavings of a server with no step function, deduping states that
+reconverge (M1): `experiments/process-mode/`, and the measurements
+`docs/measurements/2026-11-04-process-mode-m0.md` and `-m1.md`.  The hard
+part beyond M1 is canonicalising a real allocator's heap, not just a
+region the target names; if that cannot be made to scale, the
+step-function mode remains the shipping answer.

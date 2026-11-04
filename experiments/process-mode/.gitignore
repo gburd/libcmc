@@ -3,6 +3,10 @@ server-bug
 checker
 checker-dbg
 checker-dbg.c
+kv
+kv-bug
+kv-pie
+search
 *.o
 pm-store.dat
 store.dat
