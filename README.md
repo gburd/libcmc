@@ -73,6 +73,11 @@ Release 0.1.0, 2026-11-03.  Single-threaded.
 There is no symmetry reduction or on-disk queue yet.  Clocks, partitions
 and multi-core nodes are planned (`docs/DESIGN.md`, "Roadmap").
 
+0.1.0 checks cores written as pure step functions (`CmcCore`); the I/O
+glue around them is not checked.  Checking C written as it ships, with no
+such rewrite, is the goal: a feasibility prototype is in
+`experiments/process-mode/`, and `docs/WHY.md` has the reasoning.
+
 ## CI
 
 GitHub Actions runs `make check` under gcc and clang, the MemorySanitizer

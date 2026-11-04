@@ -1,0 +1,8 @@
+server
+server-bug
+checker
+checker-dbg
+checker-dbg.c
+*.o
+pm-store.dat
+store.dat

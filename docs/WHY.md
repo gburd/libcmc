@@ -12,6 +12,15 @@ why a new tool was written instead of using an existing one.  It is the
 decision record; `01-survey-and-design.md` has the full survey with
 sources, and `02-review-actor-mode.md` the adversarial review.
 
+**What 0.1.0 checks, and what it does not.**  libcmc links the object
+files the product links, so there is no second model to keep in sync.
+But it checks only code written as pure, deterministic step functions
+(`CmcCore`); the I/O glue around a core -- the sockets, the disk, the
+timers -- is not checked.  The core ask is to prove C code written **as
+it will be deployed**, with no such rewrite.  0.1.0 does not meet it.
+The path to it is process mode, not a different tool: see "The north
+star" below and `docs/measurements/2026-11-04-process-mode-m0.md`.
+
 ## The requirement
 
 The request was for "TLA+ like model validation that uses the sources
@@ -76,3 +85,45 @@ were never released as tools (CMC, MaceMC).
   parallelise first (sharded table), then consider LTSmin as a back end.
 - If someone has to write a second environment model in another
   language, the case for Spin or LTSmin returns.
+
+## The north star
+
+The step-function interface is a restriction the core ask does not want:
+it checks logic extracted into pure functions, not code written as it
+ships.  The way to lift it is not a different tool but a second mode of
+this one.
+
+**Why not fork CBMC.**  CBMC proves properties of one C program up to a
+fixed unwinding.  Three things rule out a fork as the answer:
+
+- It still needs the environment (the network, the disks, crashes)
+  written as C harness code -- a second implementation of exactly what
+  need 3 above rules out.  CBMC's library models `read` and `write` and
+  pthreads, but nothing for `socket`, `connect`, `send`, `recv`, `poll`,
+  `epoll_wait`, `fsync` or `pwrite`.
+- It does not scale to protocol depth.  On the HC core already in
+  step-function form -- the easy case -- stock CBMC 5.91 proved one step
+  in 59 s using 7.9 GB, and had not finished two steps when stopped; the
+  bug is six steps deep.  libcmc finds it in 0.01 s.  Production code with
+  loops, buffers and `malloc` is worse.
+- It refuses threaded code that writes shared pointers ("pointer handling
+  for concurrency is unsound", open since 2016).
+
+CBMC earns its place on single functions at a trust boundary (a parser, a
+codec): use it there, as an ordinary dependency.
+
+**Process mode.**  Run the deployed program itself, and model-check it at
+the boundary where it calls the OS: intercept the syscalls, serve them
+from libcmc's existing environment model, count a step as run-to-syscall,
+branch with `fork()`, and recognise repeated states by hashing the
+program's memory.  This is CMC's method (OSDI 2002) and MoDist's (NSDI
+2009), and it keeps everything 0.1.0 has: the search, the environment,
+the properties, replay and the TLC calibration.  The step-function mode
+stays as the fast path for deep exhaustive search, not a requirement.
+
+A feasibility prototype (M0) catches the "acknowledge before durable" bug
+in an ordinary blocking TCP server with a real `fsync`, no step function
+(`experiments/process-mode/`, `docs/measurements/2026-11-04-process-mode-m0.md`).
+The hard part beyond it is canonicalising memory so equal states hash
+equal; if that cannot be made to scale, the step-function mode remains
+the shipping answer.

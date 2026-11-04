@@ -1,0 +1,9 @@
+# Raw output, 2026-11-04: process-mode M0 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+ok   correct server, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1)
+ok   correct server, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1)
+ok   buggy server, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1)
+ok   buggy server, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1)
+process-mode M0: ok (a durability bug in a server written as it ships, caught at the syscall boundary)
