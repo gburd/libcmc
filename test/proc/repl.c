@@ -1,6 +1,6 @@
 /*
- * demo/repl.c: a two-node replicated register, written as it ships
- * (experiments/process-mode/DESIGN.md, M4).  Ordinary blocking sockets,
+ * test/proc/repl.c: a two-node replicated register, written as it ships
+ * (test/proc/DESIGN.md, M4).  Ordinary blocking sockets,
  * no libcmc header, no step function.  The checker runs node 0 (primary)
  * and node 1 (backup) as two processes and owns every socket between
  * them, so it chooses the delivery order.
@@ -26,8 +26,8 @@
  * The checker intercepts connect/accept/send/recv and never lets a real
  * socket form, so the ports are only logical peer ids.
  *
- *   cc -O1 -no-pie -o repl       demo/repl.c
- *   cc -O1 -no-pie -DBUG -o repl-bug demo/repl.c
+ *   cc -O1 -no-pie -o repl       test/proc/repl.c
+ *   cc -O1 -no-pie -DBUG -o repl-bug test/proc/repl.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

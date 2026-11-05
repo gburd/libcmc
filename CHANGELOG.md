@@ -3,6 +3,28 @@
 libcmc follows semantic versioning.  Before 1.0.0 a minor release may
 change the API in `include/cmc.h`; this file says when it does.
 
+## Unreleased
+
+- `cmc --model-file FILE` checks a program as it ships: each node is the
+  shipped binary, run unmodified as a process under seccomp user
+  notification (Linux x86-64), and the checker is the network, the
+  clock and the crash between them.  A model file names the program,
+  the environment (a client write, timeouts, crashes, drops, a depth
+  bound) and the invariants, in a small expression language over each
+  node's reported state and the replies clients received.  Breadth-first
+  search gives the shortest counterexample, named action by action;
+  `--simulate` takes seeded random walks.  `--binary` checks another
+  build against the same file.  This is now the way to use libcmc; the
+  in-process `CmcCore` interface is the engine's calibration path.
+- The loader refuses every model-file section, key or value it does not
+  implement, and every invariant it cannot parse whole, instead of
+  ignoring it.
+- `make install` installs the `cmc` binary and `lib/libcmc/cmc-preload.so`,
+  the deterministic heap and logical clock a checked program runs under;
+  an installed `cmc` finds it from its own location, or from
+  `CMC_PRELOAD`.
+- No change to `include/cmc.h`.  `cmc_main()` accepts `--model-file`.
+
 ## 0.1.0 (2026-11-03)
 
 The first release: an explicit-state model checker for protocol code

@@ -1,12 +1,24 @@
 .\" Copyright 2026 Greg Burd
 .\" SPDX-License-Identifier: Apache-2.0
-.Dd November 3, 2026
+.Dd November 5, 2026
 .Dt CMC 1
 .Os
 .Sh NAME
 .Nm cmc
-.Nd explicit-state model checker for C protocol cores
+.Nd explicit-state model checker for C protocol code
 .Sh SYNOPSIS
+.Nm
+.Fl -model-file Ar file
+.Op Fl -binary Ar path
+.Op Fl -bfs | Fl -simulate
+.Op Fl -seed Ar n
+.Op Fl -walks Ar k
+.Op Fl -depth Ar d
+.Op Fl -max-states Ar n
+.Op Fl -time Ar seconds
+.Op Fl -crashes Ar n
+.Op Fl -drops Ar n
+.Op Fl -timeouts Ar n
 .Nm
 .Fl -model Ar name
 .Op Fl -tlc-cfg Ar file | Fl -cfg Ar key Ns = Ns Ar value Ns Op , Ns ...
@@ -44,29 +56,46 @@
 .Sh DESCRIPTION
 .Nm
 explores every interleaving of a set of protocol nodes, the network
-between them, their timers, their disk writes and their crashes, up to
-the budgets given on the command line, and checks the named properties
-in every state it reaches.
-The nodes run the C step functions that the product itself links; see
-.Xr cmc 7
-for the model and
-.Xr libcmc 3
-for the interface a core implements.
+between them, their timeouts and their crashes, up to the budgets given,
+and checks the properties in every state it reaches.
 .Pp
-There is no single
-.Nm
-binary.
-A program that uses libcmc writes a
+With
+.Fl -model-file ,
+the nodes are the program you ship, run unmodified as processes; the
+model file names the program, the environment to explore and the
+invariants.
+That is the way to check a product; see
+.Sx Checking a program
+below,
+.Lk https://gregburd.codeberg.page/libcmc/reference/model-file/ "the model file" ,
+and
+.Xr cmc 7 .
+.Pp
+With
+.Fl -model ,
+the nodes are an in-process model: C step functions written against
+.Xr libcmc 3 .
+That interface is the engine's calibration path: the
+.Cm hc
+core reproduces TLC's results on a published consensus specification.
+The rest of this page, from
+.Sx Choosing the model and properties ,
+describes it.
+.Pp
+.Nm make install
+installs
+.Nm .
+A program that embeds the engine with in-process models of its own
+writes a
 .Fn main
 that passes its table of models to
 .Fn cmc_main ,
 and links against
 .Pa libcmc.a ;
-that program is its
-.Nm .
-The binary built by this repository,
-.Pa build/cmc ,
-carries the models
+that program is a
+.Nm
+too.
+The binary built by this repository carries the in-process models
 .Cm hc
 (the calibration core),
 .Cm toy ,
@@ -78,6 +107,47 @@ to
 Output follows the wording of TLC, the TLA+ model checker, so the two can
 be compared line by line.
 Depth counts the initial state as 1.
+.Ss Checking a program
+.Bl -tag -width Ds
+.It Fl -model-file Ar file
+Check the program the model file names, with its environment and
+invariants.
+Linux x86-64 only: the nodes run under seccomp user notification.
+Every key the file sets must be one
+.Nm
+implements; an unknown or unsupported key is an error, not ignored.
+.It Fl -binary Ar path
+Check this program instead of the file's
+.Cm binary ,
+for example a build with a planted bug.
+It must be a non-PIE executable
+.Pq built with Fl no-pie .
+.It Fl -crashes Ar n , Fl -drops Ar n , Fl -timeouts Ar n
+Override the file's budgets.
+.It Fl -depth Ar d
+Bound the search to
+.Ar d
+actions; a search that reaches it is reported as incomplete.
+With
+.Fl -simulate ,
+the length of each walk, default 100.
+.El
+.Pp
+.Fl -bfs ,
+.Fl -simulate ,
+.Fl -seed ,
+.Fl -walks ,
+.Fl -max-states
+and
+.Fl -time
+work as for in-process models, except that walk
+.Va i
+of a simulation does not take its own seed: the same
+.Fl -seed
+takes the same walks.
+Any other option with
+.Fl -model-file
+is an error.
 .Ss Choosing the model and properties
 .Bl -tag -width Ds
 .It Fl -model Ar name
@@ -226,8 +296,29 @@ Do not print the counterexample.
 Print, for each action kind, the states it generated and the new
 distinct states it found.
 .El
+.Sh ENVIRONMENT
+.Bl -tag -width Ds
+.It Ev CMC_PRELOAD
+The path of
+.Pa cmc-preload.so ,
+the library every checked node runs under.
+By default it is found beside the running program (a build tree), then
+in
+.Pa ../lib/libcmc
+from it (an installed
+.Pa bin/cmc ) .
+A program of your own that calls
+.Fn cmc_main
+must set it.
+A node it did not load into is an error.
+.El
 .Sh FILES
 .Bl -tag -width Ds
+.It Pa *.model
+Model files; see
+.Lk https://gregburd.codeberg.page/libcmc/reference/model-file/ "the model file" .
+.It Pa cmc-preload.so
+A deterministic heap and a logical clock for the checked program.
 .It Pa *.replay
 Replay files.
 A header names the model, settings and budgets; each following
@@ -247,10 +338,21 @@ durability, a cap), or a witness was never reached.
 Incomplete: a state, time or depth limit stopped the search before it
 finished, with no violation found.
 .It 3
-Usage error, a bad setting, or a replay file that cannot be run.
+Usage error, a bad setting, a model file that cannot be used, or a
+replay file that cannot be run.
 .El
 .Sh EXAMPLES
-Check every property of the toy lock server:
+Check a server as it ships, then a build of it with a planted bug:
+.Bd -literal -offset indent
+$ cmc --model-file kvserver.model
+\&...
+Model checking completed. No error has been found.
+$ cmc --model-file kvserver.model --binary ./kvserver-bug
+Error: Invariant no_lost_ack is violated.
+\&...
+.Ed
+.Pp
+Check every property of the toy lock server, an in-process model:
 .Bd -literal -offset indent
 $ build/cmc --model toy --all-props
 \&...

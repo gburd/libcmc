@@ -1,10 +1,9 @@
-# demo/elect.c: a two-node leader-election sketch.  Time is an environment
+# test/proc/elect.c: a two-node leader-election sketch.  Time is an environment
 # action: the follower's blocked recv is satisfied by a heartbeat OR a
 # timeout the checker fires (bounded by `timeouts`).
 [target]
 nodes = 2
 [environment]
-client = 0          # node 0 initiates; no client WRITE
 timeouts = 1        # the follower's election timer may fire once
 [invariants]
 # no two nodes are leader (role==1) at the same term.

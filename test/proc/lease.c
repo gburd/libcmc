@@ -1,5 +1,5 @@
 /*
- * elect/lease demo for process-mode M5b (experiments/process-mode).
+ * elect/lease demo for process-mode M5b (test/proc).
  *
  * A single leaseholder that may write to shared storage only while its
  * lease is valid.  The lease is valid until `expiry` on the (logical)
@@ -20,8 +20,8 @@
  * it listens on BASE+0 so the checker can drive its recv and its clock.
  * Canonical state on fd 3: [count=2][wrote][expired], 1 = true.
  *
- *   cc -O1 -no-pie -o lease     demo/lease.c
- *   cc -O1 -no-pie -DBUG -o lease-bug demo/lease.c
+ *   cc -O1 -no-pie -o lease     test/proc/lease.c
+ *   cc -O1 -no-pie -DBUG -o lease-bug test/proc/lease.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

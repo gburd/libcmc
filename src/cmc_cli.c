@@ -1,6 +1,10 @@
 /*
- * cmc.c: command-line driver for the cmc engine (cmc.c).
+ * cmc_cli.c: command-line driver: cmc --model-file FILE checks a program
+ * as it ships (the process front end, cmc_proc.c); cmc --model NAME runs
+ * an in-process CmcCore model (the engine's calibration path, cmc.c).
  *
+ *   cmc --model-file replog.model
+ *   cmc --model-file replog.model --binary ./replog-debug --simulate --walks 10000
  *   cmc --model hc --tlc-cfg calib/hc/cfg/hc_paper_cp_n3_s1.cfg
  *   cmc --model hc --cfg N=3,MaxEpoch=3,CPMode=TRUE,UnanimityRule=code \
  *           --inv S1_AgreementNonNone --prop S4_EpochMonotone
@@ -12,6 +16,7 @@
  * and "The depth of the complete state graph search is D." (init = 1).
  */
 #include "cmc.h"
+#include "cmc_proc.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -27,7 +32,10 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-			"usage: cmc --model NAME [--tlc-cfg FILE | --cfg k=v,...]\n"
+			"usage: cmc --model-file FILE [--binary PATH]\n"
+			"         [--bfs | --simulate [--seed N] [--walks K]] [--depth D]\n"
+			"         [--max-states N] [--time S] [--crashes N] [--drops N] [--timeouts N]\n"
+			"       cmc --model NAME [--tlc-cfg FILE | --cfg k=v,...]\n"
 			"         [--inv NAME[,NAME]] [--prop NAME[,NAME]] [--all-props]\n"
 			"         [--bfs | --dfs DEPTH | --simulate [--seed N] [--walks K] [--depth D]\n"
 			"          | --replay FILE] [--det] [--max-states N] [--time S]\n"
@@ -211,6 +219,56 @@ kind_word(const CmcModel *m, const char *prop)
 	return "Engine check";
 }
 
+/* cmc --model-file FILE: the process front end (cmc_proc.c).  Every
+ * option it cannot honour is an error, never silently ignored. */
+static int
+proc_main(int argc, char **argv)
+{
+	CmcProcOptions po = {0};
+
+	po.seed = 1;
+	po.walks = 1000;
+	po.depth = -1;
+	po.crashes = po.drops = po.timeouts = -1;
+	for (int i = 1; i < argc; i++)
+	{
+		const char *a = argv[i];
+
+#define ARG() (i + 1 < argc ? argv[++i] : (usage(), ""))
+		if (!strcmp(a, "--model-file"))
+			po.model_file = ARG();
+		else if (!strcmp(a, "--binary"))
+			po.binary = ARG();
+		else if (!strcmp(a, "--bfs"))
+			po.simulate = 0;
+		else if (!strcmp(a, "--simulate"))
+			po.simulate = 1;
+		else if (!strcmp(a, "--seed"))
+			po.seed = strtoull(ARG(), NULL, 10);
+		else if (!strcmp(a, "--walks"))
+			po.walks = strtoull(ARG(), NULL, 10);
+		else if (!strcmp(a, "--depth"))
+			po.depth = atol(ARG());
+		else if (!strcmp(a, "--max-states"))
+			po.max_states = strtoull(ARG(), NULL, 10);
+		else if (!strcmp(a, "--time"))
+			po.time_limit = atof(ARG());
+		else if (!strcmp(a, "--crashes"))
+			po.crashes = atoi(ARG());
+		else if (!strcmp(a, "--drops"))
+			po.drops = atoi(ARG());
+		else if (!strcmp(a, "--timeouts"))
+			po.timeouts = atoi(ARG());
+		else
+		{
+			fprintf(stderr, "cmc: %s is not supported with --model-file\n", a);
+			return 3;
+		}
+#undef ARG
+	}
+	return cmc_proc_main(&po);
+}
+
 int
 cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 {
@@ -229,6 +287,9 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 
 	models = tab;
 	nmodels = ntab;
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--model-file"))
+			return proc_main(argc, argv);
 	cmc_options_default(&o);
 	o.progress_s = 60;
 	for (int i = 1; i < argc; i++)

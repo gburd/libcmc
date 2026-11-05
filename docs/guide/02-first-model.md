@@ -4,7 +4,7 @@ parent: Guide
 nav_order: 2
 permalink: /guide/02-first-model/
 lede: >-
-  A write that must survive a crash, a planted bug, and the counterexample libcmc prints for it.
+  A server written as it ships, a model file that says what to check, a planted bug, and the counterexample libcmc prints for it.
 ---
 
 1. TOC
@@ -12,174 +12,131 @@ lede: >-
 
 ---
 
-This page builds a complete model in one C file: a client writes a
-value to a server, the server makes it durable and then acknowledges it,
-and the property is that a write the client saw acknowledged survives a
-crash.  Then it plants the classic bug, acknowledging before the write
-is durable, and shows libcmc finding it.
+This page checks a small replicated server exactly as it would ship:
+ordinary C, blocking TCP, no libcmc header, no rewrite for the checker.
+A client writes a value; the primary forwards it to a backup and
+acknowledges once both have made it durable.  The property is that a
+write the client saw acknowledged survives a crash.  Then it plants the
+classic bug, acknowledging too early, and shows libcmc finding it.
 
-Every code block here is a region of
-`docs/_includes/snippets/quickstart.c`.  `make check` builds that file
-and checks that it behaves as this page says.
+The server is `docs/_includes/snippets/kvserver.c` and the model file
+is `docs/_includes/snippets/kvserver.model`.  `make check` builds the
+server, runs every command on this page, and checks that the output is
+what the page says.  This needs Linux on x86-64.
 
-## The state
+## The server
 
-A node's state is a fixed-size struct of plain bytes, with no pointers.
-The engine copies, compares and hashes it as bytes, so unused fields
-must stay zero.  Both nodes use the same layout; the first
-`durable_size` bytes are what survives a crash.
+Two nodes run the same program; the first argument is the node number.
+Node 0 is the primary, node 1 the backup.  Node `i` listens on port
+20000 + `i`, which is how libcmc routes a connection: it is the network,
+and no real socket ever forms.
 
-{% include snippet.html file="quickstart.c" region="state" %}
+{% include snippet.html file="kvserver.c" region="server" %}
 
-## The step function
+## The state hook
 
-`step()` handles one event at one node.  It reads only its arguments:
-no clock, no randomness, no globals, no I/O.  It changes the state in
-place and emits effects through `cmc_out_push()`.
+libcmc runs the real program, so it needs the program to say what its
+state is.  That is the only code it asks for:
 
-The client sends a write when it gets a client request, and reports the
-acknowledgement as a reply.  The server asks for its write to be made
-durable (`CMC_OUT_PERSIST`) and acknowledges when the engine tells it
-the write reached disk (`CMC_EV_FLUSHED`).
+{% include snippet.html file="kvserver.c" region="hook" %}
 
-{% include snippet.html file="quickstart.c" region="step" %}
+After each change the server reports its logical state as a length byte
+and the bytes: what it holds in memory on descriptor 3, what it has
+made durable on descriptor 193.  A crash keeps only the durable report.
 
-`step()` never writes the durable byte itself.  The engine owns the
-durable part of the state: when a persist completes it calls
-`apply_persist()`, and it checks after every step that the durable
-bytes did not change.  That is what lets it model a crash honestly: the
-volatile bytes are lost, and of the persists still pending, any prefix
-may have reached disk.
+The report must be **canonical**, the same bytes for the same logical
+state, and **complete**: everything the node's future depends on.  If a
+field is left out, two states that differ look the same, libcmc merges
+them, and it can miss a bug.  For this server, the one value is all of
+it.
 
-## The core
+## The model file
 
-The vtable ties it together.  The engine calls `cfg_set` for each
-`--cfg key=value`; this core has no settings.  `clients` says which
-nodes take client requests.
+{% include snippet.html file="kvserver.model" %}
 
-{% include snippet.html file="quickstart.c" region="core" %}
-
-## The properties
-
-A property reads the world through accessors: `cmc_node()` for a
-node's state, `cmc_nreplies()` and `cmc_reply()` for the ghost log of
-replies sent to clients.
-
-{% include snippet.html file="quickstart.c" region="props" %}
-
-`Acked` is a witness: some reachable state must satisfy it.  Without
-it, a model in which the client never gets an acknowledgement would
-pass `NoLostAck` trivially, and so would a model whose budgets are too
-small to reach the interesting states.
-
-## main()
-
-{% include snippet.html file="quickstart.c" region="main" %}
-
-`cmc_main()` is the whole `cmc(1)` command line.  Your program carries
-your models and is your checker.
+It names the program and the number of nodes, the environment to
+explore, and the invariant.  It carries no behaviour; the protocol is
+the program.  `replies` is the log of acknowledgements a client
+received, and `node[i]` is what node `i` last reported, or after a
+crash, what it last made durable.  An unknown or unsupported key is an
+error, so a typo cannot silently drop a crash from the search.
 
 ## Run it
 
 ```sh
-cc -std=c11 -Iinclude docs/_includes/snippets/quickstart.c \
-    build/libcmc.a -o quickstart
-./quickstart --model quickstart --all-props --crashes 1
+cc -no-pie -o kvserver docs/_includes/snippets/kvserver.c
+cp docs/_includes/snippets/kvserver.model .
+build/cmc --model-file kvserver.model
 ```
 
 ```
-cmc: model quickstart, cfg "", breadth-first search, world 488 bytes
+cmc: model file kvserver.model, binary kvserver, 2 nodes, breadth-first search
+  environment: client_write 7, timeouts 0, crashes 1, drops 0
 Model checking completed. No error has been found.
-  Estimated probability of a 128-bit fingerprint collision (n^2/2^129): 1.32e-36
-Witness Acked: reached
-  Acked first reached at depth 5
-37 states generated, 30 distinct states found, 0 states left on queue.
-The depth of the complete state graph search is 7.
-Finished in 0.00s
+21 states generated, 16 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 6.
 ```
 
-libcmc tried every order of the client request, the two messages, the
-disk write and one crash of either node, and found no state that breaks
-`NoLostAck`.  The exit status is 0.
+libcmc ran both nodes as real processes, tried every order of the
+connection, the messages and one crash of either node at every point,
+and found no state that breaks `no_lost_ack`.  The exit status is 0.
+`-no-pie` is required: the checker reads a fixed-address heap.
 
 ## Plant the bug
 
-Built with `-DQUICKSTART_BUG`, the server acknowledges as soon as it
-asks for the write, before the write is durable.  Without a crash,
-nothing goes wrong:
+Built with `-DKV_BUG`, the primary acknowledges as soon as the value is
+in its memory, before anyone has made it durable.  Check that build
+against the same model file.  Without a crash nothing goes wrong:
 
 ```sh
-cc -std=c11 -DQUICKSTART_BUG -Iinclude docs/_includes/snippets/quickstart.c \
-    build/libcmc.a -o quickstart-bug
-./quickstart-bug --model quickstart --all-props
+cc -no-pie -DKV_BUG -o kvserver-bug docs/_includes/snippets/kvserver.c
+build/cmc --model-file kvserver.model --binary ./kvserver-bug --crashes 0
 ```
 
 ```
 Model checking completed. No error has been found.
 ```
 
-Allow one crash, and libcmc finds it:
+With the model's one crash, libcmc finds it:
 
 ```sh
-./quickstart-bug --model quickstart --all-props --crashes 1 --trace-out bug.replay
+build/cmc --model-file kvserver.model --binary ./kvserver-bug
 ```
 
 ```
-Error: Invariant NoLostAck is violated.
-  write 1 was acknowledged, but the server restarted with value 0
-Error: The behavior up to this point is:
-State 1: <Initial predicate>
-  node 0: server value=0 restarted=0
-  node 1: client
-  net:
-  ...
-State 2: <CLIENT node 1>
-  node 0: server value=0 restarted=0
-  node 1: client
-  net: [1->0 x1 WRITE(1)]
-  ...
-State 3: <DELIVER 1->0 #0>
-  node 0: server value=0 restarted=0
-  node 1: client
-  net: [0->1 x1 ACK(1)]
-  env: ... | n0 ... persists=1 ...
-State 4: <DELIVER 0->1 #0>
-  ...
-  replies: (n1,1)
-
-State 5: <CRASH node 0>
-  node 0: server value=0 restarted=1
-  ...
-  replies: (n1,1)
-Replay file written to bug.replay (4 actions).
+Error: Invariant no_lost_ack is violated.
+Error: The behavior up to this point is (3 actions):
+    1. accept client->n0
+    2. deliver client->n0
+    3. crash n0
+  node states: node[0]=() node[1]=()
+  replies: (n0,7)
 ```
 
-Four events: the client asks, the server receives the write and
-acknowledges it with the persist still pending, the client gets the
-acknowledgement, and the server crashes before the persist completes.
-Breadth-first search finds the shortest such sequence.  The exit status
-is 1.
+Three events: the primary accepts the client's connection, reads the
+write and acknowledges it, then crashes before the value is durable
+anywhere.  The client holds an acknowledgement for 7, and no node has
+it.  Breadth-first search finds the shortest such sequence; the exit
+status is 1.
 
-The replay file runs the same four events through the real step code,
-printing every state:
+Simulation finds it too:
 
 ```sh
-./quickstart-bug --replay bug.replay --all-props
+build/cmc --model-file kvserver.model --binary ./kvserver-bug --simulate --seed 1 --walks 200
 ```
 
-Simulation finds it too, and prints the seed that reproduces it:
-
-```sh
-./quickstart-bug --model quickstart --all-props --crashes 1 --simulate --walks 1000
-```
+A simulation that finds nothing exits 2, "no violation found", never 0:
+random walks are not exhaustive.
 
 ## What to take from this
 
 - The bug needs a crash to show.  A pass means "no violation within
-  these budgets"; raise `--crashes`, `--drops` and `--clients` until
-  your planted bugs are caught.
-- The witness guards against passing for the wrong reason.
-- The planted bug lives in the shipped source behind `#ifdef`.  Your
-  gate builds each variant and requires each one to be caught.  That is
-  the subject of the
-  [next page]({{ '/guide/03-in-your-project/' | relative_url }}).
+  these budgets"; raise `crashes`, `drops` and `timeouts` until your
+  planted bugs are caught.
+- Check that the interesting states are reached.  An invariant over
+  `replies` passes trivially if no acknowledgement is ever sent; `make
+  check` confirms that one is.
+- The planted bug lives in the shipped source behind `#ifdef`, and the
+  same model file checks every build.  The
+  [next page]({{ '/guide/03-in-your-project/' | relative_url }}) turns
+  that into a gate.

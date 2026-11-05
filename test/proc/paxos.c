@@ -1,5 +1,5 @@
 /*
- * paxos for process-mode M7 (experiments/process-mode): a sizing
+ * paxos for process-mode M7 (test/proc): a sizing
  * workload.  It is not yet the Paxos example; the examples follow M8.
  *
  * Single-decree Paxos: two proposers (nodes 0 and 1) and three acceptors
@@ -28,7 +28,7 @@
  * requires; a proposer persists its decision.  A crashed node keeps only
  * that.
  *
- *   cc -O1 -no-pie -o paxos demo/paxos.c
+ *   cc -O1 -no-pie -o paxos test/proc/paxos.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

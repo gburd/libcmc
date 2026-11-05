@@ -1,8 +1,7 @@
-# demo/bigmsg.c: an engine probe (M7).  A 65-byte write exceeds the
+# test/proc/bigmsg.c: an engine probe (M7).  A 65-byte write exceeds the
 # checker's 64-byte message limit; the right verdict is an engine error.
 [target]
 nodes = 2
 [environment]
-client = 0
 [invariants]
 trivially = "1 == 1"

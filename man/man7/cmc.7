@@ -1,25 +1,105 @@
 .\" Copyright 2026 Greg Burd
 .\" SPDX-License-Identifier: Apache-2.0
-.Dd November 3, 2026
+.Dd November 5, 2026
 .Dt CMC 7
 .Os
 .Sh NAME
 .Nm cmc
-.Nd the libcmc model: cores, worlds, the environment and its rules
+.Nd the libcmc model: programs, worlds, the environment and its rules
 .Sh DESCRIPTION
 libcmc is an explicit-state model checker for protocol code written in
 C.
-A protocol's logic is written once, as pure step functions.
-The product calls them; the checker links the same object files and
-explores every interleaving of messages, timers, disk writes, client
-requests and crashes, up to a bound.
-The code checked is the code that runs.
+It checks the program you ship: each node is that program, run
+unmodified as a process, and the checker is the network, the clock and
+the crash between them.
+It explores every interleaving of connections, messages, timeouts,
+crashes and lost messages, up to a bound, and checks invariants in
+every state it reaches.
+A model file says which program, which environment and which
+invariants; it carries no behaviour.
 .Pp
-This page describes the model the engine explores.
-.Xr libcmc 3
-gives the interface, and
+The engine has a second front end, in-process step functions
+.Pq Vt CmcCore ,
+which is how it is calibrated against TLC; that model is described from
+.Sx Cores and worlds
+on.
 .Xr cmc 1
-the command line.
+gives the command line, and
+.Xr libcmc 3
+the C interface.
+.Ss Programs as nodes
+.Nm cmc Fl -model-file
+starts one process per node, the same program each time, with the node
+number as its first argument.
+Each runs under seccomp user notification and under
+.Pa cmc-preload.so ,
+which gives it a heap at fixed addresses and routes the clock and
+.Fn getrandom
+to the checker.
+The checker answers every
+.Fn socket ,
+.Fn bind ,
+.Fn listen ,
+.Fn connect ,
+.Fn accept ,
+.Fn read ,
+.Fn write
+and
+.Fn close
+on a connection itself: no real socket forms.
+Node
+.Va i
+listens on 127.0.0.1 port 20000 +
+.Va i ,
+and a connection goes to the node whose port was dialled.
+.Pp
+A node that calls
+.Fn accept
+or reads a connection with nothing the search has chosen to deliver
+stays blocked in the kernel.
+When every node is blocked or has exited the world is
+.Em quiescent :
+the checker reads each node's state, checks the invariants, and the
+enabled actions are the next steps:
+.Bl -tag -width "TIMEOUT" -compact
+.It ACCEPT
+A node in
+.Fn accept
+takes a connection waiting at it.
+.It DELIVER
+A node reading a connection gets the oldest message on it; each
+connection is FIFO, as TCP is.
+.It EOF
+The peer is gone and the connection is drained: the read returns 0.
+.It TIMEOUT
+Timeout budget is left: the read is satisfied by the one byte
+.Ql T
+instead, and the logical clock advances one second.
+.It CRASH
+Crash budget is left: a live node dies.
+.It DROP
+Drop budget is left: the oldest message on a connection is lost.
+.El
+.Pp
+A node's state is what it reports.
+After each change it writes a canonical encoding of its logical state,
+a length byte then the bytes, to file descriptor 3; what it has made
+durable it writes the same way to descriptor 193.
+A crash keeps only the durable encoding.
+The encoding must be canonical (the same logical state, the same bytes)
+and complete (everything the node's future depends on, its position in
+its own code included); anything left out lets the checker merge two
+states that differ, and miss a bug.
+.Pp
+The world is every node's state, liveness and what it is blocked in,
+its open connections, every connection's messages in order, the
+connections waiting to be accepted, the ghost log of client replies,
+the budgets left and the logical clock.
+Its 128-bit fingerprint dedups states.
+The search is stateless: to expand a world the checker starts every
+node again and replays the actions that reached it.
+Breadth-first search gives a shortest counterexample; simulation takes
+seeded random walks and is never a pass.
 .Ss Cores and worlds
 A
 .Em core
@@ -140,6 +220,12 @@ counterexample depths and distinct-state counts.
 These are the rules that keep a pass meaningful.
 A change to the engine that breaks one is a bug, whatever else it
 improves.
+For the process front end they read: actions come only from what the
+programs did (dialled, wrote, blocked) and from budgets; the world holds
+everything the future depends on; a crash keeps only what a node
+declared durable; a bound, a cap, an unknown model-file key, a missing
+preload or a node silent in a call the checker does not model is an
+error or an incomplete search, never a pass.
 .Bl -enum
 .It
 No omniscient oracle.
@@ -192,9 +278,21 @@ property, by search, by simulation and by replay.
 The engine itself, against TLC.
 .El
 .Sh LIMITS
-At most 8 nodes, 32 bytes per message or persist record, 16 effects per
-step, 2048 possible actions per state, 16 timers and 8 waiters per node,
-256 bytes of core settings, and 255 for each budget and cap.
+Process front end: Linux x86-64; at most 8 nodes, 64 bytes per write,
+128 messages in flight, 16 connections per node, 64 client replies, 64
+bytes of reported state per node, and 255 for each budget.
+A target must be built
+.Fl no-pie ,
+use the port convention, and do its I/O through the calls above; a node
+that blocks in anything else for 10 seconds is an error.
+A read gets at most one write, a connect never fails, and
+.Fn close
+does not notify the peer.
+.Pp
+In-process cores: at most 8 nodes, 32 bytes per message or persist
+record, 16 effects per step, 2048 possible actions per state, 16 timers
+and 8 waiters per node, 256 bytes of core settings, and 255 for each
+budget and cap.
 .Sh SEE ALSO
 .Xr cmc 1 ,
 .Xr libcmc 3
@@ -205,7 +303,8 @@ and
 in the source tree, and the guide at
 .Lk https://gregburd.codeberg.page/libcmc/
 .Sh HISTORY
-libcmc was first released on November 3, 2026.
+libcmc was first released on November 3, 2026, with in-process cores
+only; the process front end followed.
 Its design follows CMC (Musuvathi et al., OSDI 2002) and Stateright,
 and takes bounded liveness from MaceMC.
 .Sh AUTHORS

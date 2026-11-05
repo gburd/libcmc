@@ -1,0 +1,16 @@
+# kvserver.model: what cmc checks about kvserver.c (the guide's first
+# model).  It names the program, the environment to explore, and the
+# invariant.  It carries no behaviour: the protocol is the program.
+[target]
+binary = kvserver           # relative to this file
+nodes = 2                   # node 0 the primary, node 1 the backup
+
+[environment]
+client_write = 7            # a client connects to node 0 and writes 7
+crashes = 1                 # any one node may crash, at any point
+
+[invariants]
+# Every write a client saw acknowledged is in the durable state of a
+# node: node[i] is what node i reported (after a crash, only what it
+# made durable), and replies are the acknowledgements clients received.
+no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1]"

@@ -1,45 +1,28 @@
-# Process mode (prototype)
+# Process mode (prototypes M0 to M3)
 
-libcmc 0.1.0 checks the shipped object files, but only code written as
-pure, deterministic step functions (`CmcCore`).  Process mode is the path
-to the north star: proving C code written **as it will be deployed** --
-real syscalls, normal control flow, no rewrite for the checker.
-
-`DESIGN.md` is the design.  This is a time-boxed prototype in nine
-milestones, not part of the engine, not a gate, not built by `make`.
+Process mode checks C code written **as it will be deployed** -- real
+syscalls, normal control flow, no rewrite for the checker.  It is now
+libcmc's front end: `cmc --model-file` (`src/cmc_proc.c`,
+`docs/model-file.md`).  This directory keeps the four prototypes that
+proved it could work, and `DESIGN.md`, the record of every milestone.
+None of it is built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
   server written as it ships.
 - **M1** (`search.c`, `demo/kv.c`): a real BFS over interleavings with a
   canonical state, so a state reached two ways is counted once.
-- **M2** (`search2.c`, `demo/list.c`, `demo/detmalloc.c`): a real
-  `malloc` heap, and the boundary it draws.
+- **M2** (`search2.c`, `demo/list.c`, the deterministic heap now in
+  `src/cmc_preload.c`): a real `malloc` heap, and the boundary it draws.
 - **M3** (`mc.c`, `list.model`, `demo/list.c`): a declarative model file
-  drives the checker -- the decided shape (one engine, a model file, the
-  shipping binary).  See `docs/model-file.md` and the decision record
-  `docs/background/decision-model-file.md`.
-- **M4** (`mc2.c`, `repl.model`, `demo/repl.c`): multi-node.  The checker
-  runs N node processes and owns the network between them, exploring the
-  order inter-node messages are delivered.  First step toward the
-  consensus examples.
-- **M5** (`mc2.c`, `elect.model`, `demo/elect.c`): time as an environment
-  action.  A blocked `recv` is satisfied by a message or by a bounded
-  timeout the search fires, so leader election is explorable; a split
-  brain is caught.
-- **M5b** (`mc2.c`, `lease.model`, `demo/lease.c`): absolute time is
-  engine-controlled.  `detmalloc.so` forces `clock_gettime` off the vDSO;
-  the checker answers with a logical clock advanced only at timeouts, so
-  a stale-lease write is caught and replay stays deterministic.
-- **M6** (`mc2.c`, `durlog.model`, `demo/durlog.c`): crash and partition.
-  The checker may CRASH a node (losing volatile fd-3 state, keeping
-  durable fd-193 state) or DROP a message, both budgeted; a protocol that
-  acks a client before the write is durable loses a committed write, and
-  that is caught.
-- **M7** (`mc2.c`, `demo/{idle,fifo,chain,bigmsg,paxos}.c`): honest
-  verdicts.  Probes the M6 engine got wrong now give the right answer; a
-  bounded run is INCOMPLETE (exit 2), a cap an error; any topology the
-  nodes dial works; single-decree Paxos with five processes is checked
-  exhaustively, and seeded `--simulate` finds its bug too.
+  drives the checker.
+
+M4 to M7 (multi-node, timeouts, the logical clock, crash and drop, honest
+verdicts, Paxos) grew `mc2.c`, which M8 moved into `src/` as the front
+end.  Their programs and model files are in `test/proc/`, where
+`test/proc_gate.sh` runs them in `make check`; `DESIGN.md` and
+`docs/measurements/2026-11-0[45]-process-mode-*.md` have what each
+showed.  The model-file syntax of `mc.c` here is the M3 prototype's, not
+the shipped one.
 
 ## What M0 shows
 
@@ -89,7 +72,7 @@ that triggers it, `SET-b SET-a`.
 ## What M2 shows
 
 `demo/list.c` keeps its protocol state in a `malloc`'d linked list, run
-under a deterministic arena allocator (`demo/detmalloc.c`) the checker
+under a deterministic arena allocator (now `src/cmc_preload.c`) the checker
 `LD_PRELOAD`s.  It draws the honest boundary of process mode:
 
 ```
@@ -139,46 +122,6 @@ and nothing more.  `all k in acted : k in node[0]` -- every inserted key
 is still present -- holds for the correct build and is violated by the
 planted lost-key bug, caught with the shortest input sequence `2 1`.
 
-## What M4 shows
-
-`demo/repl.c` is a two-node replicated register (primary + backup),
-ordinary blocking sockets, no libcmc header.  `mc2.c` runs both as real
-processes and is the network between them: it chooses the order inter-node
-messages are delivered.  `repl.model` declares
-`agree_on_ack = "all r in replies : r.val in node[1]"` -- every value the
-client was acked is on the backup.
-
-```
-ok   M4 correct repl (agree-on-ack holds)   -> exit 0 (3 distinct states)
-ok   M4 bug repl (acked write backup lacks) -> exit 1 (node[0]=5 node[1]=0)
-```
-
-The correct primary acks only after the backup stores the value, so the
-invariant holds.  The `-DBUG` primary acks early; the checker finds the
-schedule where the backup is still behind an acknowledged write.  A
-blocked `recv` is a *deferred* seccomp notification -- the node stays
-stopped in the kernel until the search delivers it a message -- which is
-how one checker schedules several real processes.
-
-## What M5 shows
-
-`demo/elect.c` is a two-node election sketch: node 0 is the initial
-leader and sends a heartbeat; node 1 (follower) blocks on `recv`.  The
-checker delivers either the heartbeat or an election **timeout** -- time
-is an environment action, bounded by `timeouts` in the model file.
-`elect.model` asserts `one_leader_per_term`.
-
-```
-ok   M5 correct elect (one leader per term) -> exit 0 (3 states)
-ok   M5 bug elect (split brain caught)      -> exit 1 (node[0]=1,1 node[1]=1,1)
-```
-
-The correct follower times out to leader at term+1 (never the same term
-as the old leader); the `-DBUG` follower forgets to bump the term, and
-the checker finds the split brain -- both leader at term 1.  A timeout
-reuses the deferred-recv machinery (it is a second way to satisfy a
-blocked `recv`), so M5 needed no new syscall interception.
-
 ## How it works
 
 Seccomp **user notification** (Linux >= 5.0).  The child installs a
@@ -201,22 +144,21 @@ per state.  The region address comes from the binary's ELF symbol, which
 is the runtime address only for a non-PIE build -- the checker refuses a
 PIE rather than read relocated memory and report a wrong answer.
 
-## What the prototype does NOT do
+## What the prototypes did not do
 
 M2 drew the boundary: a real `malloc` heap canonicalises along one
 schedule, but a reconverging search needs the small opt-in canonical-emit
 hook; without it process mode still runs but counts reordered-equal
-states separately.  Still out: several connections and nodes, the clock
-and the vDSO, threads with a controlled scheduler, PIE targets, and
-wiring libcmc's own engine (properties, replay, `--simulate`, the TLC
-calibration) onto the process frontier.  Those are the milestones in
-`DESIGN.md`, each with its own kill criterion; only after them does
-process mode become a second engine mode in `src/`.
+states separately.  Several nodes, the clock, crashes and an honest
+verdict on every bound came in M4 to M7, in what is now
+`src/cmc_proc.c`.  Still out of the front end: threads with a controlled
+scheduler, PIE targets, and a restorable process (fork from a snapshot)
+so the in-process engine's search could drive it.
 
 ## Run it
 
 ```
-./run.sh          # Linux only; builds and runs the four cases
+./run.sh          # Linux only; builds and runs the M0 to M3 cases
 ```
 
 Artifacts (`server`, `server-bug`, `checker`, `kv`, `kv-bug`, `search`,

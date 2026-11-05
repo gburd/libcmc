@@ -1,4 +1,4 @@
-# demo/idle.c: an engine probe (M7).  The server ignores an idle timeout
+# test/proc/idle.c: an engine probe (M7).  The server ignores an idle timeout
 # and keeps waiting, so its own state does not change -- but time has
 # passed.  never_late is deliberately false: the right verdict is a
 # violation on "timeout, then the request".  A checker that leaves the
@@ -7,7 +7,7 @@
 [target]
 nodes = 1
 [environment]
-client_val = 1      # the client's request
+client_write = 1     # the client sends WRITE(1) to node 0
 timeouts = 1        # the idle timer may fire once
 [invariants]
 never_late = "node[0][0] != 2"

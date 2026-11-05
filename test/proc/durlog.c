@@ -1,5 +1,5 @@
 /*
- * durlog demo for process-mode M6 (experiments/process-mode).
+ * durlog demo for process-mode M6 (test/proc).
  *
  * A two-node replicated log.  A client's write is "committed" once the
  * primary acknowledges it; the safety property is that a committed write
@@ -26,8 +26,8 @@
  * Ordinary blocking sockets, no libcmc header.  Node i listens on BASE+i.
  * Canonical state fd 3 (volatile) and fd 193 (durable): [count=1][value].
  *
- *   cc -O1 -no-pie -o durlog     demo/durlog.c
- *   cc -O1 -no-pie -DBUG -o durlog-bug demo/durlog.c
+ *   cc -O1 -no-pie -o durlog     test/proc/durlog.c
+ *   cc -O1 -no-pie -DBUG -o durlog-bug test/proc/durlog.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

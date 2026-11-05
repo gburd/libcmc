@@ -1,6 +1,6 @@
 .\" Copyright 2026 Greg Burd
 .\" SPDX-License-Identifier: Apache-2.0
-.Dd November 3, 2026
+.Dd November 5, 2026
 .Dt LIBCMC 3
 .Os
 .Sh NAME
@@ -86,7 +86,24 @@
 .Ft void
 .Fn cmc_fingerprint "const uint8_t *p" "size_t n" "uint64_t fp[2]"
 .Sh DESCRIPTION
-libcmc checks protocol logic written as pure C step functions.
+This is the C interface to the engine: in-process models written as
+pure C step functions.
+It is the engine's calibration path, and the way to embed the checker
+in a program of your own.
+To check a program as it ships, write a model file and run
+.Nm cmc Fl -model-file
+instead; it needs nothing from this interface
+.Po
+.Xr cmc 1 ,
+.Xr cmc 7
+.Pc .
+.Fn cmc_main
+accepts
+.Fl -model-file
+too, so a program that calls it is a full
+.Xr cmc 1 .
+.Pp
+An in-process model is protocol logic written as pure C step functions.
 The product calls those functions to run the protocol; libcmc links the
 same object files and explores every order in which messages, timers,
 disk writes, client requests and crashes can reach them.

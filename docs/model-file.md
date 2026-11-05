@@ -8,134 +8,143 @@ lede: >-
 ---
 
 A model file tells libcmc what to check without reimplementing it.  It
-names the binary to run, how many nodes, how to read a node's state, the
-environment budget to explore, and the invariants.  It carries no
-behaviour: the protocol is the running binary, not anything written here.
+names the program to run and how many nodes, the environment to explore,
+and the invariants.  It carries no behaviour: the protocol is the
+running program, not anything written here.
+
+```
+cmc --model-file FILE [--binary PATH] [--bfs | --simulate [--seed N] [--walks K]]
+    [--depth D] [--max-states N] [--time S] [--crashes N] [--drops N] [--timeouts N]
+```
+
+[cmc(1)]({{ '/reference/man/cmc.1/' | relative_url }}) has the options,
+and [cmc(7)]({{ '/reference/man/cmc.7/' | relative_url }}) the model the
+checker explores.  The [guide]({{ '/guide/02-first-model/' | relative_url }})
+checks a complete example.
 
 ## Format
 
-INI-style sections of `key = value`.  Comments start with `#`.  Three
-sections: `[target]`, `[environment]`, `[invariants]`.
+INI-style sections of `key = value`.  A `#` starts a comment.  A value
+may be quoted with `"`.  There are three sections, and these are all the
+keys:
 
 ```
 [target]
-binary = ./replog          # the program to check, run under interception
-nodes  = 3                 # number of node processes
-state  = canon             # how to read a node's state (see below)
+binary = ./replog          # the program to check; relative to this file
+nodes  = 3                 # node processes, 1 to 8 (required)
+state  = canon             # the only state: the fd-3 hook (optional)
 
 [environment]
-clients  = 1               # client requests per node (0-255)
+client_write = 5           # a client writes this value (0-255) to node 0
+timeouts = 1               # reads the environment may time out
+crashes  = 1               # node crashes
 drops    = 1               # messages the network may lose
-crashes  = 1               # node crashes (partial-durability branching)
-dups     = 0               # duplications (needs net = bag)
-net      = fifo            # fifo (default) or bag
-net_cap  = 8               # messages in flight at once
-persist_cap = 2            # pending disk writes per node
-reply_cap   = 8            # client replies recorded
-live_steps  = 1000         # bound for eventually-properties
+depth    = 40              # bound the search to this many actions
 
 [invariants]
-# name = expression    (see "Invariant language")
-no_lost_ack = "all r in replies: r.val in node[r.src].durable"
-agreement   = "all i,j in nodes: committed[i]==0 or committed[j]==0 or committed[i]==committed[j]"
+no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1]"
 ```
 
-### `[target].state`
+Any other section or key is an error, and so is a value out of range.
+A mistyped `crashs = 1` must not quietly check the model with no
+crashes, so the loader refuses it and names the line.
 
-How the checker reads one node's state for dedup and for invariants:
+### `[target]`
 
-- `canon` -- the node emits a canonical encoding of its logical state on
-  file descriptor 3 after each step, as a self-delimiting record.  This is
-  the recommended form; the encoding is order-independent, so two
-  interleavings that reach the same logical state dedup correctly.  See
-  "The state hook".
-- `region:SYMBOL` -- the checker reads a fixed byte region named by an ELF
-  symbol (the target must be `-no-pie`).  Simpler, but the raw bytes must
-  already be canonical (no order-dependent layout, no uninitialised
-  padding), so it suits only flat, pointer-free state.
+- `binary`: the program, built `-no-pie`.  `--binary PATH` overrides it,
+  so one model file checks every build, planted bugs included.  One of
+  the two is required.
+- `nodes`: how many copies of the program run.  Node `i` gets `i` as its
+  first argument and listens on 127.0.0.1 port 20000 + `i`.
+- `state`: `canon`, the default and the only choice.  (Reading a fixed
+  ELF symbol as the state is not implemented.)
+
+### `[environment]`
+
+Each budget counts over the whole run, from 0 (the default) to 255.
+
+- `client_write = V`: a client connects to node 0 and sends the two
+  bytes `W V`.  Every write back on that connection that starts with `A`
+  is logged in `replies`, with the sender as `.src` and the second byte
+  as `.val`.  Absent: no client.
+- `timeouts`: a node blocked reading a connection may get the one byte
+  `T` instead of a message, and the logical clock advances one second.
+  This is how a heartbeat timeout or a lease expiry happens.
+- `crashes`: a node dies at any quiescent point.  Its state becomes what
+  it last reported on descriptor 193 (durable); what it reported on
+  descriptor 3 is lost, and its peers read EOF once their connections
+  to it are drained.
+- `drops`: the oldest message on a connection is lost.
+- `depth`: a search that reaches this many actions stops and is
+  reported as incomplete (exit 2), never as a pass.  `--depth`
+  overrides it.  Absent: unbounded.
+
+`--crashes`, `--drops` and `--timeouts` override the budgets.
 
 ## The state hook
 
-With `state = canon`, the target exports its logical state like this
-(about eight lines, no protocol logic):
+The checker reads a node's state from what the node reports.  After
+each change the program writes a record, a length byte and then that
+many bytes, to descriptor 3; what it has made durable (its `fsync`
+point) it writes the same way to descriptor 193.  About eight lines:
 
 ```c
-/* called after each handled event; emits [count][bytes...] on fd 3 */
-static void cmc_emit(void)
+static void
+report(int fd, const unsigned char *state, unsigned char n)
 {
-    unsigned char buf[256];
-    size_t n = serialize_logical_state(buf + 1, sizeof buf - 1);  /* your encoding */
-    buf[0] = (unsigned char) n;
-    (void) !write(3, buf, n + 1);
+    unsigned char rec[256];
+
+    rec[0] = n;
+    memcpy(rec + 1, state, n);
+    (void) !write(fd, rec, n + 1u);
 }
 ```
 
-The encoding must be **canonical** (the same logical state always
-produces the same bytes: sort sets, omit addresses) and **complete**
-(every byte that affects future behaviour is included; anything omitted
-can let the checker merge two states that differ and miss a bug).
-Completeness is the one property the operator is trusted to get right;
-treat it like the durable/volatile split in a protocol core.
+The encoding must be **canonical**, the same logical state always
+producing the same bytes (sort sets, leave out addresses), and
+**complete**: every byte the node's future depends on, its position in
+its own code included.  Anything left out can let the checker merge two
+states that differ and miss a bug.  Completeness is the one property you
+are trusted to get right; treat it like the durable/volatile split in
+the protocol.
 
 ## Invariant language
 
-A small expression language, evaluated over each node's canonical state
-and the ghost reply log.  It is deliberately not Turing-complete: no
-loops beyond the quantifiers, no function definitions.
+A small expression language over each node's reported state and the
+reply log.  It is deliberately not Turing-complete.
 
-Values: integers, byte arrays (the canonical state), and the reply log.
-
-- `node[i]` -- node `i`'s canonical state (a byte array), `0 <= i < nodes`.
-- `node[i].NAME` -- a named field, if the model file declares a layout
-  (future; for now the state is addressed by byte offset `node[i][k]`).
-- `replies` -- the ghost log; each entry has `.src` (node) and `.val`.
-- `committed[i]`, `durable[i]` -- named views the model file maps onto the
-  canonical bytes (future; initially byte accessors).
-
-Quantifiers and operators:
+- `node[i]`: node `i`'s state, a byte array (`0 <= i < nodes`); after a
+  crash, its durable state.
+- `node[i][k]`: byte `k` of it, or -1 when the node has reported fewer
+  bytes (a crashed node that made nothing durable, for one).
+- `replies`: the reply log; each entry `r` has `r.src` and `r.val`.
+- integers.
 
 ```
-all V in SET : EXPR          # holds for every binding
-some V in SET : EXPR         # holds for at least one
-EXPR and EXPR    EXPR or EXPR    not EXPR
-A == B   A != B   A < B   A <= B   A in B
+all V in SET : EXPR        some V in SET : EXPR     (SET: node[i] or replies)
+EXPR and EXPR    EXPR or EXPR    not EXPR    ( EXPR )
+A == B   A != B   A < B   A <= B   A > B   A >= B   A in node[i]
 ```
+
+`and` and `or` associate left to right with equal precedence; use
+parentheses.  Every invariant is parsed when the file is loaded, and a
+parse error, text after a complete expression, or an unclosed
+parenthesis is an error, even in a part no state reaches.
 
 An invariant holds in a state when its expression is true there.  A
-violation prints the shortest sequence of environment actions that
-reaches the failing state, and writes a replay file.
+violation prints the shortest sequence of actions that reaches the
+failing state, by name, and each node's state there.
 
-### C-predicate escape hatch
+## Exit status
 
-For a property the DSL cannot express, the target may export
-`int cmc_check_NAME(void)` returning non-zero on violation, and the model
-file references it:
+0: no violation, and the search was complete.  1: a violation, or an
+engine rule was broken (a cap, a write longer than 64 bytes, a node
+silent in a call the checker does not model).  2: incomplete; a depth,
+state or time bound stopped the search, or `--simulate` found nothing.
+3: a usage, model-file or setup error.
 
-```
-[invariants]
-hard_property = c:cmc_check_hard_property
-```
+## Not yet
 
-The predicate runs in the node process over its real state.  It is a small
-amount of code that can carry a bug, so prefer the DSL; the hatch exists
-so a hard property never forces a protocol rewrite.
-
-## Running
-
-```
-cmc --model-file replog.model          # exhaustive BFS
-cmc --model-file replog.model --simulate --seed 7 --walks 100000
-cmc --model-file replog.model --trace-out bug.replay
-cmc --replay bug.replay
-```
-
-Exit status is the engine's: 0 pass, 1 violation, 2 incomplete (a limit
-stopped the search), 3 a usage or model-file error.
-
-## Status
-
-The schema is fixed here; the implementation lands incrementally
-(`experiments/process-mode/`, then `src/`).  The first milestone is a
-single `[target]` node with `state = canon`, `[environment]` budgets, and
-byte-offset invariants; named fields, multi-node and the C escape hatch
-follow.
+Named fields for the state, a C predicate for a property the language
+cannot express, replay files for a process run, duplication, and a
+connect that fails.  Each is an error today, not ignored.

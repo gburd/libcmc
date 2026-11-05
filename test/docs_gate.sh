@@ -5,10 +5,13 @@
 #      include/cmc.h, and every option cmc_main() parses, is documented
 #      in the man pages;
 #   3. no snippet holds Liquid markup, which Jekyll would expand;
-#   4. the guide's model (docs/_includes/snippets/quickstart.c) builds
-#      against libcmc.a and does what the guide says: the correct server
-#      passes with a crash, the planted bug is caught, its replay
-#      reproduces it, and the bug is invisible without a crash.
+#   4. the guide's server (docs/_includes/snippets/kvserver.c and
+#      kvserver.model) does what the guide says under cmc --model-file:
+#      the correct server passes, an acknowledgement is reachable, the
+#      planted bug is caught by search and by simulation, and the bug is
+#      invisible without a crash (Linux x86-64 only);
+#   5. the in-process example (quickstart.c, libcmc(3)) builds against
+#      libcmc.a and behaves as its comments say.
 set -u
 B=${1:?usage: docs_gate.sh BUILDDIR}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,6 +53,37 @@ if grep -nE '\{\{|\{%' "$HERE"/docs/_includes/snippets/*; then
 fi
 
 W="-std=c11 -D_POSIX_C_SOURCE=200809L -Wall -Wextra -Werror -Wshadow -Wstrict-prototypes -Wmissing-prototypes -Wno-missing-field-initializers"
+
+# the guide's server, checked as it ships
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+	K=$HERE/docs/_includes/snippets
+	KB=$(cd "$B" && pwd)/guide
+	mkdir -p "$KB"
+	cp "$K/kvserver.model" "$KB/"
+	if $CC $W -no-pie -o "$KB/kvserver" "$K/kvserver.c" &&
+		$CC $W -no-pie -DKV_BUG -o "$KB/kvserver-bug" "$K/kvserver.c"; then
+		kv() {		# kv DESC EXIT NEEDLE args...
+			d=$1 want=$2 needle=$3; shift 3
+			"$B/cmc" --model-file "$KB/kvserver.model" "$@" > "$OUT/kv.txt" 2>&1
+			rc=$?
+			[ "$rc" = "$want" ] && grep -q -- "$needle" "$OUT/kv.txt" ||
+				{ echo "docs: guide: $d (exit $rc, wanted $want and \"$needle\"; see $OUT/kv.txt)"; cat "$OUT/kv.txt"; fail=1; }
+		}
+		kv "the correct server does not pass" 0 "16 distinct states found"
+		kv "the bug is not caught as the guide shows" 1 "3. crash n0" --binary "$KB/kvserver-bug"
+		kv "the bug shows without a crash, which the guide says it does not" 0 "No error has been found" --binary "$KB/kvserver-bug" --crashes 0
+		kv "simulation does not find the bug" 1 "no_lost_ack is violated" --binary "$KB/kvserver-bug" --simulate --seed 1 --walks 200
+		printf '[target]\nbinary = kvserver\nnodes = 2\n[environment]\nclient_write = 7\ncrashes = 1\n[invariants]\nnever_acked = "all r in replies : 0 == 1"\n' > "$KB/never.model"
+		"$B/cmc" --model-file "$KB/never.model" > "$OUT/kv-never.txt" 2>&1
+		[ $? = 1 ] && grep -q "5. deliver n1->n0" "$OUT/kv-never.txt" ||
+			{ echo "docs: guide: no acknowledgement is reachable, so no_lost_ack would pass vacuously"; fail=1; }
+	else
+		echo "docs: kvserver.c does not build"; fail=1
+	fi
+else
+	echo "docs: SKIP the guide's server: cmc --model-file needs Linux x86-64"
+fi
+
 S=$HERE/docs/_includes/snippets/quickstart.c
 if $CC $W -I"$HERE/include" -o "$B/quickstart" "$S" "$B/libcmc.a" &&
 	$CC $W -DQUICKSTART_BUG -I"$HERE/include" -o "$B/quickstart-bug" "$S" "$B/libcmc.a"; then
@@ -71,5 +105,5 @@ if $CC $W -I"$HERE/include" -o "$B/quickstart" "$S" "$B/libcmc.a" &&
 else
 	echo "docs: quickstart.c does not build"; fail=1
 fi
-[ $fail = 0 ] && echo "docs_gate: ok (3 man pages, quickstart model)" || echo "docs_gate: FAILED"
+[ $fail = 0 ] && echo "docs_gate: ok (3 man pages, the guide's server, quickstart model)" || echo "docs_gate: FAILED"
 exit $fail

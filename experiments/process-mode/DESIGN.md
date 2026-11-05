@@ -429,11 +429,30 @@ below is a milestone with a kill criterion; the examples come only after.
   1 s each); 2,000 walks of the correct build took 5.0 s and exited 2
   ("no violation found", not a pass).
 
-- **M8 -- one front end in `src/`.**  Lift process mode out of
-  `experiments/` into the engine as its process front end, with the model
-  file as *the* interface (`cmc --model-file ...`).  Demote `CmcCore` in
-  the CLI and docs to the calibration role only.  After M8, "one method"
-  is literally true in the shipped tool, not only in the docs.
+- **M8 -- one front end in `src/`.**  **Done (2026-11-05).**  `mc2.c`
+  is now `src/cmc_proc.c` and `demo/detmalloc.c` is `src/cmc_preload.c`
+  (built as `cmc-preload.so` and installed beside `cmc`).
+  `cmc --model-file FILE` is the way to check a product; `CmcCore` is
+  the calibration path in the CLI, the man pages and the guide.  The M4
+  to M7 fixtures moved to `test/proc/`, and `test/proc_gate.sh`, part of
+  `make check`, pins every verdict they gave and every refusal.  Three
+  holes found while moving it, each shown red on the M7 prototype first:
+  a mistyped or unimplemented model-file key was ignored (`crashs = 1`
+  checked with no crashes: a false pass); an invariant with text after
+  a complete expression was cut there (`node[1][0] == 0 garbage`
+  passed); and the preload was found as `./detmalloc.so` relative to
+  the current directory, so run elsewhere the target silently read the
+  real clock.  The loader now rejects every key it does not implement
+  and parses every invariant whole at load; the preload is found from
+  the program's own location and announces itself to the checker with a
+  clock_gettime on a clock id no real clock uses, and a node it did not
+  load into is refused.  The guide now checks a replicated server
+  written as it ships (`docs/_includes/snippets/kvserver.c`), and the
+  docs gate runs every command it shows.  Search and output are as in
+  M7, in TLC's wording.  Not joined: the in-process engine and the
+  process front end share the CLI and the rules, not a search loop
+  (the process cannot be restored from bytes; that needs fork from a
+  snapshot).
 
 **Then the examples**, smallest real protocol first, each kept only if the
 engine finishes a meaningful run on it (exhaustive, bounded, or

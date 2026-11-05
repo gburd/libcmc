@@ -1,17 +1,34 @@
 # libcmc
 
-An explicit-state model checker for C protocol code.  You write a
-protocol's logic once, as pure C step functions.  Your product calls
-them, and libcmc links the same object files and explores every
-interleaving of messages, timers, disk flushes, crashes and connection
-resets, up to a bound.  The code checked is the code that runs.
+An explicit-state model checker for C protocol code, which checks the
+program you ship.  Each node is that program, run unmodified as a
+process; libcmc is the network, the clock and the crash between them.
+A model file names the program, the environment to explore and the
+invariants:
 
-Output follows TLC's wording ("N states generated, M distinct states
-found", "The depth of the complete state graph search is D"), and the
-search semantics match single-worker TLC: on 22 calibration
-configurations of a published protocol model, libcmc gives the same
-verdicts, the same shortest counterexample depths, and exactly the same
-distinct-state counts as TLC (`calib/hc`).
+    [target]
+    binary = ./replog
+    nodes = 3
+    [environment]
+    client_write = 5
+    crashes = 1
+    drops = 1
+    [invariants]
+    no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"
+
+    $ cmc --model-file replog.model
+
+libcmc explores every order of connections, messages, timeouts, crashes
+and lost messages, up to those budgets, checks the invariants in every
+state, and prints the shortest sequence of actions that breaks one.  The
+program needs no libcmc header and no rewrite: only an eight-line hook
+that reports its state on a file descriptor, and `-no-pie`.
+
+The engine underneath is calibrated against TLC: on 22 configurations of
+a published consensus specification, written as in-process step
+functions, it gives the same verdicts, the same shortest counterexample
+depths and exactly the same distinct-state counts as single-worker TLC
+(`calib/hc`).  Output follows TLC's wording.
 
 Documentation, with a guide that builds a first model and the manual
 pages: <https://gregburd.codeberg.page/libcmc/> (mirrored at
@@ -20,9 +37,10 @@ Spin, LTSmin, CBMC, GenMC or Stateright: `docs/WHY.md`.
 
 ## Build
 
-    make            # build/libcmc.a, build/cmc, build/test_cmc
-    make check      # engine tests, bug gates, purity and docs gates, fast calibration
-    make install    # libcmc.a, cmc.h and the man pages, under PREFIX=/usr/local
+    make            # build/cmc, build/cmc-preload.so, build/libcmc.a, build/test_cmc
+    make check      # engine tests, the process front end gate, bug gates,
+                    # purity and docs gates, fast calibration
+    make install    # cmc, the preload, libcmc.a, cmc.h and the man pages, under PREFIX=/usr/local
 
 C11 and libc only.  gcc and clang, `-Wall -Wextra -Werror`.  With Nix,
 `nix build` gives the library and man pages, `nix flake check` runs
@@ -31,36 +49,35 @@ docs site.
 
 ## Use
 
-1. Write a core: a `CmcCore` vtable over a fixed-size, pointer-free
-   per-node state.  `step(cfg, node, state, event, out)` must be total and
-   deterministic.  It reads no clock, randomness, globals or I/O, and emits
-   effects through `cmc_out_push()`: send, set or cancel a timer, persist,
-   wake, reply.  The first `durable_size` bytes of the state are durable.
-   They change only through `apply_persist`, which the engine calls when a
-   persist is flushed.  `docs/_includes/snippets/quickstart.c` is a
-   complete model in one file, and the guide walks through it.
-2. Write properties: `CMC_INVARIANT`, `CMC_ACTION_PROPERTY`,
-   `CMC_WITNESS_PROP`, `CMC_QUIESCENT_PROP`, `CMC_EVENTUALLY_PROP`.
-3. Write a ten-line `main()` that calls `cmc_main()` with your model table
-   (`test/cmc_models.c`), and link it against `libcmc.a`.
-4. Run it:
+1. Build your program `-no-pie`.  Node `i` gets `i` as its first
+   argument and listens on 127.0.0.1 port 20000 + `i`.
+2. Add the state hook: after each change, write a length byte and a
+   canonical, complete encoding of the node's state to descriptor 3,
+   and what it has made durable to descriptor 193.
+3. Write a model file (`docs/model-file.md`) and run
+   `cmc --model-file FILE`.  `--binary` checks another build against the
+   same file; plant bugs behind `#ifdef` and require each to be caught.
+   `--simulate` takes seeded random walks when the full search is too
+   big.
 
-       cmc --model mymodel --all-props --clients 2 --crashes 1 --drops 1
-       cmc --model mymodel --all-props --simulate --seed 7 --walks 100000
-       cmc --model mymodel --all-props --trace-out bug.replay
-       cmc --replay bug.replay
+Exit status: 0 pass, 1 violation, 2 incomplete (a bound stopped the
+search; never a pass), 3 usage or model-file error.  The guide checks a
+complete example: `docs/guide/02-first-model.md`.
 
-5. Gate your cores with `scripts/purity_gate.sh "OBJS" "SRCS"`.  Plant
-   bugs behind `#if` in your shipped source, and require each one to be
-   caught (`test/toy_gate.sh` shows the pattern).
+The process front end needs Linux x86-64.  The engine also checks
+in-process models, C step functions against `include/cmc.h`
+(`cmc --model NAME`, `libcmc(3)`); that is its calibration path.
 
 ## Layout
 
 | path | what |
 |---|---|
 | `include/cmc.h` | the whole public API |
-| `src/cmc.c` | the engine: world encoding, fingerprints, BFS/DFS/simulate/replay, environment, liveness |
+| `src/cmc_proc.c` | the process front end: `cmc --model-file`, running the shipped program under seccomp |
+| `src/cmc_preload.c` | `cmc-preload.so`: the deterministic heap and logical clock a checked program runs under |
+| `src/cmc.c` | the engine for in-process models: world encoding, fingerprints, BFS/DFS/simulate/replay, environment, liveness |
 | `src/cmc_cli.c` | `cmc_main()`, the TLC-style command-line driver |
+| `test/proc/` | programs written as they ship, with model files and planted bugs, single-decree Paxos among them |
 | `test/` | engine tests, the toy core with planted bugs, purity probes |
 | `calib/hc/` | calibration: HummingConsensus.tla, its C port, the TLC cfgs, `calibrate.sh` |
 | `scripts/` | the purity gate and its teeth |
@@ -69,14 +86,13 @@ docs site.
 
 ## Status
 
-Release 0.1.0, 2026-11-03.  Single-threaded.
-There is no symmetry reduction or on-disk queue yet.  Clocks, partitions
-and multi-core nodes are planned (`docs/DESIGN.md`, "Roadmap").
-
-0.1.0 checks cores written as pure step functions (`CmcCore`); the I/O
-glue around them is not checked.  Checking C written as it ships, with no
-such rewrite, is the goal: a feasibility prototype is in
-`experiments/process-mode/`, and `docs/WHY.md` has the reasoning.
+Release 0.1.0, 2026-11-03, checked in-process step functions only.  The
+process front end (`cmc --model-file`) is on main and not yet released.
+Single-threaded.  Process mode replays every state from a fresh launch,
+about 300 replays a second: single-decree Paxos with five processes,
+one crash and one drop is 30,075 states in about four minutes.  Its
+history and measurements are in `experiments/process-mode/DESIGN.md`
+and `docs/measurements/`.
 
 ## CI
 

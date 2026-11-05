@@ -1,11 +1,11 @@
-# demo/durlog.c: a two-node replicated log.  A committed (acked) write
+# test/proc/durlog.c: a two-node replicated log.  A committed (acked) write
 # must survive a crash -- it must be durable on some surviving node.
 # The checker owns crashes (M6): it may crash the primary at a quiescent
 # point, after which the node keeps only its fd-4 (durable) state.
 [target]
 nodes = 2
 [environment]
-client_val = 7      # the client writes this value to the primary (node 0)
+client_write = 7     # the client sends WRITE(7) to node 0
 crashes = 1         # the checker may crash one node
 [invariants]
 # every acked value is durable on some node that is still around.

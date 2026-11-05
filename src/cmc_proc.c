@@ -1,50 +1,47 @@
 /*
- * mc2.c: the multi-node process-mode checker (experiments/process-mode/
- * DESIGN.md, M4).  It runs N node processes under one checker, owns every
- * socket between them, and explores the order in which inter-node messages
- * are delivered -- the first step toward checking a real replicated /
- * consensus implementation written as it ships.
+ * cmc_proc.c: the process front end -- cmc --model-file FILE checks a
+ * program as it ships (docs/model-file.md, cmc(7)).
  *
- * Mechanism, built on M0-M3:
- *   - Each node is a real process under seccomp user-notification; the
- *     checker holds one listener fd per node (they survive execve).
- *   - The checker is the network.  It intercepts socket/bind/listen/
- *     connect/accept/send/recv; no real socket ever forms.  A connect()'s
- *     destination port identifies the peer node (port BASE+i -> node i),
- *     so sends/recvs are tagged to a logical channel (src, dst).
- *   - A recv on a channel with no pending message is a BLOCKED node: the
- *     checker DEFERS that seccomp notification (leaves it unanswered) and
- *     services another node.  When the search delivers a message to that
- *     channel, the checker answers the deferred recv with the bytes.  A
- *     deferred, unanswered notification IS a blocked node (proved in
- *     scratch/probe_defer.c).
- *   - When every node is blocked-on-recv or exited, the world is
- *     quiescent: snapshot each node's canonical state (fd 3), check the
- *     invariants, and the deliverable messages are the next actions.
+ * Each node is the target binary, run unmodified as its own process
+ * under seccomp user notification, with src/cmc_preload.c preloaded for
+ * a deterministic heap and a logical clock.  The checker is the network:
+ * it intercepts socket/bind/listen/connect/accept/read/write/close and
+ * the clock, no real socket ever forms, and a node blocked in recv or
+ * accept is a deferred notification the checker answers when the search
+ * says so.  When every node is blocked or has exited the world is
+ * quiescent: each node's canonical state (the fd-3 hook, and fd 193 for
+ * what survives a crash) is read, the invariants are checked, and the
+ * enabled actions are the next steps.
  *
  * Search: stateless replay over action sequences.  To explore a
- * sequence, relaunch all nodes, drive to quiescence, apply the sequence's
- * actions (re-driving to quiescence after each), then snapshot.  An
- * action is ACCEPT, DELIVER, EOF, TIMEOUT, CRASH or DROP (enum_actions).
- * Connections are routed by the port a node dials, so any topology the
- * nodes set up works; each connection is a FIFO channel, as TCP is.  BFS
- * gives the shortest counterexample; --simulate takes seeded random walks.
+ * sequence, relaunch all nodes, drive to quiescence, apply the
+ * sequence's actions (re-driving to quiescence after each), then
+ * snapshot.  An action is ACCEPT, DELIVER, EOF, TIMEOUT, CRASH or DROP
+ * (enum_actions).  Connections are routed by the port a node dials (node
+ * i listens on 127.0.0.1:20000+i), so any topology the nodes set up
+ * works; each connection is a FIFO channel, as TCP is.  BFS gives the
+ * shortest counterexample; simulation takes seeded random walks.
  *
- * M7: verdicts are honest.  The fingerprint holds everything the future
- * depends on (node states, open connections, channels in order, budgets
- * left, the clock).  A search stopped by a depth, state or time limit is
- * INCOMPLETE, never a pass.  A cap the run exceeds, a write longer than
- * one message, a node silent in an unmodelled call, or a replay that
- * diverges is an error, never truncated.
+ * Verdicts are honest (docs/steering/project.md).  The fingerprint holds
+ * everything the future depends on: node states, open connections,
+ * channels in order, pending connects, replies, budgets left, the
+ * clock.  A search stopped by a depth, state or time limit is
+ * INCOMPLETE, never a pass.  A model-file key the loader does not
+ * implement, a cap the run exceeds, a write longer than one message, a
+ * node silent in an unmodelled call, a missing preload, or a replay that
+ * diverges is an error, never ignored or truncated.
  *
- * Usage: mc2 MODELFILE BINARY [--bfs | --simulate [--seed N] [--walks K]]
- *            [--depth D] [--max-states N] [--time S]
- * Exit 0 = no violation and the search was complete; 1 = a violation
- * (shortest action sequence printed, by name) or an engine rule broken;
- * 2 = incomplete (a limit stopped the search, no violation found); 3 =
- * usage or setup error -- the exit codes of cmc(1).
+ * Exit status is cmc(1)'s: 0 no violation and the search was complete;
+ * 1 a violation (shortest action sequence printed, by name) or an engine
+ * rule broken; 2 incomplete; 3 a usage, model-file or setup error.
+ *
+ * Linux x86-64 only: elsewhere cmc_proc_main() says so and returns 3.
  */
-#define _GNU_SOURCE
+#define _GNU_SOURCE				/* seccomp, ptrace, process_vm_readv */
+#include "cmc_proc.h"
+
+#if defined(__linux__) && defined(__x86_64__)
+
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -97,33 +94,130 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MAXINV 8
 
 /* =================================================================== */
-/* model file (subset of docs/model-file.md; shares mc.c's DSL)        */
+/* the model file (docs/model-file.md)                                 */
 /* =================================================================== */
 typedef struct { char name[32]; char expr[256]; } Inv;
-static struct { int nodes; int client_val; int client; int timeouts; int crashes; int drops; int depth; Inv inv[MAXINV]; int ninv; } M;
+static struct
+{
+	char		binary[4096];	/* [target] binary, resolved against the file's directory */
+	int			nodes;
+	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
+	int			timeouts, crashes, drops;
+	long		depth;			/* -1 = unbounded */
+	Inv			inv[MAXINV];
+	int			ninv;
+}			M;
 
 static char *trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
 
+static int check_invariant(const char *expr);
+
+/* a whole-string integer in [lo, hi], or the model-file error */
+static int
+int_value(const char *path, int ln, const char *k, const char *v, long lo, long hi, long *out)
+{
+	char	   *e;
+	long		x = strtol(v, &e, 10);
+
+	if (!*v || *e || x < lo || x > hi)
+	{
+		fprintf(stderr, "cmc: %s:%d: %s = \"%s\": expected an integer from %ld to %ld\n", path, ln, k, v, lo, hi);
+		return -1;
+	}
+	*out = x;
+	return 0;
+}
+
+/* Parse the model file.  Every section and key it does not implement is
+ * an error: a mistyped `crashs = 1` that was ignored would check the
+ * model with no crashes and could pass a protocol that loses data. */
 static int
 load_model(const char *path)
 {
-	FILE *f = fopen(path, "r"); if (!f) { fprintf(stderr, "mc2: cannot open %s\n", path); return -1; }
-	char line[512], sect[32] = ""; M.nodes = 2; M.client_val = 5; M.client = 1; M.timeouts = 0; M.crashes = 0; M.drops = 0; M.depth = -1;
+	FILE	   *f = fopen(path, "r");
+	char		line[512], sect[32] = "";
+	int			ln = 0, seen_nodes = 0;
+	long		x;
+
+	if (!f) { fprintf(stderr, "cmc: cannot open model file %s: %s\n", path, strerror(errno)); return -1; }
+	memset(&M, 0, sizeof M);
+	M.nodes = 1; M.client_write = -1; M.depth = -1;
 	while (fgets(line, sizeof line, f))
 	{
+		ln++;
+		if (!strchr(line, '\n') && !feof(f)) { fprintf(stderr, "cmc: %s:%d: line too long\n", path, ln); goto bad; }
 		char *s = trim(line); if (!*s || *s == '#') continue;
-		if (*s == '[') { char *e = strchr(s, ']'); if (e) { *e = 0; snprintf(sect, sizeof sect, "%s", s + 1); } continue; }
-		char *eq = strchr(s, '='); if (!eq) continue; *eq = 0;
+		if (*s == '[')
+		{
+			char *e = strchr(s, ']');
+			if (!e || *trim(e + 1)) { fprintf(stderr, "cmc: %s:%d: malformed section header\n", path, ln); goto bad; }
+			*e = 0;
+			if (strcmp(s + 1, "target") && strcmp(s + 1, "environment") && strcmp(s + 1, "invariants"))
+			{ fprintf(stderr, "cmc: %s:%d: unknown section [%s] (target, environment, invariants)\n", path, ln, s + 1); goto bad; }
+			snprintf(sect, sizeof sect, "%s", s + 1);
+			continue;
+		}
+		char *eq = strchr(s, '=');
+		if (!eq) { fprintf(stderr, "cmc: %s:%d: expected key = value\n", path, ln); goto bad; }
+		*eq = 0;
 		char *k = trim(s), *v = trim(eq + 1);
-		if (*v == '"') { v++; char *q = strrchr(v, '"'); if (q) *q = 0; }
+		if (*v == '"')
+		{
+			v++; char *q = strchr(v, '"');
+			if (!q || (*trim(q + 1) && *trim(q + 1) != '#')) { fprintf(stderr, "cmc: %s:%d: unterminated or trailing text after a quoted value\n", path, ln); goto bad; }
+			*q = 0;
+		}
 		else { char *h = strchr(v, '#'); if (h) *h = 0; v = trim(v); }
-		if (!strcmp(sect, "target")) { if (!strcmp(k, "nodes")) M.nodes = atoi(v); }
-		else if (!strcmp(sect, "environment")) { if (!strcmp(k, "client_val")) M.client_val = atoi(v); else if (!strcmp(k, "client")) M.client = atoi(v); else if (!strcmp(k, "timeouts")) M.timeouts = atoi(v); else if (!strcmp(k, "crashes")) M.crashes = atoi(v); else if (!strcmp(k, "drops")) M.drops = atoi(v); else if (!strcmp(k, "depth")) M.depth = atoi(v); }
-		else if (!strcmp(sect, "invariants")) { if (M.ninv < MAXINV) { snprintf(M.inv[M.ninv].name, 32, "%s", k); snprintf(M.inv[M.ninv].expr, 256, "%s", v); M.ninv++; } }
+		if (!*sect) { fprintf(stderr, "cmc: %s:%d: %s outside a section\n", path, ln, k); goto bad; }
+		if (!strcmp(sect, "target") && !strcmp(k, "binary"))
+		{
+			if (!*v) { fprintf(stderr, "cmc: %s:%d: binary is empty\n", path, ln); goto bad; }
+			/* relative to the model file's directory */
+			const char *sl = strrchr(path, '/');
+			if (*v == '/' || !sl) snprintf(M.binary, sizeof M.binary, "%s", v);
+			else snprintf(M.binary, sizeof M.binary, "%.*s/%s", (int) (sl - path), path, v);
+		}
+		else if (!strcmp(sect, "target") && !strcmp(k, "nodes"))
+		{ if (int_value(path, ln, k, v, 1, MAXNODES, &x)) goto bad; M.nodes = (int) x; seen_nodes = 1; }
+		else if (!strcmp(sect, "target") && !strcmp(k, "state"))
+		{
+			if (strcmp(v, "canon"))
+			{ fprintf(stderr, "cmc: %s:%d: state = %s is not supported; the only state is canon (the fd-3 hook)\n", path, ln, v); goto bad; }
+		}
+		else if (!strcmp(sect, "environment") && !strcmp(k, "client_write"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.client_write = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "timeouts"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.timeouts = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "crashes"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.crashes = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "drops"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.drops = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
+		{ if (int_value(path, ln, k, v, 0, 1000000, &x)) goto bad; M.depth = x; }
+		else if (!strcmp(sect, "invariants"))
+		{
+			if (M.ninv >= MAXINV) { fprintf(stderr, "cmc: %s:%d: more than %d invariants\n", path, ln, MAXINV); goto bad; }
+			if (strlen(k) >= sizeof M.inv[0].name || strlen(v) >= sizeof M.inv[0].expr)
+			{ fprintf(stderr, "cmc: %s:%d: invariant name or expression too long\n", path, ln); goto bad; }
+			for (int i = 0; i < M.ninv; i++)
+				if (!strcmp(M.inv[i].name, k)) { fprintf(stderr, "cmc: %s:%d: invariant %s defined twice\n", path, ln, k); goto bad; }
+			snprintf(M.inv[M.ninv].name, sizeof M.inv[0].name, "%s", k);
+			snprintf(M.inv[M.ninv].expr, sizeof M.inv[0].expr, "%s", v);
+			M.ninv++;
+		}
+		else { fprintf(stderr, "cmc: %s:%d: unknown key %s in [%s]\n", path, ln, k, sect); goto bad; }
 	}
 	fclose(f);
-	if (M.nodes < 1 || M.nodes > MAXNODES) { fprintf(stderr, "mc2: nodes out of range\n"); return -1; }
+	if (!seen_nodes) { fprintf(stderr, "cmc: %s: [target] nodes is required\n", path); return -1; }
+	if (M.ninv == 0) { fprintf(stderr, "cmc: %s: no invariant to check ([invariants] is empty)\n", path); return -1; }
+	/* every invariant must parse before the search starts */
+	for (int i = 0; i < M.ninv; i++)
+		if (check_invariant(M.inv[i].expr))
+		{ fprintf(stderr, "cmc: %s: invariant %s: cannot parse \"%s\"\n", path, M.inv[i].name, M.inv[i].expr); return -1; }
 	return 0;
+bad:
+	fclose(f);
+	return -1;
 }
 
 /* =================================================================== */
@@ -137,6 +231,7 @@ typedef struct {
 	/* a second bound var for reply fields (r.src / r.val): when ranging
 	 * over replies, `var` binds the index and r.NAME reads the arrays */
 	int ranging_replies;
+	int checking;			/* parsing only: reply fields read as 0 */
 } Ctx;
 static void skipws(const char **p){ while(**p&&isspace((unsigned char)**p))(*p)++; }
 static int word(const char **p,const char*w){ skipws(p); size_t n=strlen(w); if(!strncmp(*p,w,n)&&!isalnum((unsigned char)(*p)[n])&&(*p)[n]!='_'){*p+=n;return 1;} return 0; }
@@ -181,8 +276,8 @@ get_term(const char **p, Ctx *c, long *out)
 	if (c->ranging_replies && c->varset && !strcmp(id, c->var))
 	{
 		if (**p == '.') { (*p)++; char fld[8]; int m = 0; while (isalpha((unsigned char) **p) && m < 7) fld[m++] = *(*p)++; fld[m] = 0;
-			if (!strcmp(fld, "src")) { *out = c->repl_src[c->val]; return 0; }
-			if (!strcmp(fld, "val")) { *out = c->repl_val[c->val]; return 0; }
+			if (!strcmp(fld, "src")) { *out = c->checking ? 0 : c->repl_src[c->val]; return 0; }
+			if (!strcmp(fld, "val")) { *out = c->checking ? 0 : c->repl_val[c->val]; return 0; }
 			return -1; }
 		*out = c->val; return 0;
 	}
@@ -214,7 +309,15 @@ eval_qc(const char **p, Ctx *c)
 			if (issome && r) result = 1;
 			*p = bp;
 		}
-		if (slen == 0) { const char *bp = body; eval_expr(&bp, &inner); *p = bp; }
+		/* an empty set still parses the body, so a broken body is never
+		 * hidden by the set being empty in the states searched */
+		if (slen == 0)
+		{
+			const char *bp = body;
+			inner.val = 0; inner.checking = 1;
+			if (eval_expr(&bp, &inner) < 0) return -1;
+			*p = bp;
+		}
 		return result;
 	}
 	*p = save;
@@ -238,11 +341,37 @@ eval_qc(const char **p, Ctx *c)
 }
 static int eval_unary(const char **p, Ctx *c){ skipws(p);
 	if(word(p,"not")){int r=eval_unary(p,c);return r<0?r:!r;}
-	if(**p=='('){(*p)++;int r=eval_expr(p,c);skipws(p);if(**p==')')(*p)++;return r;}
+	if(**p=='('){(*p)++;int r=eval_expr(p,c);if(r<0)return r;skipws(p);if(**p!=')')return -1;(*p)++;return r;}
 	return eval_qc(p,c); }
 static int eval_expr(const char **p, Ctx *c){ int r=eval_unary(p,c); if(r<0)return r;
 	for(;;){ skipws(p); if(word(p,"and")){int b=eval_unary(p,c);if(b<0)return b;r=r&&b;}
 		else if(word(p,"or")){int b=eval_unary(p,c);if(b<0)return b;r=r||b;} else break; } return r; }
+
+/* evaluate a whole invariant: 1 holds, 0 fails, -1 cannot parse.
+ * Text after a complete expression is a parse error, never ignored. */
+static int
+eval_invariant(const char *expr, Ctx *c)
+{
+	const char *p = expr;
+	int			r = eval_expr(&p, c);
+
+	if (r < 0) return -1;
+	skipws(&p);
+	return *p ? -1 : r;
+}
+
+/* parse an invariant once against empty node states */
+static int
+check_invariant(const char *expr)
+{
+	static const unsigned char none[1];
+	Ctx			c = {0};
+
+	c.nnodes = M.nodes;
+	for (int i = 0; i < M.nodes; i++) { c.node[i] = none; c.node_len[i] = 0; }
+	c.repl_src = none; c.repl_val = none; c.nrepl = 0;
+	return eval_invariant(expr, &c) < 0;
+}
 
 /* =================================================================== */
 /* per-node process + the inter-node network                           */
@@ -261,6 +390,7 @@ typedef struct {
 	unsigned char canon[SNAP]; int canon_len;
 	unsigned char durable[SNAP]; int durable_len;
 	int crashed;				/* killed by a CRASH action: volatile lost, durable kept */
+	int preload_ok;				/* the preload announced itself in this node */
 } Node;
 
 static Node N[MAXNODES];
@@ -308,6 +438,12 @@ static Budget bud;
 static unsigned long long logical_ns;
 
 static struct seccomp_notif_sizes g_sz;
+
+/* the preload every node runs under (src/cmc_preload.c), found by
+ * find_preload(); it announces itself with a clock_gettime on
+ * CMC_PRELOAD_MAGIC, so a node it did not load into is refused */
+static char preload_path[4096];
+#define CMC_PRELOAD_MAGIC 0x434d43
 
 static void
 cr_write(pid_t pid, uint64_t addr, const void *buf, size_t n)
@@ -357,7 +493,7 @@ launch(Node *nd)
 	if (pid == 0)
 	{
 		close(sp[0]);
-		setenv("LD_PRELOAD", "./detmalloc.so", 1);
+		setenv("LD_PRELOAD", preload_path, 1);
 		dup2(nd->fd3[1], 3); close(nd->fd3[0]); close(nd->fd3[1]);
 		dup2(nd->fd4[1], DURABLE_FD); close(nd->fd4[0]); close(nd->fd4[1]);
 		int lf = install_filter(); if (lf < 0) _exit(2);
@@ -380,7 +516,7 @@ launch(Node *nd)
 	close(sp[0]);
 	if (nd->listener < 0) return -1;
 	nd->pid = pid; nd->alive = 1; nd->blocked = 0; nd->block_kind = 0; nd->next_fd = 500; nd->nc = 0;
-	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0;
+	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->preload_ok = 0;
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
 	return 0;
 }
@@ -458,6 +594,7 @@ try_pending_for(Node *nd)
 	{
 		case SYS_socket:  g_resp->val = nd->next_fd++; break;
 		case SYS_clock_gettime:
+			if ((long) a[0] == CMC_PRELOAD_MAGIC) { nd->preload_ok = 1; g_resp->val = 0; break; }
 		{
 			/* answer with the logical clock (a[1] = struct timespec*) */
 			struct { long long sec, nsec; } ts;
@@ -856,14 +993,19 @@ run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 {
 	reset_world();
 	for (int i = 0; i < M.nodes; i++) { N[i].id = i; if (launch(&N[i])) return -1; }
-	if (M.client)
+	if (M.client_write >= 0)
 	{
 		/* the client dials node 0 and sends WRITE(v) on that connection */
-		unsigned char w[2] = {'W', (unsigned char) M.client_val};
+		unsigned char w[2] = {'W', (unsigned char) M.client_write};
 		N[0].pend[N[0].npend++] = -1;
 		bag_add(-1, 0, w, 2);
 	}
 	drive_quiescent();
+	/* without the preload a node reads the real clock and the real heap,
+	 * and replay is no longer deterministic: refuse rather than guess */
+	for (int i = 0; i < M.nodes; i++)
+		if (!N[i].preload_ok)
+			die(3, "node %d did not load the preload %s (set CMC_PRELOAD to its path)", i, preload_path);
 	for (int s = 0; s < seqlen; s++)
 	{
 		Act a[MAXACT]; int na = enum_actions(a);
@@ -897,7 +1039,7 @@ check_invariants(int *which)
 	for (int i = 0; i < M.nodes; i++) { c.node[i] = N[i].canon; c.node_len[i] = N[i].canon_len; }
 	c.repl_src = rep_src; c.repl_val = rep_val; c.nrepl = nrep;
 	for (int k = 0; k < M.ninv; k++) {
-		const char *p = M.inv[k].expr; int r = eval_expr(&p, &c);
+		int r = eval_invariant(M.inv[k].expr, &c);
 		if (r < 0) { fprintf(stderr, "mc2: invariant %s parse error\n", M.inv[k].name); *which = -2; return 0; }
 		if (!r) { *which = k; return 0; }
 	}
@@ -919,10 +1061,8 @@ static void
 report(int which, const int *seq, int len)
 {
 	char nm[48];
-	printf("VIOLATION: invariant %s does not hold\n", M.inv[which].name);
-	printf("  actions (%d):", len);
-	for (int i = 0; i < len; i++) printf(" %d", seq[i]);
-	printf("\n");
+	printf("Error: Invariant %s is violated.\n", M.inv[which].name);
+	printf("Error: The behavior up to this point is (%d actions):\n", len);
 	Act a[MAXACT]; int na;
 	run_seq(NULL, 0, a, &na);
 	for (int i = 0; i < len; i++)
@@ -936,10 +1076,11 @@ report(int which, const int *seq, int len)
 	for (int i = 0; i < M.nodes; i++)
 	{
 		printf(" node[%d]=", i);
+		if (!N[i].canon_len) printf("()");
 		for (int k = 0; k < N[i].canon_len; k++) printf("%s%d", k ? "," : "", N[i].canon[k]);
 	}
 	printf("\n  replies:"); for (int i = 0; i < nrep; i++) printf(" (n%d,%d)", rep_src[i], rep_val[i]);
-	printf("\n");
+	printf("%s\n", nrep ? "" : " none");
 	kill_all();
 }
 
@@ -963,6 +1104,42 @@ q_push(const int *seq, int len, int next)
 	qused += (size_t) len + 1;
 }
 
+/* Locate the preload: $CMC_PRELOAD, else cmc-preload.so beside the
+ * running program (a build tree), else ../lib/libcmc/ from it (an
+ * installed bin/cmc).  Found from the program, not from a path compiled
+ * in, so an install to any prefix finds its own copy. */
+static int
+find_preload(void)
+{
+	static const char *const rel[] = {"/cmc-preload.so", "/../lib/libcmc/cmc-preload.so"};
+	const char *env = getenv("CMC_PRELOAD");
+	char		exe[4096];
+	ssize_t		n;
+
+	if (env && *env)
+	{
+		snprintf(preload_path, sizeof preload_path, "%s", env);
+		if (access(preload_path, R_OK) == 0) return 0;
+		fprintf(stderr, "cmc: CMC_PRELOAD=%s: the preload is not readable: %s\n", env, strerror(errno));
+		return -1;
+	}
+	n = readlink("/proc/self/exe", exe, sizeof exe - 64);
+	if (n > 0)
+	{
+		exe[n] = 0;
+		char *sl = strrchr(exe, '/');
+		if (sl)
+			for (size_t k = 0; k < sizeof rel / sizeof *rel; k++)
+			{
+				strcpy(sl, rel[k]);		/* fits: 64 bytes were kept free */
+				snprintf(preload_path, sizeof preload_path, "%s", exe);
+				if (access(preload_path, R_OK) == 0) return 0;
+			}
+	}
+	fprintf(stderr, "cmc: cannot find cmc-preload.so beside this program or in ../lib/libcmc; set CMC_PRELOAD to its path\n");
+	return -1;
+}
+
 /* the root: the empty sequence */
 static void
 q_root(void)
@@ -978,53 +1155,48 @@ static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t
 static uint64_t rng;
 static uint64_t next_rand(void) { uint64_t z = (rng += 0x9e3779b97f4a7c15ULL); z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL; z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL; return z ^ (z >> 31); }
 
-static void
-usage(const char *p)
-{
-	fprintf(stderr,
-			"usage: %s MODELFILE BINARY [--bfs | --simulate [--seed N] [--walks K]]\n"
-			"          [--depth D] [--max-states N] [--time S]\n"
-			"exit: 0 = no violation and the search was complete; 1 = a violation,\n"
-			"      or an engine rule broken; 2 = incomplete (a limit stopped the\n"
-			"      search, no violation found); 3 = usage or setup error\n", p);
-	exit(3);
-}
-
+/* The process front end: cmc --model-file FILE, from cmc_main(). */
 int
-main(int argc, char **argv)
+cmc_proc_main(const CmcProcOptions *po)
 {
-	if (argc < 3) usage(argv[0]);
-	int simulate = 0; long depth = -1; uint64_t seed = 1, walks = 1000; double tlimit = 0; size_t max_states = 0;
-	for (int i = 3; i < argc; i++)
-	{
-		const char *o = argv[i]; const char *v = i + 1 < argc ? argv[i + 1] : NULL;
-		if (!strcmp(o, "--bfs")) simulate = 0;
-		else if (!strcmp(o, "--simulate")) simulate = 1;
-		else if (!strcmp(o, "--seed") && v) { seed = strtoull(v, NULL, 10); i++; }
-		else if (!strcmp(o, "--walks") && v) { walks = strtoull(v, NULL, 10); i++; }
-		else if (!strcmp(o, "--depth") && v) { depth = strtol(v, NULL, 10); i++; }
-		else if (!strcmp(o, "--max-states") && v) { max_states = strtoull(v, NULL, 10); i++; }
-		else if (!strcmp(o, "--time") && v) { tlimit = strtod(v, NULL); i++; }
-		else usage(argv[0]);
-	}
-	if (load_model(argv[1])) return 3;
-	if (depth < 0) depth = M.depth;			/* the model file's bound, if any */
-	const char *binary = argv[2];
-	if (is_pie(binary) != 0) { fprintf(stderr, "mc2: %s must be a non-PIE ELF\n", binary); return 3; }
-	for (int i = 0; i < MAXNODES; i++) { N[i].binary = binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = -1; }
-	seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &g_sz);
+	if (load_model(po->model_file)) return 3;
+	if (po->binary)
+		snprintf(M.binary, sizeof M.binary, "%s", po->binary);
+	if (!*M.binary)
+	{ fprintf(stderr, "cmc: %s: no binary to check ([target] binary, or --binary)\n", po->model_file); return 3; }
+	if (po->crashes >= 0) M.crashes = po->crashes;
+	if (po->drops >= 0) M.drops = po->drops;
+	if (po->timeouts >= 0) M.timeouts = po->timeouts;
+	long depth = po->depth >= 0 ? po->depth : M.depth;
+	int pie = is_pie(M.binary);
+	if (pie < 0) { fprintf(stderr, "cmc: %s is not an ELF executable\n", M.binary); return 3; }
+	if (pie) { fprintf(stderr, "cmc: %s must be a non-PIE ELF (build with -no-pie)\n", M.binary); return 3; }
+	if (find_preload()) return 3;
+	for (int i = 0; i < MAXNODES; i++) { N[i].binary = M.binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = -1; }
+	if (seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &g_sz))
+	{ fprintf(stderr, "cmc: seccomp user notification is not available: %s\n", strerror(errno)); return 3; }
 	g_req = calloc(1, g_sz.seccomp_notif); g_resp = calloc(1, g_sz.seccomp_notif_resp);
+	if (!g_req || !g_resp) die(1, "out of memory");
 	double t0 = now_s();
 
-	if (simulate)
+	printf("cmc: model file %s, binary %s, %d node%s, %s\n", po->model_file, M.binary, M.nodes,
+		   M.nodes == 1 ? "" : "s", po->simulate ? "random simulation" : "breadth-first search");
+	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d",
+		   M.client_write, M.timeouts, M.crashes, M.drops);
+	if (depth >= 0) printf(", depth %ld", depth);
+	printf("\n");
+	fflush(stdout);
+
+	if (po->simulate)
 	{
 		/* seeded random walks: the same seed takes the same walks.  Not
 		 * exhaustive, so a clean finish is "no violation found", exit 2. */
 		if (depth < 0) depth = 100;
-		rng = seed;
+		rng = po->seed;
 		uint64_t states = 0, w;
-		int *seq = malloc((size_t) depth * sizeof *seq);
-		for (w = 0; w < walks; w++)
+		int *seq = malloc((size_t) (depth + 1) * sizeof *seq);
+		if (!seq) die(1, "out of memory");
+		for (w = 0; w < po->walks; w++)
 		{
 			Act a[MAXACT]; int na, len = 0;
 			if (run_seq(NULL, 0, a, &na)) die(3, "a node would not start");
@@ -1035,8 +1207,9 @@ main(int argc, char **argv)
 				{
 					if (which == -2) { kill_all(); return 3; }
 					kill_all();
-					printf("walk %" PRIu64 " (seed %" PRIu64 "):\n", w + 1, seed);
+					printf("Walk %" PRIu64 " (seed %" PRIu64 "):\n", w + 1, po->seed);
 					report(which, seq, len);
+					free(seq);
 					return 1;
 				}
 				if (na == 0 || len >= depth) break;
@@ -1046,53 +1219,73 @@ main(int argc, char **argv)
 				na = enum_actions(a);
 			}
 			kill_all();
-			if (tlimit > 0 && now_s() - t0 > tlimit) { w++; break; }
+			if (po->time_limit > 0 && now_s() - t0 > po->time_limit) { w++; break; }
 		}
+		free(seq);
 		printf("INCOMPLETE (no violation found): %" PRIu64 " walks of up to %ld actions, %" PRIu64 " states checked, seed %" PRIu64 " (not exhaustive), %.1f s\n",
-			   w, depth, states, seed, now_s() - t0);
+			   w, depth, states, po->seed, now_s() - t0);
 		return 2;
 	}
 
 	/* breadth-first search: shortest counterexample, every distinct world
 	 * expanded once.  Each frontier entry is replayed from a fresh launch
 	 * (stateless), so a world costs one replay of its whole prefix. */
-	size_t distinct = 0, merges = 0, cut = 0, replays = 0; int maxlen = 0;
+	size_t distinct = 0, cut = 0, replays = 0; int maxlen = 0;
 	const char *why = NULL;
 	q_root();
 	while (qh < qt)
 	{
 		QEnt e = Q[qh++];
 		int *seq = malloc(((size_t) e.len + 1) * sizeof *seq);
+		if (!seq) die(1, "out of memory");
 		if (e.len) memcpy(seq, qpool + e.off, (size_t) e.len * sizeof *seq);
 		Act a[MAXACT]; int na = 0;
 		if (run_seq(seq, e.len, a, &na)) die(3, "a node would not start");
 		replays++;
 
 		int which = -1; int ok = check_invariants(&which);
-		if (which == -2) { kill_all(); return 3; }
+		if (which == -2) { kill_all(); free(seq); return 3; }
 		uint64_t fp[2]; world_fp(fp);
 		int isnew = mark(fp[0], fp[1]);
-		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; } else merges++;
+		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; }
 		kill_all();
-		if (!ok) { report(which, seq, e.len); return 1; }
+		if (!ok) { report(which, seq, e.len); free(seq); return 1; }
 		if (isnew && na > 0)
 		{
 			if (depth >= 0 && e.len >= depth) cut++;
 			else for (int i = 0; i < na; i++) q_push(seq, e.len, i);
 		}
 		free(seq);
-		if (max_states && distinct >= max_states) { why = "max states reached"; break; }
-		if (tlimit > 0 && now_s() - t0 > tlimit) { why = "time limit reached"; break; }
+		if (po->max_states && distinct >= po->max_states) { why = "max states reached"; break; }
+		if (po->time_limit > 0 && now_s() - t0 > po->time_limit) { why = "time limit reached"; break; }
 	}
 	double dt = now_s() - t0;
 	if (!why && cut) why = "depth bound reached";
 	if (why)
 	{
-		printf("INCOMPLETE (no violation found): %s; %zu distinct states, %zu left on queue, %zu cut at depth %ld, %zu replays, %.1f s\n",
-			   why, distinct, qt - qh, cut, depth, replays, dt);
+		printf("INCOMPLETE (no violation found): %s; %zu distinct states, %zu left on queue, %zu cut at depth %ld, %.1f s\n",
+			   why, distinct, qt - qh, cut, depth, dt);
 		return 2;
 	}
-	printf("ok: %d invariant(s) held over %zu distinct states (%zu merges), complete to depth %d, %zu replays, %.1f s (%.0f replays/s)\n",
-		   M.ninv, distinct, merges, maxlen, replays, dt, dt > 0 ? replays / dt : 0.0);
+	/* TLC's wording; depth counts the initial state as 1 */
+	printf("Model checking completed. No error has been found.\n");
+	printf("%zu states generated, %zu distinct states found, 0 states left on queue.\n", replays, distinct);
+	printf("The depth of the complete state graph search is %d.\n", maxlen + 1);
+	printf("  %d invariant%s held; %.1f s, %.0f replays/s.\n", M.ninv, M.ninv == 1 ? "" : "s",
+		   dt, dt > 0 ? replays / dt : 0.0);
 	return 0;
 }
+
+#else							/* not Linux x86-64 */
+
+#include <stdio.h>
+
+int
+cmc_proc_main(const CmcProcOptions *po)
+{
+	fprintf(stderr, "cmc: --model-file %s: the process front end needs Linux x86-64 (seccomp user notification)\n",
+			po->model_file);
+	return 3;
+}
+
+#endif

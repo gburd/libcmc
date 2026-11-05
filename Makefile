@@ -1,15 +1,18 @@
 # libcmc: an explicit-state model checker for C protocol code.
 # Plain make, C11, no dependencies beyond libc.
 #
-#   make                     libcmc.a, the cmc binary and the engine tests
-#   make check               fast gates: engine tests, toy bug gate, purity
-#                            gate and its teeth, docs gate, fast calibration
+#   make                     libcmc.a, the cmc binary, the engine tests and
+#                            (Linux) the process front end's preload
+#   make check               fast gates: engine tests, toy bug gate, process
+#                            front end gate, purity gate and its teeth, docs
+#                            gate, fast calibration
 #   make check-msan          the engine tests under MemorySanitizer (clang)
 #   make check-calibration   every HC row against TLC (about 9 minutes)
 #   make check-hc-bugs       planted HC port bugs must fail calibration
 #   make check-all           all of the above
 #   make CC=clang check
-#   make install             libcmc.a, cmc.h and the man pages under $(PREFIX)
+#   make install             cmc, libcmc.a, the preload, cmc.h and the man
+#                            pages under $(PREFIX)
 #   make docs-site           the documentation site, into docs/_site
 #
 # Build output goes to $(B) (default build/, gitignored).  Logs and
@@ -27,6 +30,10 @@ ALL_CFLAGS = $(WARN) -Iinclude $(CFLAGS)
 PREFIX ?= /usr/local
 DESTDIR ?=
 export CMC_SCRATCH
+UNAME_S := $(shell uname -s)
+# the process front end's preload (Linux only): the deterministic heap
+# and the logical clock every checked node runs under
+PRELOAD = $(if $(filter Linux,$(UNAME_S)),$(B)/cmc-preload.so)
 
 LIB    = $(B)/libcmc.a
 TOY    = $(B)/toy0.o $(B)/toy1.o $(B)/toy2.o $(B)/toy3.o \
@@ -41,17 +48,21 @@ MSAN_B ?= build-msan
         check-calibration check-calibration-fast check-hc-bugs check-all \
         install docs-site clean
 
-all: $(LIB) $(B)/cmc $(B)/test_cmc
+all: $(LIB) $(B)/cmc $(B)/test_cmc $(PRELOAD)
 
 $(B):
 	mkdir -p $(B)
 
 $(B)/cmc.o: src/cmc.c include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(B)/cmc_cli.o: src/cmc_cli.c include/cmc.h | $(B)
+$(B)/cmc_cli.o: src/cmc_cli.c src/cmc_proc.h include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(LIB): $(B)/cmc.o $(B)/cmc_cli.o
+$(B)/cmc_proc.o: src/cmc_proc.c src/cmc_proc.h | $(B)
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o
 	$(AR) rcs $@ $^
+$(B)/cmc-preload.so: src/cmc_preload.c | $(B)
+	$(CC) $(ALL_CFLAGS) -fPIC -shared -o $@ $<
 
 $(B)/cmc_models.o: test/cmc_models.c include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
@@ -78,9 +89,10 @@ check-purity: $(PURE)
 	scripts/purity_gate.sh "$(PURE)" "$(PURE_SRC)"
 	scripts/purity_teeth.sh $(CC) $(B)
 
-check-unit: $(B)/test_cmc $(B)/cmc check-purity check-docs
+check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 	CMC_BUILD=$(B) $(B)/test_cmc
 	test/toy_gate.sh $(B)/cmc
+	CC=$(CC) test/proc_gate.sh $(B)
 
 # man pages lint clean and cover the API and every option; the guide's
 # model builds and behaves as the guide says (test/docs_gate.sh)
@@ -118,11 +130,13 @@ check-hc-bugs:
 
 check-all: check-unit check-msan check-calibration check-hc-bugs
 
-install: $(LIB)
-	mkdir -p $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \
+install: $(LIB) $(B)/cmc $(PRELOAD)
+	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \
 		$(DESTDIR)$(PREFIX)/share/man/man1 $(DESTDIR)$(PREFIX)/share/man/man3 \
 		$(DESTDIR)$(PREFIX)/share/man/man7
+	cp $(B)/cmc $(DESTDIR)$(PREFIX)/bin/
 	cp $(LIB) $(DESTDIR)$(PREFIX)/lib/
+	$(if $(PRELOAD),mkdir -p $(DESTDIR)$(PREFIX)/lib/libcmc && cp $(PRELOAD) $(DESTDIR)$(PREFIX)/lib/libcmc/)
 	cp include/cmc.h $(DESTDIR)$(PREFIX)/include/
 	cp man/man1/cmc.1 $(DESTDIR)$(PREFIX)/share/man/man1/
 	cp man/man3/libcmc.3 $(DESTDIR)$(PREFIX)/share/man/man3/
@@ -134,5 +148,5 @@ docs-site:
 	cd docs && bundle install --quiet && bundle exec jekyll build --destination _site
 
 clean:
-	rm -f $(B)/*.o $(B)/*.a $(B)/cmc $(B)/test_cmc $(B)/quickstart $(B)/quickstart-bug \
-		$(B)/*.replay $(B)/probe/*
+	rm -f $(B)/*.o $(B)/*.a $(B)/*.so $(B)/cmc $(B)/test_cmc $(B)/quickstart $(B)/quickstart-bug \
+		$(B)/*.replay $(B)/probe/* $(B)/proc/*

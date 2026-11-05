@@ -1,6 +1,6 @@
 /*
- * demo/elect.c: a two-node leader-election sketch, written as it ships
- * (experiments/process-mode/DESIGN.md, M5).  Ordinary blocking sockets,
+ * test/proc/elect.c: a two-node leader-election sketch, written as it ships
+ * (test/proc/DESIGN.md, M5).  Ordinary blocking sockets,
  * no libcmc header.  It exercises TIME as an environment action: a
  * follower waiting on recv is satisfied EITHER by a heartbeat from the
  * leader OR by an election TIMEOUT the checker chooses to fire.
@@ -21,8 +21,8 @@
  * leaders at term 1 -- split brain.  The invariant "no two leaders share
  * a term" catches it.
  *
- *   cc -O1 -no-pie -o elect       demo/elect.c
- *   cc -O1 -no-pie -DBUG -o elect-bug demo/elect.c
+ *   cc -O1 -no-pie -o elect       test/proc/elect.c
+ *   cc -O1 -no-pie -DBUG -o elect-bug test/proc/elect.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

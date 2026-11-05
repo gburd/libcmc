@@ -1,5 +1,5 @@
 /*
- * idle probe for process-mode M7 (experiments/process-mode).
+ * idle probe for process-mode M7 (test/proc).
  *
  * An engine probe, not a protocol: it checks that the checker does not
  * merge away the passage of time.  The server reads the clock at start,
@@ -17,7 +17,7 @@
  * Canonical state on fd 3: [count=1][s], s = 0 waiting, 1 served on
  * time, 2 served late.
  *
- *   cc -O1 -no-pie -o idle demo/idle.c
+ *   cc -O1 -no-pie -o idle test/proc/idle.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

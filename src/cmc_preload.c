@@ -1,34 +1,35 @@
 /*
- * detmalloc.c: a deterministic bump allocator, LD_PRELOAD'd by the M2
- * checker so a target's malloc heap is reproducible across runs
- * (experiments/process-mode/DESIGN.md, M2).
+ * cmc_preload.c: the library every node of cmc --model-file runs under,
+ * LD_PRELOADed by the process front end (cmc_proc.c).  It makes a node's
+ * run a pure function of the actions the checker chose:
  *
- * It carves malloc/calloc/realloc sequentially from an arena mapped
- * MAP_FIXED at a fixed base, so the Nth allocation in a given sequence
- * lands at the same address every run regardless of ASLR.  free() is a
- * no-op: for a bounded model-checking run the arena never needs to be
- * reclaimed, and a no-op keeps placement a pure function of the
- * allocation sequence (a freelist would reintroduce order effects).
+ *   - a deterministic bump allocator: malloc/calloc/realloc carve
+ *     sequentially from an arena mapped MAP_FIXED at a fixed base, so the
+ *     Nth allocation lands at the same address every run, whatever ASLR
+ *     does.  free() is a no-op: a bounded run never needs the memory
+ *     back, and a freelist would reintroduce order effects.
+ *   - clock_gettime, gettimeofday and getrandom through a real syscall.
+ *     glibc serves the clock from the vDSO, which seccomp never sees; as
+ *     syscalls, the checker answers them with its logical clock (it
+ *     advances only when the search fires a timeout) and a fixed random
+ *     pattern, so a replay reproduces the same times.
  *
- * The live protocol state is exactly arena[0 .. *bump).  The arena base
- * and the bump pointer live at fixed, exported addresses so the checker
- * can read the region without the target describing anything:
- *   cmc_arena       -- the fixed base (a symbol, value = ARENA_BASE)
- *   cmc_arena_bump  -- bytes allocated so far (a size_t the checker reads)
+ * Its constructor announces it to the checker with a clock_gettime on
+ * the clock id CMC_PRELOAD_MAGIC, which no real clock uses; a node that
+ * never announces it is refused, rather than checked against the real
+ * clock.
  *
- *   cc -shared -fPIC -o detmalloc.so detmalloc.c
- *   LD_PRELOAD=./detmalloc.so ./target
- *
- * Only the target's own allocations go through here; glibc-internal
- * allocations made before our constructor runs use the real allocator and
- * are not in the arena (and not part of the declared state).
+ * The functions below replace libc's, so they take libc's prototypes.
  */
 #define _GNU_SOURCE
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -37,6 +38,8 @@
 #define ALIGN      16UL
 
 /* exported at fixed, nm-findable symbols */
+extern void *cmc_arena;
+extern size_t cmc_arena_bump, cmc_arena_size;
 void	   *cmc_arena = ARENA_BASE;
 size_t		cmc_arena_bump = 0;
 size_t		cmc_arena_size = ARENA_SIZE;
@@ -51,12 +54,26 @@ arena_init(void)
 	void	   *p = mmap(ARENA_BASE, ARENA_SIZE, PROT_READ | PROT_WRITE,
 						 MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
 	if (p != ARENA_BASE)
-		_exit(97);				/* the fixed base was unavailable */
+	{
+		static const char msg[] = "cmc-preload: cannot map the arena at its fixed base\n";
+
+		(void) !write(2, msg, sizeof msg - 1);
+		_exit(97);
+	}
 	ready = 1;
 }
 
+#define CMC_PRELOAD_MAGIC 0x434d43	/* "CMC"; cmc_proc.c has the same */
+
 __attribute__((constructor))
-static void	ctor(void) { arena_init(); }
+static void
+ctor(void)
+{
+	struct timespec ts;
+
+	arena_init();
+	(void) syscall(SYS_clock_gettime, CMC_PRELOAD_MAGIC, &ts);
+}
 
 static void *
 bump(size_t n)
@@ -120,7 +137,7 @@ clock_gettime(clockid_t id, struct timespec *ts)
 }
 
 int
-gettimeofday(struct timeval *tv, void *tz)
+gettimeofday(struct timeval *restrict tv, void *restrict tz)
 {
 	return syscall(SYS_gettimeofday, tv, tz);
 }

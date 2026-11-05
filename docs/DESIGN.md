@@ -7,9 +7,29 @@ lede: >-
   The engine as built: the world encoding, where actions come from, durability, search, properties and gates.
 ---
 
-This describes the engine as built (`include/cmc.h`, `src/cmc.c`).  The
-original design, written before the code, is
-`research/01-survey-and-design.md` §4a.  The review that changed the
+This describes the engine as built.  It has two front ends.
+
+- **The process front end** (`src/cmc_proc.c`, `cmc --model-file`) is
+  how a product is checked: each node is the shipped program, run as a
+  process under seccomp user notification, and the checker is the
+  network, the clock and the crash between them.  It is described in
+  `cmc(7)` and `docs/model-file.md`; its milestones, measurements and
+  the probes that pin its verdicts are in
+  `experiments/process-mode/DESIGN.md` and `test/proc/`.
+- **In-process cores** (`include/cmc.h`, `src/cmc.c`, `cmc --model`) are
+  pure C step functions.  They are the engine's calibration path against
+  TLC.  The rest of this page describes them.
+
+The two share the CLI, the exit statuses, TLC's output wording and the
+rules in `docs/steering/project.md`, but not yet a search loop: the
+in-process engine stores worlds and expands them, while a process cannot
+be restored from bytes, so the process front end stores action
+sequences and replays them from a fresh launch.  Joining them needs a
+restorable process (fork from a snapshot), which is the next engine
+work.
+
+The original design of the in-process engine, written before the code,
+is `research/01-survey-and-design.md` §4a.  The review that changed the
 actor mode is `research/02-review-actor-mode.md`.
 
 ## The model
@@ -127,7 +147,13 @@ is reported as an engine violation, never truncated.
 
 ## Roadmap
 
-Ordered by what replication and consensus cores need first:
+For the process front end, next: fork from a snapshot instead of
+replaying from launch (the speed that larger models need), then the
+consensus examples -- Paxos, Raft, Humming Consensus, ZAB -- as programs
+written as they ship (`experiments/process-mode/DESIGN.md`).
+
+For in-process cores, ordered by what replication and consensus cores
+need first:
 
 1. Clocks: per-node monotonic time with drift bounded by ρ, a `TICK`
    action and a time-carrying `CLOCK` event (needed for leases).

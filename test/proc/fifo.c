@@ -1,5 +1,5 @@
 /*
- * fifo probe for process-mode M7 (experiments/process-mode).
+ * fifo probe for process-mode M7 (test/proc).
  *
  * An engine probe: node 0 writes A then B on one TCP connection; node 1
  * reads twice.  TCP delivers a connection's bytes in order, so node 1
@@ -9,7 +9,7 @@
  *
  * Canonical state on fd 3: [count=2][first][second], 0 = nothing yet.
  *
- *   cc -O1 -no-pie -o fifo demo/fifo.c
+ *   cc -O1 -no-pie -o fifo test/proc/fifo.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

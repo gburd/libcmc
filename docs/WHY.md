@@ -12,14 +12,14 @@ why a new tool was written instead of using an existing one.  It is the
 decision record; `01-survey-and-design.md` has the full survey with
 sources, and `02-review-actor-mode.md` the adversarial review.
 
-**What 0.1.0 checks, and what it does not.**  libcmc links the object
-files the product links, so there is no second model to keep in sync.
-But it checks only code written as pure, deterministic step functions
-(`CmcCore`); the I/O glue around a core -- the sockets, the disk, the
-timers -- is not checked.  The core ask is to prove C code written **as
-it will be deployed**, with no such rewrite.  0.1.0 does not meet it.
-The path to it is process mode, not a different tool: see "The north
-star" below and `docs/measurements/2026-11-04-process-mode-m0.md`.
+**What it checks.**  The core ask is to prove C code written **as it
+will be deployed**, with no rewrite for the checker.  `cmc
+--model-file` does that: each node is the shipped program, run
+unmodified, and libcmc is the network, the clock and the crash between
+them (process mode, "The north star" below).  The released 0.1.0 checked
+only code written as pure, deterministic step functions (`CmcCore`),
+which is now the engine's calibration path rather than the way to use
+it.
 
 ## The requirement
 
@@ -151,5 +151,9 @@ two of them false passes -- and five-process Paxos checked exhaustively,
 about 1,800 times slower per state than the in-process engine).
 The conclusion: process mode checks arbitrary heap-using C along a fixed
 schedule with no target change, and a full reconverging search needs that
-small hook; if even that proves unworkable at scale, the step-function
-mode remains the shipping answer.
+small hook.  It is now the one front end: M8 moved it into `src/` as
+`cmc --model-file`, with the prototype's fixtures and probes in
+`test/proc/` and gated by `make check`.  Its cost is speed -- every state
+is a fresh launch and replay -- so large models need `--simulate` or a
+faster transition (fork from a snapshot), which is the next engine
+work.

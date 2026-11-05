@@ -1,12 +1,12 @@
 /*
- * bigmsg probe for process-mode M7 (experiments/process-mode).
+ * bigmsg probe for process-mode M7 (test/proc).
  *
  * An engine probe: node 0 sends one 65-byte write; the checker's message
  * limit is 64 bytes.  The M6 engine kept the first 8 bytes and dropped
  * the rest without a word; the right verdict is an engine error (exit 1)
  * naming the limit, because a truncated message is a different protocol.
  *
- *   cc -O1 -no-pie -o bigmsg demo/bigmsg.c
+ *   cc -O1 -no-pie -o bigmsg test/proc/bigmsg.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

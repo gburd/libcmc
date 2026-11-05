@@ -1,13 +1,11 @@
-# A model file for demo/repl.c: a two-node replicated register, checked
+# A model file for test/proc/repl.c: a two-node replicated register, checked
 # as it ships.  No protocol logic here -- the running binary is it.
-# Run:  ./mc2 repl.model ./repl        (pass; backup kept current before ack)
-#       ./mc2 repl.model ./repl-bug    (fails: an acked write the backup lacks)
 
 [target]
 nodes = 2
 
 [environment]
-client_val = 5          # the client writes this value to node 0
+client_write = 5     # the client sends WRITE(5) to node 0
 
 [invariants]
 # once the client has been acked a value, the backup (node 1) must hold it.

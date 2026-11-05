@@ -1,5 +1,5 @@
 /*
- * chain probe for process-mode M7 (experiments/process-mode).
+ * chain probe for process-mode M7 (test/proc).
  *
  * An engine probe for a topology that is not primary/backup: node 0
  * sends a value to node 1, which forwards it to node 2.  `not_reached`
@@ -10,7 +10,7 @@
  *
  * Canonical state on fd 3: [count=1][value], 0 = nothing yet.
  *
- *   cc -O1 -no-pie -o chain demo/chain.c
+ *   cc -O1 -no-pie -o chain test/proc/chain.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

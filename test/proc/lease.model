@@ -1,10 +1,10 @@
-# demo/lease.c: a leaseholder that may write only while its lease is
+# test/proc/lease.c: a leaseholder that may write only while its lease is
 # valid.  Absolute time is engine-controlled (M5b): the checker's logical
 # clock advances only when it fires the lease-expiry timeout.
 [target]
 nodes = 1
 [environment]
-client = 1          # a client dials the node and sends the go-ahead
+client_write = 5     # the client sends WRITE(5) to node 0
 timeouts = 1        # the lease-expiry timer may fire once
 [invariants]
 # never wrote (byte 0) after the lease had really expired (byte 1).
