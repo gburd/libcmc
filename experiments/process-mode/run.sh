@@ -24,14 +24,27 @@ $CC -O2 -w -o checker         checker.c
 $CC -O1 -no-pie -w -o kv      demo/kv.c
 $CC -O1 -no-pie -w -DBUG -o kv-bug demo/kv.c
 $CC -O2 -w -o search          search.c
+$CC -shared -fPIC -w -o detmalloc.so demo/detmalloc.c
+$CC -O1 -no-pie -w -o list            demo/list.c
+$CC -O1 -no-pie -w -DCANON -o list-canon demo/list.c
+$CC -O1 -no-pie -w -DCANON -DBUG -o list-bug demo/list.c
+$CC -O2 -w -o search2         search2.c
 
 fail=0
 expect() {				# expect DESC EXIT  cmd...
 	desc=$1 want=$2; shift 2
 	out=$("$@" 2>&1) && rc=0 || rc=$?
-	note=$(echo "$out" | grep -E 'trace:|distinct states|prefix:' | tr '\n' ';' || true)
+	note=$(echo "$out" | grep -E 'trace:|distinct|prefix:|WALL' | tr '\n' ';' || true)
 	if [ "$rc" = "$want" ]; then echo "ok   $desc -> exit $rc ($note)"
 	else echo "FAIL $desc -> exit $rc, expected $want"; echo "$out" | sed 's/^/     /'; fail=1; fi
+}
+
+# assert a line is present (for the WALL claim, which is not an exit code)
+expect_out() {			# expect_out DESC NEEDLE  cmd...
+	desc=$1 needle=$2; shift 2
+	out=$("$@" 2>&1) || true
+	if echo "$out" | grep -q "$needle"; then echo "ok   $desc ($needle)"
+	else echo "FAIL $desc: '$needle' not in output"; echo "$out" | sed 's/^/     /'; fail=1; fi
 }
 
 echo "-- M0: a durability bug in a server written as it ships"
@@ -44,9 +57,15 @@ echo "-- M1: canonical state and a real search"
 expect "M1 correct kv (diamond merges)" 0 ./search ./kv
 expect "M1 bug kv (invariant caught)"   1 ./search ./kv-bug
 
+echo "-- M2: a real malloc heap, and the wall it hits"
+expect_out "M2 raw heap hits the wall" WALL ./search2 --raw ./list
+expect "M2 canon merges reorders"       0 ./search2 --canon ./list-canon
+expect "M2 canon bug (lost key caught)" 1 ./search2 --canon ./list-bug
+
 if [ "$fail" = 0 ]; then
 	echo "process-mode: ok (bug found in deployed-style code; search over"
-	echo "               interleavings terminates because equal states merge)"
+	echo "               interleavings terminates because equal states merge;"
+	echo "               a real heap needs a small canonical-emit hook, shown)"
 else
 	echo "process-mode: FAILED"
 fi

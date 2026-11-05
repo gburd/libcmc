@@ -7,6 +7,11 @@ kv
 kv-bug
 kv-pie
 search
+list
+list-canon
+list-bug
+search2
+detmalloc.so
 *.o
 pm-store.dat
 store.dat

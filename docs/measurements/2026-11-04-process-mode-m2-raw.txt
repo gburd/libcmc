@@ -1,0 +1,25 @@
+# Raw output, 2026-11-04: process-mode M0+M1+M2 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (  prefix: SET-b SET-a;distinct states so far: 4;)
+-- M2: a real malloc heap, and the wall it hits
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders -> exit 0 (mode=canon distinct=8 dedup_merges=17;)
+ok   M2 canon bug (lost key caught) -> exit 1 (  prefix: INS-2 INS-1;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge;
+               a real heap needs a small canonical-emit hook, shown)
+
+# M2 detail: the same logical set {1,2} under two insert orders, raw arena window
+# (first 24 bytes: [key8][next8]... ; the embedded next pointer is 0x600000000010):
+#   INS-1,INS-2 -> 01 00.. next=10 00 00 00 00 60.. then 02 00..
+#   INS-2,INS-1 -> 02 00.. (node for key 2 first) then 01 00..
+# Same set, different bytes => raw hashing does not merge the reorder.

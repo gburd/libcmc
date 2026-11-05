@@ -177,3 +177,79 @@ measurement says so.
 Still out of M1: a real allocator's heap in the region, several nodes,
 the clock, threads, and wiring libcmc's own engine onto the frontier.
 
+## M2: a real malloc heap, and the wall it hits (2026-11-04)
+
+M1 hashed a fixed BSS array: canonical because the bytes *are* the state
+at a fixed address.  M2 asks the milestone question -- can process mode
+check code whose protocol state is a **dynamic, pointer-linked structure
+built with `malloc`**?  The answer is the honest boundary of the whole
+approach, so M2 is built to find it, not to paper over it.
+
+**A real heap breaks three things a fixed region did not.**  (1) `malloc`
+returns different addresses run to run (heap-base ASLR, and placement that
+depends on the allocation sequence).  (2) a pointer stored in the state is
+an absolute address, so two logically equal states hold different pointer
+bytes.  (3) chunk metadata, padding and freed-not-zeroed bytes are
+nondeterministic noise between the live bytes.
+
+**Step one: a deterministic arena defeats address nondeterminism.**  The
+checker `LD_PRELOAD`s a tiny allocator (`demo/detmalloc.c`) that carves
+`malloc`/`calloc`/`realloc` sequentially from an arena `mmap`'d
+`MAP_FIXED` at a fixed base; `free` is a no-op (sound for a bounded
+model-checking run).  The Nth allocation in a given sequence then lands at
+the same address every run, whatever ASLR does, and the live state is
+exactly `arena[0..bump)`.  The target still calls plain `malloc` and is
+unchanged -- the preload is set by the checker at `exec`, so this stays
+code written as it ships.  Hashing `arena[0..bump)` canonicalises the
+heap *for a fixed allocation order*: pointers into the arena are now
+reproducible, so re-running the same schedule dedups.  This is necessary,
+and it works.
+
+**Step two: the wall.**  A deterministic arena fixes *address*
+nondeterminism but not *allocation-order* nondeterminism, and order is
+exactly what two interleavings of commuting operations differ in.
+`demo/list.c` keeps an ordered set as a `malloc`'d linked list; the client
+inserts keys.  Insert 1 then 2 and insert 2 then 1 reach the same logical
+set `{1,2}` -- but in the first order node 1 sits at arena offset 0 and
+node 2 at offset 16, and in the second order they swap.  Same list, different
+arena bytes.  So the diamond does **not** merge, and a reconverging search
+over heap-using code explodes.  Raw-heap hashing cannot canonicalise a
+logical state that is independent of allocation order.  This is the same
+wall CMC (OSDI 2002) paid 165-185 lines per program to climb: it did not
+hash memory, it walked the live object graph from roots in a deterministic
+order and emitted a position-based encoding -- which needs the target to
+describe its roots and layout.
+
+**Step three: the fix is a small opt-in hook, not a rewrite.**  The
+target may, when built for checking, emit a canonical encoding of its
+logical state on a declared side channel (fd 3) after each change -- for
+the list, the keys in sorted order.  The checker reads that and hashes it
+instead of the raw arena; when the target emits nothing it falls back to
+the raw arena and says so.  With the hook, insert 1 then 2 and insert 2
+then 1 both emit `1,2` and the diamond merges: `demo/list.c` built
+`-DCANON` gives the merged search, and `-DBUG` (an insert that drops an
+existing key) is caught with the shortest prefix, checkable because the
+encoding is parseable where raw arena bytes are not.  The hook is ~8
+lines and leaves the protocol code as it ships; it is not the
+step-function rewrite the whole project exists to avoid.
+
+**Pass (what M2 proves):** (a) with the deterministic arena, re-running
+one schedule dedups -- ASLR and run-to-run address noise are gone; (b)
+without a canonicaliser, two commuting orders do **not** merge (measured,
+the wall is real); (c) with the ~8-line fd-3 emit they do merge, the
+search terminates, and the planted bug is caught.  The conclusion for
+libcmc: process mode checks arbitrary heap-using C along a fixed schedule
+(replay, simulation, DAG-shaped search) with no target change; a
+reconverging exhaustive search needs the small canonical-emit hook, which
+is far less than step functions.  **Fail:** if even (a) did not hold -- if
+the deterministic arena did not make one schedule reproducible -- process
+mode could not dedup at all and the step-function mode would be the only
+answer.
+
+Still out of M2: several nodes, the clock and the vDSO, threads with a
+controlled scheduler, PIE load-bias, and wiring libcmc's own engine
+(properties, replay, `--simulate`, the TLC calibration) onto the process
+frontier.  Whether the canonical-emit hook becomes the standard way to
+use process mode, or the declared-region/fixed-schedule forms suffice, is
+the decision the next milestone turns on.
+

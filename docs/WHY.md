@@ -123,10 +123,15 @@ stays as the fast path for deep exhaustive search, not a requirement.
 
 A feasibility prototype catches the "acknowledge before durable" bug in
 an ordinary blocking TCP server with a real `fsync`, no step function
-(M0), and a second milestone runs a terminating breadth-first search over
-the interleavings of a server with no step function, deduping states that
-reconverge (M1): `experiments/process-mode/`, and the measurements
-`docs/measurements/2026-11-04-process-mode-m0.md` and `-m1.md`.  The hard
-part beyond M1 is canonicalising a real allocator's heap, not just a
-region the target names; if that cannot be made to scale, the
-step-function mode remains the shipping answer.
+(M0); a second milestone runs a terminating breadth-first search over the
+interleavings of a server with no step function, deduping states that
+reconverge (M1); and a third takes a real `malloc` heap and finds the
+boundary (M2): a deterministic allocator makes one schedule reproducible,
+but a reconverging search over heap state needs a small opt-in
+canonical-emit hook (~8 lines on the target, not a step-function
+rewrite).  See `experiments/process-mode/` and the measurements
+`docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`.
+The conclusion: process mode checks arbitrary heap-using C along a fixed
+schedule with no target change, and a full reconverging search needs that
+small hook; if even that proves unworkable at scale, the step-function
+mode remains the shipping answer.

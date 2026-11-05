@@ -5,13 +5,15 @@ pure, deterministic step functions (`CmcCore`).  Process mode is the path
 to the north star: proving C code written **as it will be deployed** --
 real syscalls, normal control flow, no rewrite for the checker.
 
-`DESIGN.md` is the design.  This is a time-boxed prototype in two
+`DESIGN.md` is the design.  This is a time-boxed prototype in three
 milestones, not part of the engine, not a gate, not built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
   server written as it ships.
 - **M1** (`search.c`, `demo/kv.c`): a real BFS over interleavings with a
   canonical state, so a state reached two ways is counted once.
+- **M2** (`search2.c`, `demo/list.c`, `demo/detmalloc.c`): a real
+  `malloc` heap, and the boundary it draws.
 
 ## What M0 shows
 
@@ -58,6 +60,29 @@ search possible.  Built `-DBUG`, SET a also clears b; the invariant "a
 cell once set stays set" catches it, and BFS reports the shortest prefix
 that triggers it, `SET-b SET-a`.
 
+## What M2 shows
+
+`demo/list.c` keeps its protocol state in a `malloc`'d linked list, run
+under a deterministic arena allocator (`demo/detmalloc.c`) the checker
+`LD_PRELOAD`s.  It draws the honest boundary of process mode:
+
+```
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders       -> exit 0 (distinct=8)
+ok   M2 canon bug (lost key caught) -> exit 1 (prefix: INS-2 INS-1)
+```
+
+The deterministic arena defeats ASLR, so one schedule is reproducible.
+But raw heap bytes still cannot merge two commuting insert orders -- the
+set `{1,2}` built as 1-then-2 and as 2-then-1 places the nodes in opposite
+arena slots, so the bytes differ (16 raw states where the logical count
+is 8).  A ~8-line canonical-emit hook (the target writes its sorted keys
+on fd 3) makes the orders merge and the search terminate, and the planted
+lost-key bug is then caught.  The conclusion: process mode checks
+arbitrary heap-using C along a fixed schedule with no target change; a
+reconverging exhaustive search needs the small hook, far less than step
+functions.
+
 ## How it works
 
 Seccomp **user notification** (Linux >= 5.0).  The child installs a
@@ -82,15 +107,15 @@ PIE rather than read relocated memory and report a wrong answer.
 
 ## What the prototype does NOT do
 
-M1 canonicalises only a **declared region** the target names, not a real
-allocator's heap, the stack or TLS -- generalising that is the next
-milestone and the one that decides whether process mode scales.  Also
-out: several connections and nodes, the clock and the vDSO, threads with
-a controlled scheduler, and wiring libcmc's own engine (properties,
-replay, `--simulate`, the TLC calibration) onto the process frontier.
-Those are the milestones in `DESIGN.md`, each with its own kill
-criterion; only after them does process mode become a second engine mode
-in `src/`.
+M2 drew the boundary: a real `malloc` heap canonicalises along one
+schedule, but a reconverging search needs the small opt-in canonical-emit
+hook; without it process mode still runs but counts reordered-equal
+states separately.  Still out: several connections and nodes, the clock
+and the vDSO, threads with a controlled scheduler, PIE targets, and
+wiring libcmc's own engine (properties, replay, `--simulate`, the TLC
+calibration) onto the process frontier.  Those are the milestones in
+`DESIGN.md`, each with its own kill criterion; only after them does
+process mode become a second engine mode in `src/`.
 
 ## Run it
 
@@ -99,4 +124,5 @@ in `src/`.
 ```
 
 Artifacts (`server`, `server-bug`, `checker`, `kv`, `kv-bug`, `search`,
+`list`, `list-canon`, `list-bug`, `search2`, `detmalloc.so`,
 `pm-store.dat`) are gitignored.
