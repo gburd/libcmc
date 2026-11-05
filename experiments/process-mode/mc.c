@@ -19,8 +19,10 @@
  * log, named fields and the C escape hatch are later milestones.
  *
  * Usage: mc MODELFILE BINARY
- * Exit 0 = all invariants held and the search terminated; 1 = a violation
- * (shortest client-input prefix printed); 2 = error.
+ * Exit 0 = all invariants held and the search was complete; 1 = a
+ * violation (shortest client-input prefix printed) or a full table; 2 =
+ * incomplete (the depth bound stopped the search, no violation found);
+ * 3 = usage or setup error.
  *
  * Verified on Linux 6.18, glibc 2.44, -no-pie targets.
  */
@@ -430,15 +432,15 @@ static Pre q[200000]; static int qh, qt;
 int
 main(int argc, char **argv)
 {
-	if (argc < 3) { fprintf(stderr, "usage: %s MODELFILE BINARY\n", argv[0]); return 2; }
-	if (load_model(argv[1])) return 2;
+	if (argc < 3) { fprintf(stderr, "usage: %s MODELFILE BINARY\n", argv[0]); return 3; }
+	if (load_model(argv[1])) return 3;
 	g_binary = argv[2];
-	if (is_pie(g_binary) != 0) { fprintf(stderr, "%s must be a non-PIE ELF\n", g_binary); return 2; }
-	if (M.depth > MAXD) M.depth = MAXD;
+	if (is_pie(g_binary) != 0) { fprintf(stderr, "%s must be a non-PIE ELF\n", g_binary); return 3; }
+	if (M.depth > MAXD) { fprintf(stderr, "mc: depth %d exceeds the limit %d\n", M.depth, MAXD); return 3; }
 
 	/* empty prefix = initial state */
 	uint64_t fp[2]; fp128((const uint8_t*)"", 0, fp); mark(fp[0], fp[1]);
-	int distinct = 1, merges = 0;
+	int distinct = 1, merges = 0, cut = 0;
 	q[qt].len = 0; qt++;
 
 	while (qh < qt)
@@ -446,18 +448,18 @@ main(int argc, char **argv)
 		Pre pre = q[qh++];
 		for (int ai = 1; ai <= M.clients; ai++)
 		{
-			if (pre.len >= M.depth) continue;
+			if (pre.len >= M.depth) { cut = 1; continue; }
 			Pre nx = pre; nx.act[nx.len++] = (unsigned char) ai;
 			unsigned char snap[SNAP];
 			int n = run_prefix(nx.act, nx.len, snap, sizeof snap);
-			if (n < 0) { fprintf(stderr, "mc: run failed at depth %d\n", nx.len); return 2; }
+			if (n < 0) { fprintf(stderr, "mc: run failed at depth %d\n", nx.len); return 3; }
 
 			/* check every invariant in this state */
 			Ctx c = {0}; c.node0 = snap; c.node0_len = n; c.acted = nx.act; c.acted_len = nx.len;
 			for (int k = 0; k < M.ninv; k++)
 			{
 				int r = eval_invariant(M.inv[k].expr, &c);
-				if (r < 0) { fprintf(stderr, "mc: invariant %s: parse error in \"%s\"\n", M.inv[k].name, M.inv[k].expr); return 2; }
+				if (r < 0) { fprintf(stderr, "mc: invariant %s: parse error in \"%s\"\n", M.inv[k].name, M.inv[k].expr); return 3; }
 				if (!r)
 				{
 					printf("VIOLATION: invariant %s does not hold\n", M.inv[k].name);
@@ -470,9 +472,22 @@ main(int argc, char **argv)
 				}
 			}
 			fp128(snap, (size_t) n, fp);
-			if (mark(fp[0], fp[1])) { distinct++; if (nx.len < M.depth) { q[qt] = nx; qt++; } }
+			if (mark(fp[0], fp[1]))
+			{
+				distinct++;
+				if (qt >= (int) (sizeof q / sizeof *q) || nseen >= (int) (sizeof seen / sizeof *seen))
+				{ fprintf(stderr, "mc: ERROR: the frontier or the seen set is full\n"); return 1; }
+				q[qt] = nx; qt++;
+			}
 			else merges++;
 		}
+	}
+	/* the depth bound stopped the search: that is not a pass */
+	if (cut)
+	{
+		printf("INCOMPLETE (no violation found): depth bound %d reached; %d distinct states (%d dedup merges)\n",
+			   M.depth, distinct, merges);
+		return 2;
 	}
 	printf("ok: %d invariant(s) held over %d distinct states (%d dedup merges)\n",
 		   M.ninv, distinct, merges);

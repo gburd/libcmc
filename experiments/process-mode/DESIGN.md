@@ -378,13 +378,57 @@ below is a milestone with a kill criterion; the examples come only after.
   value is in neither node's durable state, a lost committed write.  The
   invariant `all r in replies : r.val in node[0] or r.val in node[1]`
   fails.  Kill criterion met.  Stable 10/10.
-- **M7 -- scale, stated honestly.**  A real N=3 consensus run may be
-  millions of states; process mode at thousands of states/second
-  (stateless replay) may not finish an exhaustive BFS.  Wire `--simulate`
-  (seeded random walks) and bounded depth, measure what N=3 of each
-  protocol actually costs, and decide per example whether it is checked
-  exhaustively, to a depth bound, or by simulation.  A result that hit a
-  bound is reported as "no violation found in N states", never as a pass.
+- **M7 -- scale, stated honestly.**  **Done (2026-11-05).**  Before
+  measuring scale, M7 checked that the M6 engine's verdicts could be
+  trusted, writing a probe for each suspected flaw first.  Five were
+  wrong: (1) `idle`: the fingerprint left out the environment budgets
+  and the logical clock, so a world after a timeout merged into the
+  initial one and a real violation passed; (2) a depth-bounded search
+  printed `ok` and exited 0; (3) `fifo`: a connection's messages could be
+  delivered out of order, which TCP never does, so a false violation
+  appeared; (4) `chain`: every accepted connection was paired with node
+  0, so a 0->1->2 topology never ran; (5) `bigmsg`: a write longer than
+  8 bytes was silently truncated.  The engine now: fingerprints node
+  states, open connections, every channel in order, pending connects,
+  replies, budgets and the clock; routes connections by the port dialled
+  and defers `accept`, so any topology works; delivers each connection
+  FIFO with partial reads and EOF from a dead peer; reports a depth,
+  state or time bound as INCOMPLETE (exit 2), never a pass; makes every
+  cap, an over-long write, a node silent in an unmodelled call, and a
+  replay that diverges an error (exit 1); grows its seen set and
+  frontier instead of dropping states; adds seeded `--simulate`; and
+  prints a counterexample as named actions.  Exit codes match `cmc(1)`.
+  The same depth-bound flaw in M3's `mc.c` is fixed too.  The fix also
+  showed the M6 `durlog-bug` violated its invariant with *no* crash
+  (its volatile state never held the value), so it did not need the
+  crash; the demo now keeps the value in memory and needs the crash to
+  show, as M6 claimed.
+
+  **Scale, measured on single-decree Paxos** (`demo/paxos.c`: 2
+  proposers, 3 acceptors, five processes, request-per-connection TCP,
+  acceptors persist before replying), host 48 cores, load 5-8, raw in
+  docs/measurements/2026-11-05-process-mode-m7-raw.txt:
+
+  | environment | correct (exhaustive BFS) | bug |
+  |---|---|---|
+  | no faults | 561 states, depth 27, 964 replays, 2.9 s | caught, 24 actions, 2.7 s |
+  | 1 crash | 7,503 states, depth 29, 14,595 replays, 44.8 s | caught, 40.6 s |
+  | 1 drop | 1,525 states, depth 27, 3,056 replays, 9.1 s | caught, 8.4 s |
+  | 1 crash + 1 drop | 30,075 states, depth 32, 68,947 replays, 226.9 s | caught, 192.6 s |
+
+  Process mode runs at about 300-340 replays/s, single-threaded: every
+  state costs a fresh launch of all five processes plus a replay of its
+  prefix.  In distinct states per second that is 133/s (the crash+drop
+  row) against 237,568/s for the in-process engine on HC (7,412,120
+  states in 31.2 s, docs/measurements/2026-11-02), about 1,800 times
+  slower, on different models.  So exhaustive checking holds for Paxos
+  with one fault of each kind; bigger budgets or Raft-sized protocols
+  will need `--simulate` or a faster transition (fork-from-snapshot
+  instead of replay-from-launch).  Seeded `--simulate` with crash+drop
+  found the bug on every one of five seeds, in 15 to 350 walks (under
+  1 s each); 2,000 walks of the correct build took 5.0 s and exited 2
+  ("no violation found", not a pass).
+
 - **M8 -- one front end in `src/`.**  Lift process mode out of
   `experiments/` into the engine as its process front end, with the model
   file as *the* interface (`cmc --model-file ...`).  Demote `CmcCore` in
@@ -393,7 +437,9 @@ below is a milestone with a kill criterion; the examples come only after.
 
 **Then the examples**, smallest real protocol first, each kept only if the
 engine finishes a meaningful run on it (exhaustive, bounded, or
-simulation per M7):
+simulation per M7).  `demo/paxos.c` is the M7 sizing workload, not yet
+the Paxos example: the example adds a client, the durable-state
+invariants, and the write-up:
 
 1. single-decree **Paxos** -- the smallest real consensus;
 2. **Raft** -- leader election plus log replication, the recognised one;

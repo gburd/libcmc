@@ -1,0 +1,13 @@
+# demo/idle.c: an engine probe (M7).  The server ignores an idle timeout
+# and keeps waiting, so its own state does not change -- but time has
+# passed.  never_late is deliberately false: the right verdict is a
+# violation on "timeout, then the request".  A checker that leaves the
+# environment budgets out of its fingerprint merges the post-timeout
+# world into the initial one and wrongly passes.
+[target]
+nodes = 1
+[environment]
+client_val = 1      # the client's request
+timeouts = 1        # the idle timer may fire once
+[invariants]
+never_late = "node[0][0] != 2"

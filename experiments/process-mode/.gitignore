@@ -28,3 +28,9 @@ lease
 lease-bug
 durlog
 durlog-bug
+idle
+fifo
+chain
+bigmsg
+paxos
+paxos-bug

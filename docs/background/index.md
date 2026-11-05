@@ -23,4 +23,5 @@ TLC, all from 2026-11-02.  The current design is
 - [Process mode M5]({{ '/background/process-mode-m5/' | relative_url }}) -- time is an environment action (leader election)
 - [Process mode M5b]({{ '/background/process-mode-m5b/' | relative_url }}) -- absolute time is engine-controlled (stale lease)
 - [Process mode M6]({{ '/background/process-mode-m6/' | relative_url }}) -- crash loses volatile, keeps durable (lost commit)
+- [Process mode M7]({{ '/background/process-mode-m7/' | relative_url }}) -- honest verdicts, and what Paxos costs
 - [Decision: one engine, a model file, the shipping binary]({{ '/background/decision-model-file/' | relative_url }})

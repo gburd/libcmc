@@ -1,0 +1,10 @@
+# demo/paxos.c: single-decree Paxos, 2 proposers + 3 acceptors (M7
+# sizing workload).  node[0][7] and node[1][7] are the proposers'
+# decided values (0 = none; a crashed proposer that never decided has
+# no state, so the byte reads -1 -- also "none").
+[target]
+nodes = 5
+[environment]
+client = 0
+[invariants]
+agreement = "node[0][7] <= 0 or node[1][7] <= 0 or node[0][7] == node[1][7]"

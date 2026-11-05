@@ -6,7 +6,6 @@ nodes = 2
 [environment]
 client = 0          # node 0 initiates; no client WRITE
 timeouts = 1        # the follower's election timer may fire once
-depth = 4
 [invariants]
 # no two nodes are leader (role==1) at the same term.
 one_leader_per_term = "not (node[0][0] == 1 and node[1][0] == 1 and node[0][1] == node[1][1])"

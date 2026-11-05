@@ -1,0 +1,9 @@
+# demo/fifo.c: an engine probe (M7).  TCP delivers a connection in
+# order, so node 1 never reads B (2) before A (1).  The right verdict
+# is a pass.
+[target]
+nodes = 2
+[environment]
+client = 0
+[invariants]
+never_b_first = "node[1][0] != 2"

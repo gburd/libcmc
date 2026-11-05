@@ -17,10 +17,11 @@
  * the client.  A crash after the ack cannot lose the write: it is durable
  * on both nodes.
  *
- * -DBUG: the primary acks the client as soon as it has forwarded, before
- * anyone has made the write durable.  If it then crashes before the
- * backup stored, the committed write is gone -- it is in neither node's
- * durable state.
+ * -DBUG: the primary acks the client once the write is in its memory,
+ * before anyone has made it durable.  Without a crash nothing is lost
+ * (the value is in the primary's volatile state).  If it crashes before
+ * the backup stored, the committed write is gone -- it is in neither
+ * node's durable state.  So the bug needs a crash to show.
  *
  * Ordinary blocking sockets, no libcmc header.  Node i listens on BASE+i.
  * Canonical state fd 3 (volatile) and fd 193 (durable): [count=1][value].
@@ -108,21 +109,23 @@ main(int argc, char **argv)
 		write(bk, fwd, 2);				/* forward to backup */
 
 #ifdef BUG
-		/* ack before anyone has made it durable */
+		/* ack once the write is in memory, before anyone made it durable */
+		emit(3, v);
 		unsigned char ack[2] = {'A', (unsigned char) v};
 		write(c, ack, 2);
 		unsigned char dack[2];
-		read(bk, dack, 2);				/* (then) wait for the backup */
-		emit(193, v);
-		emit(3, v);
+		if (read(bk, dack, 2) == 2 && dack[0] == 'D')
+			emit(193, v);				/* durable, but too late */
 #else
 		/* wait for the backup's durable-ack, make it durable here, THEN ack */
 		unsigned char dack[2];
-		read(bk, dack, 2);
-		emit(193, v);						/* durable locally */
-		emit(3, v);
-		unsigned char ack[2] = {'A', (unsigned char) v};
-		write(c, ack, 2);				/* only now is it committed */
+		if (read(bk, dack, 2) == 2 && dack[0] == 'D')
+		{
+			emit(193, v);				/* durable locally */
+			emit(3, v);
+			unsigned char ack[2] = {'A', (unsigned char) v};
+			write(c, ack, 2);			/* only now is it committed */
+		}
 #endif
 		close(bk);
 	}

@@ -8,7 +8,6 @@ nodes = 2
 
 [environment]
 client_val = 5          # the client writes this value to node 0
-depth = 6               # explore delivery orders up to this many steps
 
 [invariants]
 # once the client has been acked a value, the backup (node 1) must hold it.

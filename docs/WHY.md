@@ -144,10 +144,11 @@ two nodes leader at the same term -- is caught in a two-process election
 sketch.  See
 `experiments/process-mode/` and the measurements
 `docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`,
-`2026-11-05-process-mode-m3.md`, `-m4.md`, `-m5.md`, `-m5b.md`, and
-`-m6.md` (the last lets the checker crash a node -- losing volatile,
-keeping durable -- or drop a message, and catches a committed write lost
-to a crash).
+`2026-11-05-process-mode-m3.md`, `-m4.md`, `-m5.md`, `-m5b.md`, `-m6.md`
+(the checker crashes a node, losing volatile and keeping durable, or
+drops a message), and `-m7.md` (verdicts made honest -- five were wrong,
+two of them false passes -- and five-process Paxos checked exhaustively,
+about 1,800 times slower per state than the in-process engine).
 The conclusion: process mode checks arbitrary heap-using C along a fixed
 schedule with no target change, and a full reconverging search needs that
 small hook; if even that proves unworkable at scale, the step-function

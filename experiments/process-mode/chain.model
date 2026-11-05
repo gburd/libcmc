@@ -1,0 +1,8 @@
+# demo/chain.c: an engine probe (M7).  Node 0 -> node 1 -> node 2.
+# not_reached is deliberately false; the right verdict is a violation.
+[target]
+nodes = 3
+[environment]
+client = 0
+[invariants]
+not_reached = "node[2][0] != 7"

@@ -79,6 +79,11 @@ is in neither node's durable state, so the crash lost a committed write.
 That is the M6 kill criterion -- *a crash that loses a committed entry is
 caught*.  Stable 10/10 runs.
 
+> Correction (M7): the `durlog-bug` measured here violated its invariant
+> even with no crash, because its volatile state never held the value.
+> M7 fixed the demo so the bug needs the crash, and the verdicts above
+> are unchanged; see [M7]({{ '/background/process-mode-m7/' | relative_url }}).
+
 ## Still out
 
 A dedicated partition demo (the DROP action is in and exercised, but no

@@ -4,9 +4,8 @@
 [target]
 nodes = 1
 [environment]
-client = 0          # the node self-initiates; no client write
+client = 1          # a client dials the node and sends the go-ahead
 timeouts = 1        # the lease-expiry timer may fire once
-depth = 3
 [invariants]
 # never wrote (byte 0) after the lease had really expired (byte 1).
 no_write_after_expiry = "not (node[0][0] == 1 and node[0][1] == 1)"

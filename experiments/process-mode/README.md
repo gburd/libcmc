@@ -5,7 +5,7 @@ pure, deterministic step functions (`CmcCore`).  Process mode is the path
 to the north star: proving C code written **as it will be deployed** --
 real syscalls, normal control flow, no rewrite for the checker.
 
-`DESIGN.md` is the design.  This is a time-boxed prototype in eight
+`DESIGN.md` is the design.  This is a time-boxed prototype in nine
 milestones, not part of the engine, not a gate, not built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
@@ -35,6 +35,11 @@ milestones, not part of the engine, not a gate, not built by `make`.
   durable fd-193 state) or DROP a message, both budgeted; a protocol that
   acks a client before the write is durable loses a committed write, and
   that is caught.
+- **M7** (`mc2.c`, `demo/{idle,fifo,chain,bigmsg,paxos}.c`): honest
+  verdicts.  Probes the M6 engine got wrong now give the right answer; a
+  bounded run is INCOMPLETE (exit 2), a cap an error; any topology the
+  nodes dial works; single-decree Paxos with five processes is checked
+  exhaustively, and seeded `--simulate` finds its bug too.
 
 ## What M0 shows
 

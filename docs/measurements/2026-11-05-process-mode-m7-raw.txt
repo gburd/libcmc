@@ -1,0 +1,106 @@
+# Raw output, 2026-11-05: process-mode M0..M7 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, 48 cores, glibc 2.44, load 7.44 7.48 7.81.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;VIOLATION: NoLostAck -- an acknowledged write is not on disk;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (VIOLATION: a cell once set was cleared;  prefix: SET-b SET-a;distinct states so far: 4;)
+-- M2: a real malloc heap, and the wall it hits
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders -> exit 0 (mode=canon distinct=8 dedup_merges=17;)
+ok   M2 canon bug (lost key caught) -> exit 1 (VIOLATION: an inserted key was lost;  prefix: INS-2 INS-1;)
+-- M3: a model file drives the checker (docs/model-file.md)
+ok   M3 correct (model file + DSL invariant) -> exit 0 (ok: 1 invariant(s) held over 8 distinct states (17 dedup merges);)
+ok   M3 bug (DSL invariant caught) -> exit 1 (VIOLATION: invariant no_lost_key does not hold;  client inputs: 2 1;)
+-- M4: multi-node (the checker owns the inter-node network)
+ok   M4 correct repl (agree-on-ack holds) -> exit 0 (ok: 1 invariant(s) held over 7 distinct states (0 merges), complete to depth 6, 7 replays, 0.0 s (777 replays/s);)
+ok   M4 bug repl (acked write backup lacks) -> exit 1 (VIOLATION: invariant agree_on_ack does not hold;)
+-- M5: time is an environment action (election timeout)
+ok   M5 correct elect (one leader per term) -> exit 0 (ok: 1 invariant(s) held over 4 distinct states (0 merges), complete to depth 2, 4 replays, 0.0 s (897 replays/s);)
+ok   M5 bug elect (split brain caught) -> exit 1 (VIOLATION: invariant one_leader_per_term does not hold;)
+-- M5b: absolute time is engine-controlled (stale-lease write)
+ok   M5b correct lease (no write after expiry) -> exit 0 (ok: 1 invariant(s) held over 4 distinct states (0 merges), complete to depth 2, 4 replays, 0.0 s (1089 replays/s);)
+ok   M5b bug lease (stale-lease write caught) -> exit 1 (VIOLATION: invariant no_write_after_expiry does not hold;)
+-- M6: crash loses volatile, keeps durable (lost committed write)
+ok   M6 correct durlog (no lost commit) -> exit 0 (ok: 1 invariant(s) held over 16 distinct states (5 merges), complete to depth 5, 21 replays, 0.0 s (846 replays/s);)
+ok   M6 bug durlog (lost committed write) -> exit 1 (VIOLATION: invariant no_lost_commit does not hold;)
+-- M7: honest verdicts (probes that were wrong before M7), and Paxos
+ok   M7 idle: time passing is not merged away -> exit 1 (VIOLATION: invariant never_late does not hold;)
+ok   M7 fifo: a connection is delivered in order -> exit 0 (ok: 1 invariant(s) held over 4 distinct states (0 merges), complete to depth 3, 4 replays, 0.0 s (864 replays/s);)
+ok   M7 chain: any topology the nodes dial -> exit 1 (VIOLATION: invariant not_reached does not hold;)
+ok   M7 depth bound is INCOMPLETE, not a pass -> exit 2 (INCOMPLETE (no violation found): depth bound reached; 6 distinct states, 0 left on queue, 2 cut at depth 2, 8 replays, 0.0 s;)
+ok   M7 a cap is an error, not a truncation -> exit 1 (mc2: ERROR: node 0 writes 65 bytes in one call; the limit is 64;)
+ok   M7 correct paxos (agreement, N=5, complete) -> exit 0 (ok: 1 invariant(s) held over 561 distinct states (403 merges), complete to depth 27, 964 replays, 2.9 s (335 replays/s);)
+ok   M7 bug paxos (two values decided) -> exit 1 (VIOLATION: invariant agreement does not hold;)
+ok   M7 bug paxos found by --simulate -> exit 1 (VIOLATION: invariant agreement does not hold;)
+ok   M7 correct paxos --simulate is not a pass -> exit 2 (INCOMPLETE (no violation found): 100 walks of up to 100 actions, 2440 states checked, seed 1 (not exhaustive), 0.3 s;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge;
+               a real heap needs a small canonical-emit hook, shown;
+               a declarative model file drives it, invariants in a DSL;
+               multi-node: the checker owns the inter-node network;
+               time is an environment action, so elections explore;
+               absolute time is engine-controlled, so a stale lease bites;
+               a crash loses volatile but keeps durable, so a lost commit shows;
+               verdicts are honest: a bounded run is INCOMPLETE, a cap an error)
+
+# M7 Paxos sizing on the final engine (demo/paxos.c, paxos.model plus
+# the budgets shown; mc2 --time 1200; /usr/bin/time wall and max RSS):
+#   === paxos, no faults; load 5.22 6.31 7.82
+#   ok: 1 invariant(s) held over 561 distinct states (403 merges), complete to depth 27, 964 replays, 2.9 s (338 replays/s)
+#     wall 2.85 s, maxrss 2940 KB
+#   === paxos-bug, no faults; load 5.12 6.28 7.80
+#   VIOLATION: invariant agreement does not hold
+#     actions (24): 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 2.67 s, maxrss 2964 KB
+#   === paxos, crashes = 1; load 5.12 6.28 7.80
+#   ok: 1 invariant(s) held over 7503 distinct states (7092 merges), complete to depth 29, 14595 replays, 44.8 s (326 replays/s)
+#     wall 44.81 s, maxrss 2908 KB
+#   === paxos-bug, crashes = 1; load 6.83 6.58 7.83
+#   VIOLATION: invariant agreement does not hold
+#     actions (24): 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 40.60 s, maxrss 2960 KB
+#   === paxos, drops = 1; load 7.88 6.86 7.87
+#   ok: 1 invariant(s) held over 1525 distinct states (1531 merges), complete to depth 27, 3056 replays, 9.1 s (337 replays/s)
+#     wall 9.06 s, maxrss 2932 KB
+#   === paxos-bug, drops = 1; load 7.97 6.91 7.88
+#   VIOLATION: invariant agreement does not hold
+#     actions (24): 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 8.43 s, maxrss 2876 KB
+#   === paxos, crashes = 1 drops = 1; load 7.99 6.95 7.88
+#   ok: 1 invariant(s) held over 30075 distinct states (38872 merges), complete to depth 32, 68947 replays, 226.9 s (304 replays/s)
+#     wall 226.90 s, maxrss 7976 KB
+#   === paxos-bug, crashes = 1 drops = 1; load 7.77 7.50 7.91
+#   VIOLATION: invariant agreement does not hold
+#     actions (24): 0 0 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 192.62 s, maxrss 7364 KB
+#   === simulate paxos-bug crashes+drops seed 1, up to 2000 walks
+#   walk 350 (seed 1):
+#     actions (29): 0 3 2 0 1 1 0 0 1 1 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 0.86 s
+#   === simulate paxos-bug crashes+drops seed 2, up to 2000 walks
+#   walk 182 (seed 2):
+#     actions (29): 8 0 3 0 1 0 0 0 1 1 0 0 0 1 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 0.46 s
+#   === simulate paxos-bug crashes+drops seed 3, up to 2000 walks
+#   walk 35 (seed 3):
+#     actions (28): 7 4 1 0 0 0 0 1 1 0 0 0 1 0 1 1 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 0.09 s
+#   === simulate paxos-bug crashes+drops seed 4, up to 2000 walks
+#   walk 15 (seed 4):
+#     actions (29): 0 7 3 0 0 0 0 0 1 1 0 0 0 0 1 0 0 0 0 1 1 1 0 0 0 0 0 0 0
+#     wall 0.04 s
+#   === simulate paxos-bug crashes+drops seed 5, up to 2000 walks
+#   walk 293 (seed 5):
+#     actions (29): 1 7 2 0 1 1 0 1 1 0 1 1 0 1 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0
+#     wall 0.73 s
+#   === simulate paxos (correct) crashes+drops seed 1, 2000 walks
+#   INCOMPLETE (no violation found): 2000 walks of up to 100 actions, 24744 states checked, seed 1 (not exhaustive), 5.0 s
+#     wall 4.98 s
+
+# Gate stability: run.sh green 10/10 back to back.
