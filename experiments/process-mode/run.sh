@@ -18,6 +18,9 @@
 #      order inter-node messages are delivered, deduping over all nodes'
 #      states plus the message bag, and checks invariants over node[i] and
 #      the ghost reply log.
+#   M5 (mc2.c, elect.model, demo/elect.c): time as an environment action.
+#      A blocked recv is satisfied by a message OR by a bounded TIMEOUT the
+#      search fires, so leader election is explorable; split brain caught.
 #
 # Kill criterion: this script prints "process-mode: ok".  Linux only
 # (seccomp user notification); skips elsewhere, loudly.
@@ -44,6 +47,8 @@ $CC -O2 -w -o search2         search2.c
 $CC -O2 -w -o mc              mc.c
 $CC -O1 -no-pie -w -o repl     demo/repl.c
 $CC -O1 -no-pie -w -DBUG -o repl-bug demo/repl.c
+$CC -O1 -no-pie -w -o elect    demo/elect.c
+$CC -O1 -no-pie -w -DBUG -o elect-bug demo/elect.c
 $CC -O2 -w -o mc2             mc2.c
 
 fail=0
@@ -86,12 +91,17 @@ echo "-- M4: multi-node (the checker owns the inter-node network)"
 expect "M4 correct repl (agree-on-ack holds)"   0 ./mc2 repl.model ./repl
 expect "M4 bug repl (acked write backup lacks)" 1 ./mc2 repl.model ./repl-bug
 
+echo "-- M5: time is an environment action (election timeout)"
+expect "M5 correct elect (one leader per term)" 0 ./mc2 elect.model ./elect
+expect "M5 bug elect (split brain caught)"      1 ./mc2 elect.model ./elect-bug
+
 if [ "$fail" = 0 ]; then
 	echo "process-mode: ok (bug found in deployed-style code; search over"
 	echo "               interleavings terminates because equal states merge;"
 	echo "               a real heap needs a small canonical-emit hook, shown;"
 	echo "               a declarative model file drives it, invariants in a DSL;"
-	echo "               multi-node: the checker owns the inter-node network)"
+	echo "               multi-node: the checker owns the inter-node network;"
+	echo "               time is an environment action, so elections explore)"
 else
 	echo "process-mode: FAILED"
 fi

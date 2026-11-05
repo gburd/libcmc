@@ -5,7 +5,7 @@ pure, deterministic step functions (`CmcCore`).  Process mode is the path
 to the north star: proving C code written **as it will be deployed** --
 real syscalls, normal control flow, no rewrite for the checker.
 
-`DESIGN.md` is the design.  This is a time-boxed prototype in five
+`DESIGN.md` is the design.  This is a time-boxed prototype in six
 milestones, not part of the engine, not a gate, not built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
@@ -22,6 +22,10 @@ milestones, not part of the engine, not a gate, not built by `make`.
   runs N node processes and owns the network between them, exploring the
   order inter-node messages are delivered.  First step toward the
   consensus examples.
+- **M5** (`mc2.c`, `elect.model`, `demo/elect.c`): time as an environment
+  action.  A blocked `recv` is satisfied by a message or by a bounded
+  timeout the search fires, so leader election is explorable; a split
+  brain is caught.
 
 ## What M0 shows
 
@@ -141,6 +145,25 @@ schedule where the backup is still behind an acknowledged write.  A
 blocked `recv` is a *deferred* seccomp notification -- the node stays
 stopped in the kernel until the search delivers it a message -- which is
 how one checker schedules several real processes.
+
+## What M5 shows
+
+`demo/elect.c` is a two-node election sketch: node 0 is the initial
+leader and sends a heartbeat; node 1 (follower) blocks on `recv`.  The
+checker delivers either the heartbeat or an election **timeout** -- time
+is an environment action, bounded by `timeouts` in the model file.
+`elect.model` asserts `one_leader_per_term`.
+
+```
+ok   M5 correct elect (one leader per term) -> exit 0 (3 states)
+ok   M5 bug elect (split brain caught)      -> exit 1 (node[0]=1,1 node[1]=1,1)
+```
+
+The correct follower times out to leader at term+1 (never the same term
+as the old leader); the `-DBUG` follower forgets to bump the term, and
+the checker finds the split brain -- both leader at term 1.  A timeout
+reuses the deferred-recv machinery (it is a second way to satisfy a
+blocked `recv`), so M5 needed no new syscall interception.
 
 ## How it works
 

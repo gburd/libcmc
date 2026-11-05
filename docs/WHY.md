@@ -137,11 +137,14 @@ small expression DSL), and the running binary is the transition relation
 goes multi-node (M4): the checker runs several real node processes and
 owns the network between them, choosing the delivery order, and catches
 an acknowledged write a backup never received in a two-node replicated
-register written as it ships -- the first step toward the consensus
-examples.  See
+register written as it ships.  A sixth makes time an environment action
+(M5): a blocked `recv` is satisfied by a message or by a bounded timeout
+the search fires, so leader election is explorable, and a split brain --
+two nodes leader at the same term -- is caught in a two-process election
+sketch.  See
 `experiments/process-mode/` and the measurements
 `docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`,
-`2026-11-05-process-mode-m3.md`, and `-m4.md`.
+`2026-11-05-process-mode-m3.md`, `-m4.md`, and `-m5.md`.
 The conclusion: process mode checks arbitrary heap-using C along a fixed
 schedule with no target change, and a full reconverging search needs that
 small hook; if even that proves unworkable at scale, the step-function

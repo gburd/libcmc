@@ -77,7 +77,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 /* model file (subset of docs/model-file.md; shares mc.c's DSL)        */
 /* =================================================================== */
 typedef struct { char name[32]; char expr[256]; } Inv;
-static struct { int nodes; int client_val; int depth; Inv inv[MAXINV]; int ninv; } M;
+static struct { int nodes; int client_val; int client; int timeouts; int depth; Inv inv[MAXINV]; int ninv; } M;
 
 static char *trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
 
@@ -85,7 +85,7 @@ static int
 load_model(const char *path)
 {
 	FILE *f = fopen(path, "r"); if (!f) { fprintf(stderr, "mc2: cannot open %s\n", path); return -1; }
-	char line[512], sect[32] = ""; M.nodes = 2; M.client_val = 5; M.depth = 6;
+	char line[512], sect[32] = ""; M.nodes = 2; M.client_val = 5; M.client = 1; M.timeouts = 0; M.depth = 6;
 	while (fgets(line, sizeof line, f))
 	{
 		char *s = trim(line); if (!*s || *s == '#') continue;
@@ -95,7 +95,7 @@ load_model(const char *path)
 		if (*v == '"') { v++; char *q = strrchr(v, '"'); if (q) *q = 0; }
 		else { char *h = strchr(v, '#'); if (h) *h = 0; v = trim(v); }
 		if (!strcmp(sect, "target")) { if (!strcmp(k, "nodes")) M.nodes = atoi(v); }
-		else if (!strcmp(sect, "environment")) { if (!strcmp(k, "client_val")) M.client_val = atoi(v); else if (!strcmp(k, "depth")) M.depth = atoi(v); }
+		else if (!strcmp(sect, "environment")) { if (!strcmp(k, "client_val")) M.client_val = atoi(v); else if (!strcmp(k, "client")) M.client = atoi(v); else if (!strcmp(k, "timeouts")) M.timeouts = atoi(v); else if (!strcmp(k, "depth")) M.depth = atoi(v); }
 		else if (!strcmp(sect, "invariants")) { if (M.ninv < MAXINV) { snprintf(M.inv[M.ninv].name, 32, "%s", k); snprintf(M.inv[M.ninv].expr, 256, "%s", v); M.ninv++; } }
 	}
 	fclose(f);
@@ -145,6 +145,16 @@ get_term(const char **p, Ctx *c, long *out)
 	if (isdigit((unsigned char) **p)) { *out = strtol(*p, (char **) p, 10); return 0; }
 	char id[32]; int n = 0; while ((isalnum((unsigned char) **p) || **p == '_') && n < 31) id[n++] = *(*p)++; id[n] = 0;
 	if (n == 0) return -1;
+	/* node[i][k] : byte k of node i's canonical state */
+	if (!strcmp(id, "node"))
+	{
+		skipws(p); if (**p != '[') return -1; (*p)++;
+		long i = strtol(*p, (char **) p, 10); skipws(p); if (**p != ']') return -1; (*p)++;
+		skipws(p); if (**p != '[') return -1; (*p)++;
+		long k = strtol(*p, (char **) p, 10); skipws(p); if (**p != ']') return -1; (*p)++;
+		if (i < 0 || i >= c->nnodes || k < 0 || k >= c->node_len[i]) { *out = -1; return 0; }
+		*out = c->node[i][k]; return 0;
+	}
 	/* r.src / r.val when ranging over replies */
 	if (c->ranging_replies && c->varset && !strcmp(id, c->var))
 	{
@@ -395,17 +405,10 @@ try_pending_for(Node *nd, int client_val)
 			int fd = (int) a[0];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* loader/lib reads */
 			int peer = cfd_peer(nd, fd);
-			/* is a message for this node from `peer` pending? */
-			int found = -1;
-			for (int i = 0; i < MAXMSG; i++)
-				if (bag[i].used && bag[i].dst == nd->id && (peer < 0 || bag[i].src == peer)) { found = i; break; }
-			if (found >= 0)
-			{
-				int k = bag[found].len; if (k > (int) a[2]) k = (int) a[2];
-				cr_write(nd->pid, a[1], bag[found].body, k);
-				bag[found].used = 0; g_resp->val = k; break;
-			}
-			/* nothing pending: DEFER -- this node is blocked on recv */
+			/* Always DEFER a channel recv: whether it is satisfied by a
+			 * message or by a timeout is an environment choice the search
+			 * makes, so delivery must never be automatic (M5).  The node
+			 * blocks in the kernel until the search delivers to it. */
 			nd->blocked = 1; nd->block_id = g_req->id; nd->block_bufaddr = a[1];
 			nd->block_want = (int) a[2]; nd->block_peer = peer;
 			return 1;				/* do NOT answer */
@@ -520,43 +523,65 @@ static void reset_world(void){ memset(bag,0,sizeof bag); nrep=0; }
  * deliverable list at the final quiescent point.  Returns 0 or -1. */
 typedef struct { int src, dst, len; unsigned char body[MSGLEN]; } Deliv;
 
+/* Enumerate the actions available at the current quiescent point: every
+ * buffered message whose blocked destination is waiting for it, plus --
+ * if `tbudget` timeouts remain -- one TIMEOUT per blocked node (a pseudo
+ * message 'T' from the synthetic timer peer, src = -2).  A timeout models
+ * "the environment decided node i waited long enough"; it is bounded so
+ * the search stays finite, exactly as drops and crashes are bounded. */
 static int
-run_seq(const int *seq, int seqlen, Deliv *deliverable, int *ndeliv)
+enum_deliverables(Deliv *out, int tbudget)
 {
-	reset_world();
-	for (int i = 0; i < M.nodes; i++) { N[i].id = i; if (launch(&N[i])) return -1; }
-	/* the client's WRITE(v) to node 0: seed the bag as a message src=client(-1)->0 */
-	unsigned char w[2] = {'W', (unsigned char) M.client_val};
-	bag_add(-1, 0, w, 2);
-	drive_quiescent(M.client_val);
-
-	for (int s = 0; s < seqlen; s++)
-	{
-		/* enumerate deliverables now and pick seq[s] */
-		int pick = seq[s], c = 0, chosen = -1;
-		for (int i = 0; i < MAXMSG; i++) if (bag[i].used) {
-			/* a message is deliverable if its dst node is blocked waiting
-			 * (or client messages to node 0 already consumed at start) */
-			int d = bag[i].dst;
-			if (d >= 0 && d < M.nodes && N[d].alive && N[d].blocked &&
-				(N[d].block_peer < 0 || N[d].block_peer == bag[i].src)) {
-				if (c == pick) { chosen = i; break; } c++; }
-		}
-		if (chosen < 0) break;		/* seq ran past the deliverables */
-		Msg mm = bag[chosen]; bag[chosen].used = 0;
-		deliver(&N[mm.dst], mm.body, mm.len);
-		drive_quiescent(M.client_val);
-	}
-	/* final deliverable list */
 	int c = 0;
 	for (int i = 0; i < MAXMSG; i++) if (bag[i].used) {
 		int d = bag[i].dst;
 		if (d >= 0 && d < M.nodes && N[d].alive && N[d].blocked &&
 			(N[d].block_peer < 0 || N[d].block_peer == bag[i].src)) {
-			deliverable[c].src = bag[i].src; deliverable[c].dst = d; deliverable[c].len = bag[i].len;
-			memcpy(deliverable[c].body, bag[i].body, MSGLEN); c++; }
+			out[c].src = bag[i].src; out[c].dst = d; out[c].len = bag[i].len;
+			memcpy(out[c].body, bag[i].body, MSGLEN); c++; }
 	}
-	*ndeliv = c;
+	if (tbudget > 0)
+		for (int d = 0; d < M.nodes; d++)
+			if (N[d].alive && N[d].blocked) {
+				out[c].src = -2; out[c].dst = d; out[c].len = 1; out[c].body[0] = 'T'; c++; }
+	return c;
+}
+
+/* launch fresh nodes, optionally inject the client WRITE to node 0, drive
+ * to quiescence, then apply the delivery sequence `seq` (each an index
+ * into the deliverable list at that step), re-driving after each.  Fills
+ * the deliverable list at the final quiescent point.  Returns 0 or -1. */
+static int
+run_seq(const int *seq, int seqlen, Deliv *deliverable, int *ndeliv)
+{
+	reset_world();
+	for (int i = 0; i < M.nodes; i++) { N[i].id = i; if (launch(&N[i])) return -1; }
+	if (M.client) {
+		unsigned char w[2] = {'W', (unsigned char) M.client_val};
+		bag_add(-1, 0, w, 2);
+	}
+	drive_quiescent(M.client_val);
+
+	int tbudget = M.timeouts;
+	for (int s = 0; s < seqlen; s++)
+	{
+		Deliv dv[MAXMSG * 2]; int nd = enum_deliverables(dv, tbudget);
+		int pick = seq[s];
+		if (pick < 0 || pick >= nd) break;		/* seq ran past the actions */
+		if (dv[pick].src == -2) {				/* a timeout */
+			tbudget--;
+			deliver(&N[dv[pick].dst], dv[pick].body, dv[pick].len);
+		} else {
+			/* find and remove the matching bag message */
+			for (int i = 0; i < MAXMSG; i++)
+				if (bag[i].used && bag[i].dst == dv[pick].dst && bag[i].src == dv[pick].src &&
+					bag[i].len == dv[pick].len && !memcmp(bag[i].body, dv[pick].body, dv[pick].len)) {
+					bag[i].used = 0; break; }
+			deliver(&N[dv[pick].dst], dv[pick].body, dv[pick].len);
+		}
+		drive_quiescent(M.client_val);
+	}
+	*ndeliv = enum_deliverables(deliverable, tbudget);
 	return 0;
 }
 

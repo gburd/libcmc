@@ -326,14 +326,33 @@ below is a milestone with a kill criterion; the examples come only after.
   topology (the demo's accept-peer pairing is hardcoded for
   primary/backup) and routing through the engine's real FIFO/bag with
   drops.
-- **M5 -- time and randomness as environment.**  Intercept the clock
-  (`clock_gettime` with the vDSO disabled for the target), the timer
-  syscalls (`timerfd`, `nanosleep`, epoll timeouts), and `getrandom`/
-  `/dev/urandom`, so "advance node i's clock to its next deadline" and
-  "the random value node i reads" are engine-chosen.  This both lets the
-  search explore elections/leases/retries and makes stateless replay
-  deterministic (it is not, once code reads a clock).  Kill criterion: a
-  leader-election timeout bug is caught and its replay reproduces it.
+- **M5 -- time as an environment action.**  **Done (M5a, 2026-11-05):**
+  a node blocked on `recv` is satisfied EITHER by a message OR by a
+  TIMEOUT the search fires, bounded by a `timeouts` budget in the model
+  file -- "the environment decided the node waited long enough", the same
+  nondeterministic Timeout a TLA+ Raft spec uses.  This needed no new
+  syscall interception: it reuses M4's deferred-recv machinery, adding a
+  pseudo-message (`'T'` from synthetic peer src = -2) as a budgeted
+  deliverable.  A channel `recv` now ALWAYS defers (delivery is an
+  environment choice, never automatic), so the search explores
+  message-vs-timeout.  `demo/elect.c` is a two-node election sketch: the
+  correct follower, on timeout, becomes leader at term+1, so no two nodes
+  are leader at the same term; the `-DBUG` follower promotes without
+  bumping the term, and the checker finds the split brain (both leader at
+  term 1) on the schedule "fire the follower's timeout".  Stable 10/10.
+  The invariant DSL gained `node[i][k]` byte accessors to compare state
+  across nodes.
+- **M5b -- absolute-time reads.**  M5a covers waits-with-timeout, the
+  common case (elections, leases, retries all wait).  A target that reads
+  *absolute* time (`clock_gettime`, `gettimeofday`) needs those made
+  engine-chosen too.  Measured on this host: glibc serves `clock_gettime`
+  from the vDSO, so seccomp sees 0 of 2000 calls; an `LD_PRELOAD` shim
+  forcing it through a real `syscall()` makes every call seccomp-visible
+  (both verified in scratch).  So M5b extends the preload (already
+  `LD_PRELOAD`ed as `detmalloc.so`) to route `clock_gettime`/
+  `gettimeofday`/`getrandom` to real syscalls the checker answers with a
+  logical clock that advances only at timeout events, keeping replay
+  deterministic.  Not yet built; the mechanism is proven.
 - **M6 -- crash and partition, multi-node.**  Kill a node (lose volatile,
   keep fsync'd durable, peers get a reset), and bring links up and down,
   mapping the engine's existing crash/partition model onto real
