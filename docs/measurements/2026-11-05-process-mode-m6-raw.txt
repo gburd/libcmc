@@ -1,0 +1,64 @@
+# Raw output, 2026-11-05: process-mode M0..M6 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;VIOLATION: NoLostAck -- an acknowledged write is not on disk;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (VIOLATION: a cell once set was cleared;  prefix: SET-b SET-a;distinct states so far: 4;)
+-- M2: a real malloc heap, and the wall it hits
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders -> exit 0 (mode=canon distinct=8 dedup_merges=17;)
+ok   M2 canon bug (lost key caught) -> exit 1 (VIOLATION: an inserted key was lost;  prefix: INS-2 INS-1;)
+-- M3: a model file drives the checker (docs/model-file.md)
+ok   M3 correct (model file + DSL invariant) -> exit 0 (ok: 1 invariant(s) held over 8 distinct states (17 dedup merges);)
+ok   M3 bug (DSL invariant caught) -> exit 1 (VIOLATION: invariant no_lost_key does not hold;  client inputs: 2 1;)
+-- M4: multi-node (the checker owns the inter-node network)
+ok   M4 correct repl (agree-on-ack holds) -> exit 0 (ok: 1 invariant(s) held over 4 distinct states (0 merges);)
+ok   M4 bug repl (acked write backup lacks) -> exit 1 (VIOLATION: invariant agree_on_ack does not hold;)
+-- M5: time is an environment action (election timeout)
+ok   M5 correct elect (one leader per term) -> exit 0 (ok: 1 invariant(s) held over 3 distinct states (0 merges);)
+ok   M5 bug elect (split brain caught) -> exit 1 (VIOLATION: invariant one_leader_per_term does not hold;)
+-- M5b: absolute time is engine-controlled (stale-lease write)
+ok   M5b correct lease (no write after expiry) -> exit 0 (ok: 1 invariant(s) held over 2 distinct states (0 merges);)
+ok   M5b bug lease (stale-lease write caught) -> exit 1 (VIOLATION: invariant no_write_after_expiry does not hold;)
+-- M6: crash loses volatile, keeps durable (lost committed write)
+ok   M6 correct durlog (no lost commit) -> exit 0 (ok: 1 invariant(s) held over 9 distinct states (2 merges);)
+ok   M6 bug durlog (lost committed write) -> exit 1 (VIOLATION: invariant no_lost_commit does not hold;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge;
+               a real heap needs a small canonical-emit hook, shown;
+               a declarative model file drives it, invariants in a DSL;
+               multi-node: the checker owns the inter-node network;
+               time is an environment action, so elections explore;
+               absolute time is engine-controlled, so a stale lease bites;
+               a crash loses volatile but keeps durable, so a lost commit shows)
+
+# M6 model file (durlog.model):
+#   # demo/durlog.c: a two-node replicated log.  A committed (acked) write
+#   # must survive a crash -- it must be durable on some surviving node.
+#   # The checker owns crashes (M6): it may crash the primary at a quiescent
+#   # point, after which the node keeps only its fd-4 (durable) state.
+#   [target]
+#   nodes = 2
+#   [environment]
+#   client_val = 7      # the client writes this value to the primary (node 0)
+#   crashes = 1         # the checker may crash one node
+#   depth = 6
+#   [invariants]
+#   # every acked value is durable on some node that is still around.
+#   no_lost_commit = "all r in replies : r.val in node[0] or r.val in node[1]"
+
+# M6 mechanism: a CRASH action kills a node and keeps only its durable
+# state (emitted on fd 193), discarding volatile (fd 3) -- the engine's
+# lose-volatile-keep-durable crash model on a real process, no fsync
+# interception.  A DROP action removes a buffered message (partition/loss).
+# Both budgeted (crashes/drops in the model file).  The bug: the primary
+# acks the client before the write is durable anywhere; the checker crashes
+# it right after the ack and the committed write is in neither node's
+# durable state.  durlog: correct=0 bug=1, 10/10.  NOTE: dup'ing a pipe onto
+# fd 4 breaks LD_PRELOAD on glibc 2.44 (the loader uses fd 4), hence fd 193.

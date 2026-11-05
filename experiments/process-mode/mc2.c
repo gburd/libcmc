@@ -70,6 +70,11 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MAXMSG 64				/* messages in flight, total */
 #define MSGLEN 8				/* bytes per message (demo uses 2) */
 #define SNAP 64					/* canonical state bytes per node */
+/* The durable canonical-emit stream.  fd 3 is the volatile stream; the
+ * durable one must avoid the low fds the dynamic loader uses while
+ * handling LD_PRELOAD (dup'ing a pipe onto fd 4 breaks the preload on
+ * glibc 2.44), and stay below the 500 threshold that marks a channel. */
+#define DURABLE_FD 193
 #define MAXD 8					/* delivery-sequence depth */
 #define MAXINV 8
 
@@ -77,7 +82,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 /* model file (subset of docs/model-file.md; shares mc.c's DSL)        */
 /* =================================================================== */
 typedef struct { char name[32]; char expr[256]; } Inv;
-static struct { int nodes; int client_val; int client; int timeouts; int depth; Inv inv[MAXINV]; int ninv; } M;
+static struct { int nodes; int client_val; int client; int timeouts; int crashes; int drops; int depth; Inv inv[MAXINV]; int ninv; } M;
 
 static char *trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
 
@@ -85,7 +90,7 @@ static int
 load_model(const char *path)
 {
 	FILE *f = fopen(path, "r"); if (!f) { fprintf(stderr, "mc2: cannot open %s\n", path); return -1; }
-	char line[512], sect[32] = ""; M.nodes = 2; M.client_val = 5; M.client = 1; M.timeouts = 0; M.depth = 6;
+	char line[512], sect[32] = ""; M.nodes = 2; M.client_val = 5; M.client = 1; M.timeouts = 0; M.crashes = 0; M.drops = 0; M.depth = 6;
 	while (fgets(line, sizeof line, f))
 	{
 		char *s = trim(line); if (!*s || *s == '#') continue;
@@ -95,7 +100,7 @@ load_model(const char *path)
 		if (*v == '"') { v++; char *q = strrchr(v, '"'); if (q) *q = 0; }
 		else { char *h = strchr(v, '#'); if (h) *h = 0; v = trim(v); }
 		if (!strcmp(sect, "target")) { if (!strcmp(k, "nodes")) M.nodes = atoi(v); }
-		else if (!strcmp(sect, "environment")) { if (!strcmp(k, "client_val")) M.client_val = atoi(v); else if (!strcmp(k, "client")) M.client = atoi(v); else if (!strcmp(k, "timeouts")) M.timeouts = atoi(v); else if (!strcmp(k, "depth")) M.depth = atoi(v); }
+		else if (!strcmp(sect, "environment")) { if (!strcmp(k, "client_val")) M.client_val = atoi(v); else if (!strcmp(k, "client")) M.client = atoi(v); else if (!strcmp(k, "timeouts")) M.timeouts = atoi(v); else if (!strcmp(k, "crashes")) M.crashes = atoi(v); else if (!strcmp(k, "drops")) M.drops = atoi(v); else if (!strcmp(k, "depth")) M.depth = atoi(v); }
 		else if (!strcmp(sect, "invariants")) { if (M.ninv < MAXINV) { snprintf(M.inv[M.ninv].name, 32, "%s", k); snprintf(M.inv[M.ninv].expr, 256, "%s", v); M.ninv++; } }
 	}
 	fclose(f);
@@ -233,8 +238,11 @@ typedef struct {
 	int blocked; uint64_t block_id; uint64_t block_bufaddr; int block_want; int block_peer;
 	int next_fd;
 	const char *binary; int id;
-	int fd3[2];					/* canonical-emit pipe */
+	int fd3[2];					/* volatile canonical-emit pipe */
+	int fd4[2];					/* durable canonical-emit pipe (survives a crash) */
 	unsigned char canon[SNAP]; int canon_len;
+	unsigned char durable[SNAP]; int durable_len;
+	int crashed;				/* killed by a CRASH action: volatile lost, durable kept */
 } Node;
 
 static Node N[MAXNODES];
@@ -302,12 +310,14 @@ launch(Node *nd)
 {
 	int sp[2]; socketpair(AF_UNIX, SOCK_DGRAM, 0, sp);
 	if (pipe(nd->fd3) != 0) return -1;
+	if (pipe(nd->fd4) != 0) return -1;
 	pid_t pid = fork();
 	if (pid == 0)
 	{
 		close(sp[0]);
 		setenv("LD_PRELOAD", "./detmalloc.so", 1);
 		dup2(nd->fd3[1], 3); close(nd->fd3[0]); close(nd->fd3[1]);
+		dup2(nd->fd4[1], DURABLE_FD); close(nd->fd4[0]); close(nd->fd4[1]);
 		int lf = install_filter(); if (lf < 0) _exit(2);
 		char cb[CMSG_SPACE(sizeof(int))] = {0}; char d = 'L';
 		struct iovec iov = {&d, 1}; struct msghdr mh = {0};
@@ -318,7 +328,7 @@ launch(Node *nd)
 		execl(nd->binary, nd->binary, idbuf, (char *) NULL);
 		_exit(2);
 	}
-	close(sp[1]); close(nd->fd3[1]);
+	close(sp[1]); close(nd->fd3[1]); close(nd->fd4[1]);
 	char cb[CMSG_SPACE(sizeof(int))] = {0}; char d;
 	struct iovec iov = {&d, 1}; struct msghdr mh = {0};
 	mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cb; mh.msg_controllen = sizeof cb;
@@ -328,21 +338,31 @@ launch(Node *nd)
 	close(sp[0]);
 	if (nd->listener < 0) return -1;
 	nd->pid = pid; nd->alive = 1; nd->blocked = 0; nd->next_fd = 500; nd->nc = 0;
+	nd->crashed = 0; nd->durable_len = 0;
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
 	return 0;
 }
 
-/* read any canonical-emit records this node wrote; keep the last */
+/* drain a canonical-emit pipe non-blocking; copy the LAST complete record
+ * into out/outlen (records are [count][count bytes]) */
+static void
+drain_pipe(int fd, unsigned char *out, int *outlen)
+{
+	unsigned char all[4096]; int tot = 0, r;
+	int fl = fcntl(fd, F_GETFL); fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+	while (tot < (int) sizeof all && (r = (int) read(fd, all + tot, sizeof all - tot)) > 0) tot += r;
+	int off = 0, rec = -1, rl = 0;
+	while (off < tot) { int cnt = all[off]; if (off + 1 + cnt > tot) break; rec = off + 1; rl = cnt; off += 1 + cnt; }
+	if (rec >= 0) { *outlen = rl > SNAP ? SNAP : rl; memcpy(out, all + rec, *outlen); }
+}
+
+/* read any canonical-emit records this node wrote; keep the last of each
+ * stream (volatile on fd 3, durable on fd 193) */
 static void
 drain_canon(Node *nd)
 {
-	unsigned char all[4096]; int tot = 0, r;
-	/* non-blocking: the pipe holds whatever the node emitted so far */
-	int fl = fcntl(nd->fd3[0], F_GETFL); fcntl(nd->fd3[0], F_SETFL, fl | O_NONBLOCK);
-	while (tot < (int) sizeof all && (r = (int) read(nd->fd3[0], all + tot, sizeof all - tot)) > 0) tot += r;
-	int off = 0, rec = -1, rl = 0;
-	while (off < tot) { int cnt = all[off]; if (off + 1 + cnt > tot) break; rec = off + 1; rl = cnt; off += 1 + cnt; }
-	if (rec >= 0) { nd->canon_len = rl > SNAP ? SNAP : rl; memcpy(nd->canon, all + rec, nd->canon_len); }
+	drain_pipe(nd->fd3[0], nd->canon, &nd->canon_len);
+	drain_pipe(nd->fd4[0], nd->durable, &nd->durable_len);
 }
 
 /* bag helpers */
@@ -471,6 +491,25 @@ deliver(Node *nd, const unsigned char *body, int len)
 	nd->blocked = 0;
 }
 
+/* CRASH a node (M6): drain its latest emits, kill it, then keep only the
+ * DURABLE state (fd 193, what it had fsync'd) and discard the volatile
+ * state (fd 3).  Peers that later read from a connection to it get a
+ * reset, which their recv surfaces as a short/zero read -- modelled by
+ * leaving their blocked recv answerable with an empty delivery.  This is
+ * the engine's crash model (lose volatile, keep durable) on a real
+ * process: a protocol that acked a client before the entry was durable
+ * on a quorum loses a committed entry here. */
+static void
+crash_node(Node *nd)
+{
+	if (!nd->alive) return;
+	drain_canon(nd);
+	kill(nd->pid, SIGKILL); int st; waitpid(nd->pid, &st, 0);
+	nd->pid = 0; nd->alive = 0; nd->blocked = 0; nd->crashed = 1;
+	/* volatile is gone; the node's observable state is what was durable */
+	memcpy(nd->canon, nd->durable, nd->durable_len); nd->canon_len = nd->durable_len;
+}
+
 /* run all nodes to quiescence: every live node blocked on a recv, or
  * exited.  A node that is neither blocked nor exited is still running
  * between syscalls -- we must wait for its next notification, not treat
@@ -554,14 +593,18 @@ static void reset_world(void){ memset(bag,0,sizeof bag); nrep=0; logical_ns=CLK_
  * deliverable list at the final quiescent point.  Returns 0 or -1. */
 typedef struct { int src, dst, len; unsigned char body[MSGLEN]; } Deliv;
 
-/* Enumerate the actions available at the current quiescent point: every
- * buffered message whose blocked destination is waiting for it, plus --
- * if `tbudget` timeouts remain -- one TIMEOUT per blocked node (a pseudo
- * message 'T' from the synthetic timer peer, src = -2).  A timeout models
- * "the environment decided node i waited long enough"; it is bounded so
- * the search stays finite, exactly as drops and crashes are bounded. */
+/* M6 budgets carried through a replay: how many crashes/drops remain. */
+typedef struct { int timeouts, crashes, drops; } Budget;
+
+/* Enumerate the actions available at the current quiescent point:
+ *   - deliver a buffered message to its blocked, waiting destination;
+ *   - if timeouts remain, fire a TIMEOUT at a blocked node (src = -2);
+ *   - if crashes remain, CRASH a live node (src = -3, dst = that node);
+ *   - if drops remain, DROP a buffered message (src = -4, body = victim).
+ * Every environment action is bounded by a budget so the search stays
+ * finite, the same discipline the in-process engine uses. */
 static int
-enum_deliverables(Deliv *out, int tbudget)
+enum_deliverables(Deliv *out, Budget b)
 {
 	int c = 0;
 	for (int i = 0; i < MAXMSG; i++) if (bag[i].used) {
@@ -571,10 +614,20 @@ enum_deliverables(Deliv *out, int tbudget)
 			out[c].src = bag[i].src; out[c].dst = d; out[c].len = bag[i].len;
 			memcpy(out[c].body, bag[i].body, MSGLEN); c++; }
 	}
-	if (tbudget > 0)
+	if (b.timeouts > 0)
 		for (int d = 0; d < M.nodes; d++)
 			if (N[d].alive && N[d].blocked) {
 				out[c].src = -2; out[c].dst = d; out[c].len = 1; out[c].body[0] = 'T'; c++; }
+	if (b.crashes > 0)
+		for (int d = 0; d < M.nodes; d++)
+			if (N[d].alive) {
+				out[c].src = -3; out[c].dst = d; out[c].len = 0; c++; }
+	if (b.drops > 0)
+		for (int i = 0; i < MAXMSG; i++) if (bag[i].used) {
+			out[c].src = -4; out[c].dst = bag[i].dst; out[c].len = bag[i].len;
+			memcpy(out[c].body, bag[i].body, MSGLEN);
+			/* remember the real sender in body's slot after len for matching */
+			c++; }
 	return c;
 }
 
@@ -593,16 +646,25 @@ run_seq(const int *seq, int seqlen, Deliv *deliverable, int *ndeliv)
 	}
 	drive_quiescent(M.client_val);
 
-	int tbudget = M.timeouts;
+	Budget bud = { M.timeouts, M.crashes, M.drops };
 	for (int s = 0; s < seqlen; s++)
 	{
-		Deliv dv[MAXMSG * 2]; int nd = enum_deliverables(dv, tbudget);
+		Deliv dv[MAXMSG * 3]; int nd = enum_deliverables(dv, bud);
 		int pick = seq[s];
 		if (pick < 0 || pick >= nd) break;		/* seq ran past the actions */
 		if (dv[pick].src == -2) {				/* a timeout */
-			tbudget--;
+			bud.timeouts--;
 			logical_ns += CLK_TICK;				/* time advances only here */
 			deliver(&N[dv[pick].dst], dv[pick].body, dv[pick].len);
+		} else if (dv[pick].src == -3) {		/* CRASH node dst */
+			bud.crashes--;
+			crash_node(&N[dv[pick].dst]);
+		} else if (dv[pick].src == -4) {		/* DROP a message */
+			bud.drops--;
+			for (int i = 0; i < MAXMSG; i++)
+				if (bag[i].used && bag[i].dst == dv[pick].dst &&
+					bag[i].len == dv[pick].len && !memcmp(bag[i].body, dv[pick].body, dv[pick].len)) {
+					bag[i].used = 0; break; }
 		} else {
 			/* find and remove the matching bag message */
 			for (int i = 0; i < MAXMSG; i++)
@@ -613,7 +675,7 @@ run_seq(const int *seq, int seqlen, Deliv *deliverable, int *ndeliv)
 		}
 		drive_quiescent(M.client_val);
 	}
-	*ndeliv = enum_deliverables(deliverable, tbudget);
+	*ndeliv = enum_deliverables(deliverable, bud);
 	return 0;
 }
 
@@ -653,7 +715,7 @@ main(int argc, char **argv)
 	while (qh < qt)
 	{
 		Seq cur = Q[qh++];
-		Deliv dv[MAXMSG]; int nd = 0;
+		Deliv dv[MAXMSG * 3]; int nd = 0;
 		if (run_seq(cur.seq, cur.len, dv, &nd)) { kill_all(); fprintf(stderr, "mc2: run failed\n"); return 2; }
 
 		int which = -1; int ok = check_invariants(&which);

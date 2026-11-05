@@ -360,11 +360,24 @@ below is a milestone with a kill criterion; the examples come only after.
   with an expired lease -- a stale-lease/fencing bug the checker finds on
   the schedule "fire the lease-expiry timeout", visible only because it
   owns absolute time.  Stable 10/10.
-- **M6 -- crash and partition, multi-node.**  Kill a node (lose volatile,
-  keep fsync'd durable, peers get a reset), and bring links up and down,
-  mapping the engine's existing crash/partition model onto real
-  processes.  Kill criterion: a crash that loses a committed entry is
-  caught.
+- **M6 -- crash and partition, multi-node.**  **Done (2026-11-05).**  The
+  checker owns two new budgeted environment actions.  A CRASH kills a
+  node, keeping only its *durable* state and discarding its *volatile*
+  state: a target declares durability by emitting the durable canonical
+  encoding on fd 193 (what it has fsync'd) in addition to the volatile
+  one on fd 3, the same opt-in seam as M2's canonical emit, so no
+  `fsync`/`pwrite` interception is needed.  A DROP removes a buffered
+  message without delivering it, the partition/loss primitive.  Both are
+  bounded (`crashes`, `drops` in the model file) so the search stays
+  finite, mapping the in-process engine's crash/partition model onto real
+  processes.  `demo/durlog.c` is a two-node replicated log: the correct
+  primary waits for the backup's durable-ack and makes the write durable
+  locally before acking the client, so a crash cannot lose a committed
+  write; the `-DBUG` primary acks before anything is durable, and the
+  checker crashes it on the schedule "ack, then crash" -- the committed
+  value is in neither node's durable state, a lost committed write.  The
+  invariant `all r in replies : r.val in node[0] or r.val in node[1]`
+  fails.  Kill criterion met.  Stable 10/10.
 - **M7 -- scale, stated honestly.**  A real N=3 consensus run may be
   millions of states; process mode at thousands of states/second
   (stateless replay) may not finish an exhaustive BFS.  Wire `--simulate`

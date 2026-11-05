@@ -5,7 +5,7 @@ pure, deterministic step functions (`CmcCore`).  Process mode is the path
 to the north star: proving C code written **as it will be deployed** --
 real syscalls, normal control flow, no rewrite for the checker.
 
-`DESIGN.md` is the design.  This is a time-boxed prototype in seven
+`DESIGN.md` is the design.  This is a time-boxed prototype in eight
 milestones, not part of the engine, not a gate, not built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
@@ -30,6 +30,11 @@ milestones, not part of the engine, not a gate, not built by `make`.
   engine-controlled.  `detmalloc.so` forces `clock_gettime` off the vDSO;
   the checker answers with a logical clock advanced only at timeouts, so
   a stale-lease write is caught and replay stays deterministic.
+- **M6** (`mc2.c`, `durlog.model`, `demo/durlog.c`): crash and partition.
+  The checker may CRASH a node (losing volatile fd-3 state, keeping
+  durable fd-193 state) or DROP a message, both budgeted; a protocol that
+  acks a client before the write is durable loses a committed write, and
+  that is caught.
 
 ## What M0 shows
 
