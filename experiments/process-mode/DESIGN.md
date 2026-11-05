@@ -297,3 +297,62 @@ the C-predicate escape hatch from the schema, and lifting `mc` out of
 milestone is multi-node: several real node processes under one checker,
 driven by the model file, against a small replicated server.
 
+## Roadmap to the consensus examples (planned 2026-11-05)
+
+The goal is to ship four examples -- Raft, Humming Consensus, ZAB, Paxos
+-- as **real message-passing implementations checked as they ship**, via
+the one method (a model file + the production binary).  No stripped-down
+toys standing in for the protocols.  They cannot exist until the engine
+grows the capabilities a real consensus protocol exercises.  Each step
+below is a milestone with a kill criterion; the examples come only after.
+
+- **M4 -- multi-node.**  `mc` runs N node processes under one checker and
+  owns the network between them: intercept each node's `connect`/`send`/
+  `recv` and route through the engine's FIFO/bag model, so
+  `deliver(i -> j)` is an environment action.  Dedup over all nodes'
+  canonical emits plus the in-flight message set.  Kill criterion: a
+  2-node delivery-order diamond merges, and a planted replication bug
+  (backup acks data it has not stored) is caught with the shortest
+  delivery sequence.
+- **M5 -- time and randomness as environment.**  Intercept the clock
+  (`clock_gettime` with the vDSO disabled for the target), the timer
+  syscalls (`timerfd`, `nanosleep`, epoll timeouts), and `getrandom`/
+  `/dev/urandom`, so "advance node i's clock to its next deadline" and
+  "the random value node i reads" are engine-chosen.  This both lets the
+  search explore elections/leases/retries and makes stateless replay
+  deterministic (it is not, once code reads a clock).  Kill criterion: a
+  leader-election timeout bug is caught and its replay reproduces it.
+- **M6 -- crash and partition, multi-node.**  Kill a node (lose volatile,
+  keep fsync'd durable, peers get a reset), and bring links up and down,
+  mapping the engine's existing crash/partition model onto real
+  processes.  Kill criterion: a crash that loses a committed entry is
+  caught.
+- **M7 -- scale, stated honestly.**  A real N=3 consensus run may be
+  millions of states; process mode at thousands of states/second
+  (stateless replay) may not finish an exhaustive BFS.  Wire `--simulate`
+  (seeded random walks) and bounded depth, measure what N=3 of each
+  protocol actually costs, and decide per example whether it is checked
+  exhaustively, to a depth bound, or by simulation.  A result that hit a
+  bound is reported as "no violation found in N states", never as a pass.
+- **M8 -- one front end in `src/`.**  Lift process mode out of
+  `experiments/` into the engine as its process front end, with the model
+  file as *the* interface (`cmc --model-file ...`).  Demote `CmcCore` in
+  the CLI and docs to the calibration role only.  After M8, "one method"
+  is literally true in the shipped tool, not only in the docs.
+
+**Then the examples**, smallest real protocol first, each kept only if the
+engine finishes a meaningful run on it (exhaustive, bounded, or
+simulation per M7):
+
+1. single-decree **Paxos** -- the smallest real consensus;
+2. **Raft** -- leader election plus log replication, the recognised one;
+3. **Humming Consensus** -- checked as a real implementation (its safety
+   properties, agreement and no-lost-ack; not the shared-register state
+   counts, which were only ever the engine's TLC calibration);
+4. **ZAB** -- rounds out the set.
+
+They are the same shape for a checker (a leader and a replicated log,
+checked for agreement and no lost committed entry), so the engine work
+is shared; the examples differ in their protocol code, which is executed,
+not transcribed.  None is added before its run is real.
+
