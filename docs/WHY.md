@@ -129,8 +129,14 @@ reconverge (M1); and a third takes a real `malloc` heap and finds the
 boundary (M2): a deterministic allocator makes one schedule reproducible,
 but a reconverging search over heap state needs a small opt-in
 canonical-emit hook (~8 lines on the target, not a step-function
-rewrite).  See `experiments/process-mode/` and the measurements
-`docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`.
+rewrite).  A fourth wires it to a declarative **model file** (M3): the
+file names the binary, the environment to explore, and the invariants (a
+small expression DSL), and the running binary is the transition relation
+-- the shape this document's decision record settled on
+(`docs/background/decision-model-file.md`, `docs/model-file.md`).  See
+`experiments/process-mode/` and the measurements
+`docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`,
+and `2026-11-05-process-mode-m3.md`.
 The conclusion: process mode checks arbitrary heap-using C along a fixed
 schedule with no target change, and a full reconverging search needs that
 small hook; if even that proves unworkable at scale, the step-function

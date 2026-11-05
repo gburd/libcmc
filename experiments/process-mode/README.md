@@ -5,7 +5,7 @@ pure, deterministic step functions (`CmcCore`).  Process mode is the path
 to the north star: proving C code written **as it will be deployed** --
 real syscalls, normal control flow, no rewrite for the checker.
 
-`DESIGN.md` is the design.  This is a time-boxed prototype in three
+`DESIGN.md` is the design.  This is a time-boxed prototype in four
 milestones, not part of the engine, not a gate, not built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
@@ -14,6 +14,10 @@ milestones, not part of the engine, not a gate, not built by `make`.
   canonical state, so a state reached two ways is counted once.
 - **M2** (`search2.c`, `demo/list.c`, `demo/detmalloc.c`): a real
   `malloc` heap, and the boundary it draws.
+- **M3** (`mc.c`, `list.model`, `demo/list.c`): a declarative model file
+  drives the checker -- the decided shape (one engine, a model file, the
+  shipping binary).  See `docs/model-file.md` and the decision record
+  `docs/background/decision-model-file.md`.
 
 ## What M0 shows
 
@@ -82,6 +86,36 @@ lost-key bug is then caught.  The conclusion: process mode checks
 arbitrary heap-using C along a fixed schedule with no target change; a
 reconverging exhaustive search needs the small hook, far less than step
 functions.
+
+## What M3 shows
+
+`mc.c` reads a declarative **model file** -- the decided shape (one
+engine, a model file, the shipping binary; see `docs/model-file.md` and
+the decision record).  It drives the whole run from the file:
+
+```
+[target]
+nodes = 1
+state = canon
+[environment]
+clients = 3
+depth   = 4
+[invariants]
+no_lost_key = "all k in acted : k in node[0]"
+```
+
+```
+ok   M3 correct (model file + DSL invariant) -> exit 0 (8 distinct states)
+ok   M3 bug (DSL invariant caught)           -> exit 1 (client inputs: 2 1)
+```
+
+Nothing about the protocol is in `mc.c` or the model file; the running
+binary is the transition relation.  The invariant is a small expression
+DSL over `node[0]` (the canonical state) and `acted` (the client inputs
+on the path here): quantifiers, membership, comparison, `and`/`or`/`not`,
+and nothing more.  `all k in acted : k in node[0]` -- every inserted key
+is still present -- holds for the correct build and is violated by the
+planted lost-key bug, caught with the shortest input sequence `2 1`.
 
 ## How it works
 

@@ -1,0 +1,52 @@
+# Raw output, 2026-11-05: process-mode M0..M3 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;VIOLATION: NoLostAck -- an acknowledged write is not on disk;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (VIOLATION: a cell once set was cleared;  prefix: SET-b SET-a;distinct states so far: 4;)
+-- M2: a real malloc heap, and the wall it hits
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders -> exit 0 (mode=canon distinct=8 dedup_merges=17;)
+ok   M2 canon bug (lost key caught) -> exit 1 (VIOLATION: an inserted key was lost;  prefix: INS-2 INS-1;)
+-- M3: a model file drives the checker (docs/model-file.md)
+ok   M3 correct (model file + DSL invariant) -> exit 0 (ok: 1 invariant(s) held over 8 distinct states (17 dedup merges);)
+ok   M3 bug (DSL invariant caught) -> exit 1 (VIOLATION: invariant no_lost_key does not hold;  client inputs: 2 1;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge;
+               a real heap needs a small canonical-emit hook, shown;
+               a declarative model file drives it, invariants in a DSL)
+
+# M3 model file (list.model), the whole input:
+#   # A model file for demo/list.c: an ordered-set server, checked as it ships.
+#   # No protocol logic here -- just how to drive the binary and what to check.
+#   # Run:  ./mc list.model ./list-canon        (pass; built with -DCANON)
+#   #       ./mc list.model ./list-bug          (fails: a lost key)
+#   
+#   [target]
+#   # binary is given on the mc command line (so one file checks both builds)
+#   nodes = 1
+#   state = canon            # the node emits its sorted keys on fd 3
+#   
+#   [environment]
+#   # the client may insert keys 1, 2 or 3; explore every order up to depth 4
+#   clients = 3
+#   depth   = 4
+#   
+#   [invariants]
+#   # every key the client inserted must still be in the set.
+#   # node[0] is the canonical state (the sorted key bytes); acted is the
+#   # multiset of client inputs on the path to this state.
+#   no_lost_key = "all k in acted : k in node[0]"
+
+# M3 DSL self-tests (ad hoc, not in run.sh): the evaluator checks every
+# element of a quantifier, and some/all/not/comparison behave:
+#   all k in acted: k==1   -> VIOLATION once acted has a 2 (not just last elem)
+#   some k in acted: k==3  -> VIOLATION at acted=[1] (no match)
+#   some k in node[0]: k==9 -> VIOLATION (9 never inserted)
+#   all k in node[0]: k<=3  -> holds

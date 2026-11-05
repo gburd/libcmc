@@ -253,3 +253,47 @@ frontier.  Whether the canonical-emit hook becomes the standard way to
 use process mode, or the declared-region/fixed-schedule forms suffice, is
 the decision the next milestone turns on.
 
+## M3: a model file drives the checker (2026-11-04)
+
+The decision in `docs/background/decision-model-file.md` settled the
+shape: one engine, a declarative **model file**, and the shipping binary
+as the protocol.  M3 is the first cut of that -- the model file driving a
+real run, end to end, so the pieces M0-M2 built stop being three separate
+programs and become one checker reading a file.
+
+`mc.c` reads a `.model` file (`docs/model-file.md`): the binary to run,
+the node count, how to read state (`canon`), the environment budget, and
+the invariants.  It runs the target under the M0-M2 interception, does the
+M2 canonical-emit BFS, and evaluates each invariant -- written in a small
+expression DSL over the node's canonical state and `acted` (the log of
+client inputs on the path to this state) -- in every reached state.
+Nothing about the protocol is in `mc.c` or the model file; the running
+binary is the transition relation.
+
+The DSL is deliberately not Turing-complete: quantifiers (`all`/`some V
+in SET`), membership (`V in SET`), comparisons, `and`/`or`/`not`, over
+`node[0]` (the canonical bytes) and `acted`.  `list.model` declares one
+invariant, `all k in acted : k in node[0]` -- every key the client
+inserted is still in the set.
+
+**Pass (what M3 shows):** `mc list.model ./list-canon` holds over 8
+distinct states; `mc list.model ./list-bug` reports the invariant
+violated with the shortest client-input sequence (`2 1`) and the offending
+state (`node[0] = 1`, key 2 lost).  The model file alone, no code change,
+selects the binary, the environment and the property.  Separate tests
+confirm the DSL evaluates quantifiers over every element (not just the
+last) and that `some`/`all`/`not`/comparisons behave.
+
+**`acted` is honest.**  It is the environment's own record of what it fed
+the target, exactly like actor mode's ghost request log -- not a read of
+the target's internals.  An invariant that needs the reply log ("every
+acked value is durable") waits on M4, which adds the ghost reply log to
+process mode.
+
+Still out of M3: several nodes (the file allows `nodes` but `mc` handles
+one), crashes and the reply log in process mode, named state fields and
+the C-predicate escape hatch from the schema, and lifting `mc` out of
+`experiments/` into `src/` as the engine's second front end.  The next
+milestone is multi-node: several real node processes under one checker,
+driven by the model file, against a small replicated server.
+

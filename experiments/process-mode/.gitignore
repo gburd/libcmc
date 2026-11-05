@@ -15,3 +15,4 @@ detmalloc.so
 *.o
 pm-store.dat
 store.dat
+mc

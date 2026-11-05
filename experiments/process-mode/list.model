@@ -1,0 +1,20 @@
+# A model file for demo/list.c: an ordered-set server, checked as it ships.
+# No protocol logic here -- just how to drive the binary and what to check.
+# Run:  ./mc list.model ./list-canon        (pass; built with -DCANON)
+#       ./mc list.model ./list-bug          (fails: a lost key)
+
+[target]
+# binary is given on the mc command line (so one file checks both builds)
+nodes = 1
+state = canon            # the node emits its sorted keys on fd 3
+
+[environment]
+# the client may insert keys 1, 2 or 3; explore every order up to depth 4
+clients = 3
+depth   = 4
+
+[invariants]
+# every key the client inserted must still be in the set.
+# node[0] is the canonical state (the sorted key bytes); acted is the
+# multiset of client inputs on the path to this state.
+no_lost_key = "all k in acted : k in node[0]"
