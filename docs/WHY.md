@@ -144,7 +144,9 @@ two nodes leader at the same term -- is caught in a two-process election
 sketch.  See
 `experiments/process-mode/` and the measurements
 `docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`,
-`2026-11-05-process-mode-m3.md`, `-m4.md`, and `-m5.md`.
+`2026-11-05-process-mode-m3.md`, `-m4.md`, `-m5.md`, and `-m5b.md` (the
+last makes absolute-time reads engine-controlled, catching a stale-lease
+write only the checker's clock can force).
 The conclusion: process mode checks arbitrary heap-using C along a fixed
 schedule with no target change, and a full reconverging search needs that
 small hook; if even that proves unworkable at scale, the step-function

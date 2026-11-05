@@ -21,6 +21,10 @@
 #   M5 (mc2.c, elect.model, demo/elect.c): time as an environment action.
 #      A blocked recv is satisfied by a message OR by a bounded TIMEOUT the
 #      search fires, so leader election is explorable; split brain caught.
+#   M5b (mc2.c, lease.model, demo/lease.c): absolute time is engine-
+#      controlled.  detmalloc.so forces clock_gettime off the vDSO; the
+#      checker answers with a logical clock advanced only at timeouts, so a
+#      stale-lease write (write after the lease really expired) is caught.
 #
 # Kill criterion: this script prints "process-mode: ok".  Linux only
 # (seccomp user notification); skips elsewhere, loudly.
@@ -49,6 +53,8 @@ $CC -O1 -no-pie -w -o repl     demo/repl.c
 $CC -O1 -no-pie -w -DBUG -o repl-bug demo/repl.c
 $CC -O1 -no-pie -w -o elect    demo/elect.c
 $CC -O1 -no-pie -w -DBUG -o elect-bug demo/elect.c
+$CC -O1 -no-pie -w -o lease    demo/lease.c
+$CC -O1 -no-pie -w -DBUG -o lease-bug demo/lease.c
 $CC -O2 -w -o mc2             mc2.c
 
 fail=0
@@ -95,13 +101,18 @@ echo "-- M5: time is an environment action (election timeout)"
 expect "M5 correct elect (one leader per term)" 0 ./mc2 elect.model ./elect
 expect "M5 bug elect (split brain caught)"      1 ./mc2 elect.model ./elect-bug
 
+echo "-- M5b: absolute time is engine-controlled (stale-lease write)"
+expect "M5b correct lease (no write after expiry)" 0 ./mc2 lease.model ./lease
+expect "M5b bug lease (stale-lease write caught)"  1 ./mc2 lease.model ./lease-bug
+
 if [ "$fail" = 0 ]; then
 	echo "process-mode: ok (bug found in deployed-style code; search over"
 	echo "               interleavings terminates because equal states merge;"
 	echo "               a real heap needs a small canonical-emit hook, shown;"
 	echo "               a declarative model file drives it, invariants in a DSL;"
 	echo "               multi-node: the checker owns the inter-node network;"
-	echo "               time is an environment action, so elections explore)"
+	echo "               time is an environment action, so elections explore;"
+	echo "               absolute time is engine-controlled, so a stale lease bites)"
 else
 	echo "process-mode: FAILED"
 fi

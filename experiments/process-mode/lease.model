@@ -1,0 +1,12 @@
+# demo/lease.c: a leaseholder that may write only while its lease is
+# valid.  Absolute time is engine-controlled (M5b): the checker's logical
+# clock advances only when it fires the lease-expiry timeout.
+[target]
+nodes = 1
+[environment]
+client = 0          # the node self-initiates; no client write
+timeouts = 1        # the lease-expiry timer may fire once
+depth = 3
+[invariants]
+# never wrote (byte 0) after the lease had really expired (byte 1).
+no_write_after_expiry = "not (node[0][0] == 1 and node[0][1] == 1)"

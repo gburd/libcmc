@@ -342,17 +342,24 @@ below is a milestone with a kill criterion; the examples come only after.
   term 1) on the schedule "fire the follower's timeout".  Stable 10/10.
   The invariant DSL gained `node[i][k]` byte accessors to compare state
   across nodes.
-- **M5b -- absolute-time reads.**  M5a covers waits-with-timeout, the
-  common case (elections, leases, retries all wait).  A target that reads
-  *absolute* time (`clock_gettime`, `gettimeofday`) needs those made
-  engine-chosen too.  Measured on this host: glibc serves `clock_gettime`
-  from the vDSO, so seccomp sees 0 of 2000 calls; an `LD_PRELOAD` shim
-  forcing it through a real `syscall()` makes every call seccomp-visible
-  (both verified in scratch).  So M5b extends the preload (already
-  `LD_PRELOAD`ed as `detmalloc.so`) to route `clock_gettime`/
-  `gettimeofday`/`getrandom` to real syscalls the checker answers with a
-  logical clock that advances only at timeout events, keeping replay
-  deterministic.  Not yet built; the mechanism is proven.
+- **M5b -- absolute-time reads.**  **Done (2026-11-05).**  M5a covers
+  waits-with-timeout, the common case (elections, leases, retries all
+  wait).  A target that reads *absolute* time (`clock_gettime`,
+  `gettimeofday`) needs those made engine-chosen too.  Measured: glibc
+  serves `clock_gettime` from the vDSO, so seccomp sees 0 of 2000 calls.
+  `detmalloc.so` now defines `clock_gettime`/`gettimeofday`/`getrandom`
+  that force the call through a real `syscall()`, making it
+  seccomp-visible; the checker answers with a LOGICAL clock it advances
+  by one tick only when it fires a timeout, so a target's clock reads are
+  a pure function of how many timeouts have fired and stateless replay
+  stays deterministic.  `getrandom` returns a fixed pattern so randomness
+  is engine-chosen, not real entropy.  `demo/lease.c` is a leaseholder
+  that may write only while its lease is valid: the correct node re-reads
+  the clock after waking and refuses to write once expired; the `-DBUG`
+  node decides from a clock value cached before it blocked and writes
+  with an expired lease -- a stale-lease/fencing bug the checker finds on
+  the schedule "fire the lease-expiry timeout", visible only because it
+  owns absolute time.  Stable 10/10.
 - **M6 -- crash and partition, multi-node.**  Kill a node (lose volatile,
   keep fsync'd durable, peers get a reset), and bring links up and down,
   mapping the engine's existing crash/partition model onto real

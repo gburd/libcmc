@@ -24,3 +24,5 @@ mc2dbg.c
 scratch/
 elect
 elect-bug
+lease
+lease-bug

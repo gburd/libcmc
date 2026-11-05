@@ -1,0 +1,56 @@
+# Raw output, 2026-11-05: process-mode M0..M5b (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;VIOLATION: NoLostAck -- an acknowledged write is not on disk;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (VIOLATION: a cell once set was cleared;  prefix: SET-b SET-a;distinct states so far: 4;)
+-- M2: a real malloc heap, and the wall it hits
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders -> exit 0 (mode=canon distinct=8 dedup_merges=17;)
+ok   M2 canon bug (lost key caught) -> exit 1 (VIOLATION: an inserted key was lost;  prefix: INS-2 INS-1;)
+-- M3: a model file drives the checker (docs/model-file.md)
+ok   M3 correct (model file + DSL invariant) -> exit 0 (ok: 1 invariant(s) held over 8 distinct states (17 dedup merges);)
+ok   M3 bug (DSL invariant caught) -> exit 1 (VIOLATION: invariant no_lost_key does not hold;  client inputs: 2 1;)
+-- M4: multi-node (the checker owns the inter-node network)
+ok   M4 correct repl (agree-on-ack holds) -> exit 0 (ok: 1 invariant(s) held over 4 distinct states (0 merges);)
+ok   M4 bug repl (acked write backup lacks) -> exit 1 (VIOLATION: invariant agree_on_ack does not hold;)
+-- M5: time is an environment action (election timeout)
+ok   M5 correct elect (one leader per term) -> exit 0 (ok: 1 invariant(s) held over 3 distinct states (0 merges);)
+ok   M5 bug elect (split brain caught) -> exit 1 (VIOLATION: invariant one_leader_per_term does not hold;)
+-- M5b: absolute time is engine-controlled (stale-lease write)
+ok   M5b correct lease (no write after expiry) -> exit 0 (ok: 1 invariant(s) held over 2 distinct states (0 merges);)
+ok   M5b bug lease (stale-lease write caught) -> exit 1 (VIOLATION: invariant no_write_after_expiry does not hold;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge;
+               a real heap needs a small canonical-emit hook, shown;
+               a declarative model file drives it, invariants in a DSL;
+               multi-node: the checker owns the inter-node network;
+               time is an environment action, so elections explore;
+               absolute time is engine-controlled, so a stale lease bites)
+
+# M5b model file (lease.model):
+#   # demo/lease.c: a leaseholder that may write only while its lease is
+#   # valid.  Absolute time is engine-controlled (M5b): the checker's logical
+#   # clock advances only when it fires the lease-expiry timeout.
+#   [target]
+#   nodes = 1
+#   [environment]
+#   client = 0          # the node self-initiates; no client write
+#   timeouts = 1        # the lease-expiry timer may fire once
+#   depth = 3
+#   [invariants]
+#   # never wrote (byte 0) after the lease had really expired (byte 1).
+#   no_write_after_expiry = "not (node[0][0] == 1 and node[0][1] == 1)"
+
+# M5b mechanism: detmalloc.so defines clock_gettime/gettimeofday/getrandom
+# that call syscall() directly (glibc serves clock_gettime from the vDSO,
+# so seccomp sees 0/2000 calls otherwise -- verified).  The checker answers
+# with a logical clock advanced one tick per fired timeout; getrandom
+# returns a fixed pattern.  So absolute-time reads are engine-chosen and
+# stateless replay stays deterministic.  lease: correct=0 bug=1, 10/10.

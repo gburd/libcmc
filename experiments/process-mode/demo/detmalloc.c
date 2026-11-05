@@ -28,6 +28,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 #define ARENA_BASE ((void *) 0x600000000000ULL)
@@ -100,4 +102,31 @@ realloc(void *old, size_t n)
 								 * old block, but our blocks are arena-resident
 								 * and the arena is readable, so it is safe */
 	return p;
+}
+
+/*
+ * M5b -- absolute-time and randomness shims.  glibc serves clock_gettime
+ * and gettimeofday from the vDSO, so seccomp never sees them; forcing
+ * them through a real syscall() makes them visible to the checker, which
+ * answers with a LOGICAL clock it advances only at timeout events (so
+ * stateless replay stays deterministic).  getrandom is routed the same
+ * way so the value a target reads is engine-chosen, not real entropy.
+ * These override the libc symbols because this .so is LD_PRELOAD'd first.
+ */
+int
+clock_gettime(clockid_t id, struct timespec *ts)
+{
+	return syscall(SYS_clock_gettime, id, ts);
+}
+
+int
+gettimeofday(struct timeval *tv, void *tz)
+{
+	return syscall(SYS_gettimeofday, tv, tz);
+}
+
+ssize_t
+getrandom(void *buf, size_t len, unsigned int flags)
+{
+	return syscall(SYS_getrandom, buf, len, flags);
 }

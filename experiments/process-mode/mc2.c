@@ -250,6 +250,14 @@ static Msg bag[MAXMSG];
 /* ghost reply log */
 static unsigned char rep_src[64], rep_val[64]; static int nrep;
 
+/* M5b: the logical clock the checker owns.  It starts at a base and
+ * advances by LEASE_TICK only when the checker fires a timeout, so a
+ * target's clock_gettime/gettimeofday reads are a pure function of how
+ * many timeouts have fired -- stateless replay stays deterministic. */
+#define CLK_BASE 1000000000ULL		/* 1e9 ns = 1 s, an arbitrary epoch */
+#define CLK_TICK 1000000000ULL		/* each fired timeout advances 1 s */
+static unsigned long long logical_ns;
+
 static struct seccomp_notif_sizes g_sz;
 
 static void
@@ -280,6 +288,7 @@ install_filter(void)
 		OWN(SYS_socket), OWN(SYS_setsockopt), OWN(SYS_bind), OWN(SYS_listen),
 		OWN(SYS_connect), OWN(SYS_accept), OWN(SYS_accept4),
 		OWN(SYS_read), OWN(SYS_write), OWN(SYS_recvfrom), OWN(SYS_sendto),
+		OWN(SYS_clock_gettime), OWN(SYS_gettimeofday), OWN(SYS_getrandom),
 #undef OWN
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
@@ -365,6 +374,28 @@ try_pending_for(Node *nd, int client_val)
 	switch (nr)
 	{
 		case SYS_socket:  g_resp->val = nd->next_fd++; break;
+		case SYS_clock_gettime:
+		{
+			/* answer with the logical clock (a[1] = struct timespec*) */
+			struct { long long sec, nsec; } ts;
+			ts.sec = logical_ns / 1000000000ULL; ts.nsec = logical_ns % 1000000000ULL;
+			cr_write(nd->pid, a[1], &ts, sizeof ts); g_resp->val = 0; break;
+		}
+		case SYS_gettimeofday:
+		{
+			struct { long long sec, usec; } tv;
+			tv.sec = logical_ns / 1000000000ULL; tv.usec = (logical_ns % 1000000000ULL) / 1000;
+			cr_write(nd->pid, a[1], &tv, sizeof tv); g_resp->val = 0; break;
+		}
+		case SYS_getrandom:
+		{
+			/* engine-chosen randomness: a fixed byte pattern, so the search
+			 * is reproducible (a real nondeterministic source would need its
+			 * own budget; deterministic is the honest default here) */
+			unsigned char z[256]; size_t n = a[1]; if (n > sizeof z) n = sizeof z;
+			memset(z, 0, n); cr_write(nd->pid, a[0], z, n);
+			g_resp->val = (long) n; break;
+		}
 		case SYS_setsockopt: case SYS_bind: case SYS_listen: g_resp->val = 0; break;
 		case SYS_connect:
 		{
@@ -515,7 +546,7 @@ world_fp(uint64_t fp[2])
 	fp128(w, n, fp);
 }
 
-static void reset_world(void){ memset(bag,0,sizeof bag); nrep=0; }
+static void reset_world(void){ memset(bag,0,sizeof bag); nrep=0; logical_ns=CLK_BASE; }
 
 /* launch fresh nodes, inject the client WRITE to node 0, drive to
  * quiescence, then apply the delivery sequence `seq` (each an index into
@@ -570,6 +601,7 @@ run_seq(const int *seq, int seqlen, Deliv *deliverable, int *ndeliv)
 		if (pick < 0 || pick >= nd) break;		/* seq ran past the actions */
 		if (dv[pick].src == -2) {				/* a timeout */
 			tbudget--;
+			logical_ns += CLK_TICK;				/* time advances only here */
 			deliver(&N[dv[pick].dst], dv[pick].body, dv[pick].len);
 		} else {
 			/* find and remove the matching bag message */
