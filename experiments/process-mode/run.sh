@@ -13,6 +13,11 @@
 #      the checker -- what to run, the environment to explore, and the
 #      invariants as a small expression DSL over the canonical state and
 #      the client-input log.  No protocol logic in the file.
+#   M4 (mc2.c, repl.model, demo/repl.c): multi-node.  The checker runs N
+#      node processes and owns the network between them; it explores the
+#      order inter-node messages are delivered, deduping over all nodes'
+#      states plus the message bag, and checks invariants over node[i] and
+#      the ghost reply log.
 #
 # Kill criterion: this script prints "process-mode: ok".  Linux only
 # (seccomp user notification); skips elsewhere, loudly.
@@ -37,6 +42,9 @@ $CC -O1 -no-pie -w -DCANON -o list-canon demo/list.c
 $CC -O1 -no-pie -w -DCANON -DBUG -o list-bug demo/list.c
 $CC -O2 -w -o search2         search2.c
 $CC -O2 -w -o mc              mc.c
+$CC -O1 -no-pie -w -o repl     demo/repl.c
+$CC -O1 -no-pie -w -DBUG -o repl-bug demo/repl.c
+$CC -O2 -w -o mc2             mc2.c
 
 fail=0
 expect() {				# expect DESC EXIT  cmd...
@@ -74,11 +82,16 @@ echo "-- M3: a model file drives the checker (docs/model-file.md)"
 expect "M3 correct (model file + DSL invariant)" 0 ./mc list.model ./list-canon
 expect "M3 bug (DSL invariant caught)"           1 ./mc list.model ./list-bug
 
+echo "-- M4: multi-node (the checker owns the inter-node network)"
+expect "M4 correct repl (agree-on-ack holds)"   0 ./mc2 repl.model ./repl
+expect "M4 bug repl (acked write backup lacks)" 1 ./mc2 repl.model ./repl-bug
+
 if [ "$fail" = 0 ]; then
 	echo "process-mode: ok (bug found in deployed-style code; search over"
 	echo "               interleavings terminates because equal states merge;"
 	echo "               a real heap needs a small canonical-emit hook, shown;"
-	echo "               a declarative model file drives it, invariants in a DSL)"
+	echo "               a declarative model file drives it, invariants in a DSL;"
+	echo "               multi-node: the checker owns the inter-node network)"
 else
 	echo "process-mode: FAILED"
 fi

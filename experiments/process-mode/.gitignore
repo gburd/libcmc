@@ -16,3 +16,9 @@ detmalloc.so
 pm-store.dat
 store.dat
 mc
+repl
+repl-bug
+mc2
+mc2dbg
+mc2dbg.c
+scratch/

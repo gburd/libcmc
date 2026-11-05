@@ -19,4 +19,5 @@ TLC, all from 2026-11-02.  The current design is
 - [Process mode M1]({{ '/background/process-mode-m1/' | relative_url }}) -- canonical state and a real search over interleavings
 - [Process mode M2]({{ '/background/process-mode-m2/' | relative_url }}) -- a real malloc heap, and the boundary it draws
 - [Process mode M3]({{ '/background/process-mode-m3/' | relative_url }}) -- a model file drives the checker
+- [Process mode M4]({{ '/background/process-mode-m4/' | relative_url }}) -- multi-node, the checker owns the network
 - [Decision: one engine, a model file, the shipping binary]({{ '/background/decision-model-file/' | relative_url }})

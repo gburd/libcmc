@@ -5,7 +5,7 @@ pure, deterministic step functions (`CmcCore`).  Process mode is the path
 to the north star: proving C code written **as it will be deployed** --
 real syscalls, normal control flow, no rewrite for the checker.
 
-`DESIGN.md` is the design.  This is a time-boxed prototype in four
+`DESIGN.md` is the design.  This is a time-boxed prototype in five
 milestones, not part of the engine, not a gate, not built by `make`.
 
 - **M0** (`checker.c`, `demo/server.c`): catch a durability bug in a
@@ -18,6 +18,10 @@ milestones, not part of the engine, not a gate, not built by `make`.
   drives the checker -- the decided shape (one engine, a model file, the
   shipping binary).  See `docs/model-file.md` and the decision record
   `docs/background/decision-model-file.md`.
+- **M4** (`mc2.c`, `repl.model`, `demo/repl.c`): multi-node.  The checker
+  runs N node processes and owns the network between them, exploring the
+  order inter-node messages are delivered.  First step toward the
+  consensus examples.
 
 ## What M0 shows
 
@@ -116,6 +120,27 @@ on the path here): quantifiers, membership, comparison, `and`/`or`/`not`,
 and nothing more.  `all k in acted : k in node[0]` -- every inserted key
 is still present -- holds for the correct build and is violated by the
 planted lost-key bug, caught with the shortest input sequence `2 1`.
+
+## What M4 shows
+
+`demo/repl.c` is a two-node replicated register (primary + backup),
+ordinary blocking sockets, no libcmc header.  `mc2.c` runs both as real
+processes and is the network between them: it chooses the order inter-node
+messages are delivered.  `repl.model` declares
+`agree_on_ack = "all r in replies : r.val in node[1]"` -- every value the
+client was acked is on the backup.
+
+```
+ok   M4 correct repl (agree-on-ack holds)   -> exit 0 (3 distinct states)
+ok   M4 bug repl (acked write backup lacks) -> exit 1 (node[0]=5 node[1]=0)
+```
+
+The correct primary acks only after the backup stores the value, so the
+invariant holds.  The `-DBUG` primary acks early; the checker finds the
+schedule where the backup is still behind an acknowledged write.  A
+blocked `recv` is a *deferred* seccomp notification -- the node stays
+stopped in the kernel until the search delivers it a message -- which is
+how one checker schedules several real processes.
 
 ## How it works
 

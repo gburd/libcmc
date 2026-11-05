@@ -1,0 +1,18 @@
+# A model file for demo/repl.c: a two-node replicated register, checked
+# as it ships.  No protocol logic here -- the running binary is it.
+# Run:  ./mc2 repl.model ./repl        (pass; backup kept current before ack)
+#       ./mc2 repl.model ./repl-bug    (fails: an acked write the backup lacks)
+
+[target]
+nodes = 2
+
+[environment]
+client_val = 5          # the client writes this value to node 0
+depth = 6               # explore delivery orders up to this many steps
+
+[invariants]
+# once the client has been acked a value, the backup (node 1) must hold it.
+# `replies` is the ghost log of client acks: each r has r.src (the node
+# that acked) and r.val (the value).  node[1] is the backup's canonical
+# state (its stored value byte).
+agree_on_ack = "all r in replies : r.val in node[1]"

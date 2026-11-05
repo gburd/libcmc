@@ -1,0 +1,50 @@
+# Raw output, 2026-11-05: process-mode M0..M4 (experiments/process-mode).
+# Host: Linux 6.18.60 x86_64, glibc 2.44.
+# Command: experiments/process-mode/run.sh
+
+-- M0: a durability bug in a server written as it ships
+ok   M0 correct, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 correct, one crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, no crash -> exit 0 (  trace: client sent W 1; server ACKed; disk=1;)
+ok   M0 bug, one crash -> exit 1 (  trace: client sent W 1; server ACKed; CRASH before flush; disk=-1;VIOLATION: NoLostAck -- an acknowledged write is not on disk;)
+-- M1: canonical state and a real search
+ok   M1 correct kv (diamond merges) -> exit 0 (distinct states: 4; dedup merges: 5;)
+ok   M1 bug kv (invariant caught) -> exit 1 (VIOLATION: a cell once set was cleared;  prefix: SET-b SET-a;distinct states so far: 4;)
+-- M2: a real malloc heap, and the wall it hits
+ok   M2 raw heap hits the wall (WALL)
+ok   M2 canon merges reorders -> exit 0 (mode=canon distinct=8 dedup_merges=17;)
+ok   M2 canon bug (lost key caught) -> exit 1 (VIOLATION: an inserted key was lost;  prefix: INS-2 INS-1;)
+-- M3: a model file drives the checker (docs/model-file.md)
+ok   M3 correct (model file + DSL invariant) -> exit 0 (ok: 1 invariant(s) held over 8 distinct states (17 dedup merges);)
+ok   M3 bug (DSL invariant caught) -> exit 1 (VIOLATION: invariant no_lost_key does not hold;  client inputs: 2 1;)
+-- M4: multi-node (the checker owns the inter-node network)
+ok   M4 correct repl (agree-on-ack holds) -> exit 0 (ok: 1 invariant(s) held over 3 distinct states (0 merges);)
+ok   M4 bug repl (acked write backup lacks) -> exit 1 (VIOLATION: invariant agree_on_ack does not hold;)
+process-mode: ok (bug found in deployed-style code; search over
+               interleavings terminates because equal states merge;
+               a real heap needs a small canonical-emit hook, shown;
+               a declarative model file drives it, invariants in a DSL;
+               multi-node: the checker owns the inter-node network)
+
+# M4 model file (repl.model):
+#   # A model file for demo/repl.c: a two-node replicated register, checked
+#   # as it ships.  No protocol logic here -- the running binary is it.
+#   # Run:  ./mc2 repl.model ./repl        (pass; backup kept current before ack)
+#   #       ./mc2 repl.model ./repl-bug    (fails: an acked write the backup lacks)
+#   
+#   [target]
+#   nodes = 2
+#   
+#   [environment]
+#   client_val = 5          # the client writes this value to node 0
+#   depth = 6               # explore delivery orders up to this many steps
+#   
+#   [invariants]
+#   # once the client has been acked a value, the backup (node 1) must hold it.
+#   # `replies` is the ghost log of client acks: each r has r.src (the node
+#   # that acked) and r.val (the value).  node[1] is the backup's canonical
+#   # state (its stored value byte).
+#   agree_on_ack = "all r in replies : r.val in node[1]"
+
+# M4 stability: correct=exit0 AND bug=exit1 in 10/10 repeat runs (seccomp
+# notification timing is not flaky here).

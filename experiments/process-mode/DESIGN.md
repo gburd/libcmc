@@ -306,14 +306,26 @@ toys standing in for the protocols.  They cannot exist until the engine
 grows the capabilities a real consensus protocol exercises.  Each step
 below is a milestone with a kill criterion; the examples come only after.
 
-- **M4 -- multi-node.**  `mc` runs N node processes under one checker and
-  owns the network between them: intercept each node's `connect`/`send`/
-  `recv` and route through the engine's FIFO/bag model, so
-  `deliver(i -> j)` is an environment action.  Dedup over all nodes'
-  canonical emits plus the in-flight message set.  Kill criterion: a
-  2-node delivery-order diamond merges, and a planted replication bug
-  (backup acks data it has not stored) is caught with the shortest
-  delivery sequence.
+- **M4 -- multi-node.**  `mc2` runs N node processes under one checker
+  and owns the network between them: it intercepts each node's
+  `socket`/`connect`/`accept`/`send`/`recv`, pairs connection fds to a
+  peer node by the port a `connect` targets (node i listens on BASE+i),
+  and routes messages through a bag; `deliver(i -> j)` is an environment
+  action.  A `recv` on an empty channel is a **deferred** seccomp
+  notification -- the node blocks in the kernel, unanswered, until the
+  search delivers a message to it (proved minimal in
+  `scratch/probe_defer.c`).  A world is quiescent when every live node is
+  blocked on `recv` or has exited; the search is stateless replay over
+  delivery orders, deduping over all nodes' canonical emits plus the bag
+  and the ghost reply log.  **Done (M4a, 2026-11-05):** `demo/repl.c` is
+  a two-node replicated register; the correct build holds `agree_on_ack`
+  (every value the client was acked is on the backup) over three distinct
+  states, and the `-DBUG` build (primary acks before the backup stores)
+  is caught -- node 0 has the value, node 1 has 0, and the client was
+  acked.  Stable over 10/10 runs.  Still M4-open: the general N>2
+  topology (the demo's accept-peer pairing is hardcoded for
+  primary/backup) and routing through the engine's real FIFO/bag with
+  drops.
 - **M5 -- time and randomness as environment.**  Intercept the clock
   (`clock_gettime` with the vDSO disabled for the target), the timer
   syscalls (`timerfd`, `nanosleep`, epoll timeouts), and `getrandom`/

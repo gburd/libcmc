@@ -133,10 +133,15 @@ rewrite).  A fourth wires it to a declarative **model file** (M3): the
 file names the binary, the environment to explore, and the invariants (a
 small expression DSL), and the running binary is the transition relation
 -- the shape this document's decision record settled on
-(`docs/background/decision-model-file.md`, `docs/model-file.md`).  See
+(`docs/background/decision-model-file.md`, `docs/model-file.md`).  A fifth
+goes multi-node (M4): the checker runs several real node processes and
+owns the network between them, choosing the delivery order, and catches
+an acknowledged write a backup never received in a two-node replicated
+register written as it ships -- the first step toward the consensus
+examples.  See
 `experiments/process-mode/` and the measurements
 `docs/measurements/2026-11-04-process-mode-m0.md`, `-m1.md`, `-m2.md`,
-and `2026-11-05-process-mode-m3.md`.
+`2026-11-05-process-mode-m3.md`, and `-m4.md`.
 The conclusion: process mode checks arbitrary heap-using C along a fixed
 schedule with no target change, and a full reconverging search needs that
 small hook; if even that proves unworkable at scale, the step-function
