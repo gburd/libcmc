@@ -453,6 +453,25 @@ below is a milestone with a kill criterion; the examples come only after.
   process front end share the CLI and the rules, not a search loop
   (the process cannot be restored from bytes; that needs fork from a
   snapshot).
+- **M9 -- fork from a snapshot (in progress).**  Replace replay-from-
+  launch with freezing a copy of every node process at a quiescent point
+  and resuming a copy per enabled action, so expanding a state is O(1)
+  node-steps instead of O(depth).  Measured motivation: on the Paxos
+  fixture with one crash and one drop, launch is about a third of the
+  time and re-driving the prefix the other two thirds, so a faster
+  launch alone caps the win at about 1.5x.  The snapshot must be a real
+  `fork()` (the kernel copies the whole address space correctly), not a
+  hand-rolled memory capture whose incompleteness would be a silent
+  wrong verdict.  The obstacle -- a quiescent node is suspended in the
+  kernel on a seccomp notification and cannot fork itself -- is met by
+  injecting the fork with ptrace.  `experiments/fork-snapshot/probe.c`
+  establishes the feasibility: `PTRACE_INTERRUPT` brings a
+  notif-suspended node to a ptrace stop with clean registers at the
+  blocked `write`, the instruction boundary to inject the fork from.
+  Kill criterion: a fork-snapshot run gives byte-identical distinct-
+  state counts and the same counterexamples as stateless replay on every
+  `test/proc/` fixture, and is measurably faster; the replay engine
+  stays as the oracle it is checked against.
 
 **Then the examples**, smallest real protocol first, each kept only if the
 engine finishes a meaningful run on it (exhaustive, bounded, or
