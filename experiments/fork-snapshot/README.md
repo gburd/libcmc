@@ -46,7 +46,19 @@ kernel (Linux 6.x, x86-64):
   original is back at the blocked `write()` and the fork is a frozen
   duplicate at the same point.
 
-So the approach is feasible.
+So the approach is feasible.  On a quiet host the probe goes further: it
+injects `fork` by register rewrite (set `orig_rax`/`rax` to `SYS_fork`,
+`rip` back onto the syscall instruction, single-step), catches the
+duplicate with `PTRACE_EVENT_FORK`, restores the original's registers so
+it re-enters the blocked `write()`, runs the original on to its own
+exit, then resumes the frozen snapshot and checks its heap still reads
+the quiescent-point value (11), not the original's final value (12) --
+the proof the copy is a separate, undisturbed freeze.
+
+The fork injection itself is confirmed working (`injected fork ->
+snapshot pid ...`).  The independent-resume check needs a quiet host;
+under heavy external load the seccomp/ptrace handshake is starved and
+the run stalls after the injection.
 
 ```
 cc -O2 -o probe probe.c && ./probe     # Linux x86-64; run on a QUIET host
@@ -57,8 +69,9 @@ probe times out midway (it still prints the facts above first).
 
 ## Still to prove before touching `src/`
 
-- inject the `fork` and show the duplicate resumes independently and
-  reaches the same next quiescent point as the original would;
+- confirm (on a quiet host) the injected snapshot resumes independently
+  and reads the quiescent value, not the original's -- the probe does
+  this; it needs load low enough to finish;
 - manage a tree of frozen snapshots (re-fork a snapshot before resuming
   it, so it can be resumed again for the next sibling), and reap them
   without zombies or fd leaks; the inherited seccomp listener fd and the

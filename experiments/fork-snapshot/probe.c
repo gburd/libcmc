@@ -263,14 +263,84 @@ main(void)
 		   (unsigned long long) regs.rip, (long long) regs.orig_rax,
 		   (long long) regs.rax);
 
-	/* this is the point the real work begins; the next thought records
-	 * what the stop state actually is before deciding how to fork */
-	ptrace(PTRACE_CONT, pid, 0, 0);
+	/*
+	 * Inject fork() by register injection.  The node is ptrace-stopped
+	 * at a syscall boundary (orig_rax=1 write, rax=-ERESTARTSYS, rip just
+	 * past the syscall insn).  Point it at a fresh fork(2) at rip-2 (the
+	 * two-byte syscall instruction is still mapped), set rax=SYS_fork,
+	 * and single-step; PTRACE_EVENT_FORK gives the child pid.  Then
+	 * restore the saved registers so the original re-enters its write()
+	 * and its pending notification stands.
+	 */
+	if (ptrace(PTRACE_SETOPTIONS, pid, 0, (void *) (long) PTRACE_O_TRACEFORK))
+		perror("setoptions");
+	regs.orig_rax = SYS_fork;
+	regs.rax = SYS_fork;
+	regs.rip = saved.rip - 2;		/* back onto the syscall instruction */
+	struct iovec wv = {&regs, sizeof regs};
+
+	if (ptrace(PTRACE_SETREGSET, pid, (void *) (long) NT_PRSTATUS, &wv))
+		perror("setregs");
+	if (ptrace(PTRACE_CONT, pid, 0, 0))
+		perror("cont-into-fork");
+	waitpid(pid, &st, 0);			/* stop at PTRACE_EVENT_FORK */
+	pid_t		snap = -1;
+
+	if ((st >> 8) == (SIGTRAP | (PTRACE_EVENT_FORK << 8)))
+	{
+		unsigned long m = 0;
+
+		ptrace(PTRACE_GETEVENTMSG, pid, 0, &m);
+		snap = (pid_t) m;
+		printf("injected fork -> snapshot pid %d\n", snap);
+	}
+	else
+	{
+		printf("FAIL: no PTRACE_EVENT_FORK (st=%x)\n", st);
+		kill(pid, SIGKILL);
+		return 1;
+	}
+	/* the snapshot child is stopped; wait for it to appear */
+	waitpid(snap, &st, 0);
+
+	/* let the original finish its injected fork syscall and come back to
+	 * a stop, then restore its registers to the blocked write() */
+	ptrace(PTRACE_SYSCALL, pid, 0, 0);
+	waitpid(pid, &st, 0);
+	struct iovec rw = {&regs, sizeof regs};
+
+	ptrace(PTRACE_GETREGSET, pid, (void *) (long) NT_PRSTATUS, &rw);
+	struct iovec restore = {&saved, sizeof saved};
+
+	ptrace(PTRACE_SETREGSET, pid, (void *) (long) NT_PRSTATUS, &restore);
+
+	/* mutate the ORIGINAL via its notification answer, then let it run
+	 * to exit; its final counter reflects step 2 (12) */
+	ptrace(PTRACE_DETACH, pid, 0, 0);
 	answer(lf, req, resp);
-	if (ioctl(lf, SECCOMP_IOCTL_NOTIF_RECV, req) == 0)
+	if (poll(&pf, 1, 5000) > 0 && ioctl(lf, SECCOMP_IOCTL_NOTIF_RECV, req) == 0)
 		answer(lf, req, resp);
 	waitpid(pid, &st, 0);
 	printf("original exited %d (want 12)\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
-	(void) saved;
-	return 0;
+
+	/*
+	 * Now resume the SNAPSHOT independently.  It is a frozen duplicate at
+	 * the same quiescent point (counter 11).  Read its heap: it must show
+	 * 11, not the original's final 12 -- proof the copy is separate and
+	 * was not disturbed by the original running on.
+	 */
+	int			snap_cell = read_cell(snap);
+
+	printf("snapshot counter = %d (want 11, NOT the original's 12)\n", snap_cell);
+	ptrace(PTRACE_DETACH, snap, 0, 0);
+	kill(snap, SIGKILL);
+	waitpid(snap, &st, 0);
+
+	if (snap_cell == 11)
+	{
+		printf("OK: fork-from-snapshot freezes and resumes a node independently\n");
+		return 0;
+	}
+	printf("FAIL: snapshot was not an independent frozen copy\n");
+	return 1;
 }
