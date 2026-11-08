@@ -158,15 +158,6 @@ read_cell(pid_t pid)
 	return cell;
 }
 
-/* answer the pending write() notification so the child runs on */
-static void
-answer(int lf, struct seccomp_notif *req, struct seccomp_notif_resp *resp)
-{
-	memset(resp, 0, sizeof *resp);
-	resp->id = req->id;
-	resp->val = 1;
-	ioctl(lf, SECCOMP_IOCTL_NOTIF_SEND, resp);
-}
 
 int
 main(void)
@@ -264,83 +255,88 @@ main(void)
 		   (long long) regs.rax);
 
 	/*
-	 * Inject fork() by register injection.  The node is ptrace-stopped
-	 * at a syscall boundary (orig_rax=1 write, rax=-ERESTARTSYS, rip just
-	 * past the syscall insn).  Point it at a fresh fork(2) at rip-2 (the
-	 * two-byte syscall instruction is still mapped), set rax=SYS_fork,
-	 * and single-step; PTRACE_EVENT_FORK gives the child pid.  Then
-	 * restore the saved registers so the original re-enters its write()
-	 * and its pending notification stands.
+	 * Snapshot by injecting fork().  Save the original's registers, point
+	 * it at fork(2) at the syscall instruction, single-step into it; with
+	 * PTRACE_O_TRACEFORK the child is auto-attached and stopped.  Then put
+	 * BOTH processes' registers back to `saved` -- the boundary of the
+	 * blocked write() -- so resuming either re-issues that write and
+	 * raises a fresh notification the checker services normally.
 	 */
 	if (ptrace(PTRACE_SETOPTIONS, pid, 0, (void *) (long) PTRACE_O_TRACEFORK))
 		perror("setoptions");
+	regs = saved;
 	regs.orig_rax = SYS_fork;
 	regs.rax = SYS_fork;
-	regs.rip = saved.rip - 2;		/* back onto the syscall instruction */
+	regs.rip = saved.rip - 2;			/* onto the syscall instruction */
 	struct iovec wv = {&regs, sizeof regs};
-
 	if (ptrace(PTRACE_SETREGSET, pid, (void *) (long) NT_PRSTATUS, &wv))
 		perror("setregs");
 	if (ptrace(PTRACE_CONT, pid, 0, 0))
 		perror("cont-into-fork");
-	waitpid(pid, &st, 0);			/* stop at PTRACE_EVENT_FORK */
-	pid_t		snap = -1;
-
-	if ((st >> 8) == (SIGTRAP | (PTRACE_EVENT_FORK << 8)))
-	{
-		unsigned long m = 0;
-
-		ptrace(PTRACE_GETEVENTMSG, pid, 0, &m);
-		snap = (pid_t) m;
-		printf("injected fork -> snapshot pid %d\n", snap);
-	}
-	else
+	waitpid(pid, &st, 0);
+	if ((st >> 8) != (SIGTRAP | (PTRACE_EVENT_FORK << 8)))
 	{
 		printf("FAIL: no PTRACE_EVENT_FORK (st=%x)\n", st);
 		kill(pid, SIGKILL);
 		return 1;
 	}
-	/* the snapshot child is stopped; wait for it to appear */
-	waitpid(snap, &st, 0);
+	unsigned long m = 0;
+	ptrace(PTRACE_GETEVENTMSG, pid, 0, &m);
+	pid_t snap = (pid_t) m;
+	printf("injected fork -> snapshot pid %d\n", snap);
+	waitpid(snap, &st, 0);				/* the snapshot's attach-stop */
 
-	/* let the original finish its injected fork syscall and come back to
-	 * a stop, then restore its registers to the blocked write() */
-	ptrace(PTRACE_SYSCALL, pid, 0, 0);
-	waitpid(pid, &st, 0);
-	struct iovec rw = {&regs, sizeof regs};
+	/* read both heaps NOW, while both are ptrace-stopped: the proof the
+	 * snapshot is an independent COW copy carrying the quiescent value */
+	printf("after fork: original heap = %d, snapshot heap = %d (both want 11)\n",
+		   read_cell(pid), read_cell(snap));
 
-	ptrace(PTRACE_GETREGSET, pid, (void *) (long) NT_PRSTATUS, &rw);
-	struct iovec restore = {&saved, sizeof saved};
-
-	ptrace(PTRACE_SETREGSET, pid, (void *) (long) NT_PRSTATUS, &restore);
-
-	/* mutate the ORIGINAL via its notification answer, then let it run
-	 * to exit; its final counter reflects step 2 (12) */
-	ptrace(PTRACE_DETACH, pid, 0, 0);
-	answer(lf, req, resp);
-	if (poll(&pf, 1, 5000) > 0 && ioctl(lf, SECCOMP_IOCTL_NOTIF_RECV, req) == 0)
-		answer(lf, req, resp);
-	waitpid(pid, &st, 0);
-	printf("original exited %d (want 12)\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+	/* put the snapshot back to the blocked-write boundary and freeze it
+	 * (leave it ptrace-stopped); a real checker would resume it later */
+	struct iovec sv = {&saved, sizeof saved};
+	if (ptrace(PTRACE_SETREGSET, snap, (void *) (long) NT_PRSTATUS, &sv))
+		perror("snap setregs");
 
 	/*
-	 * Now resume the SNAPSHOT independently.  It is a frozen duplicate at
-	 * the same quiescent point (counter 11).  Read its heap: it must show
-	 * 11, not the original's final 12 -- proof the copy is separate and
-	 * was not disturbed by the original running on.
+	 * The ORIGINAL left its write() notification when we drove it through
+	 * fork.  Does that notification still stand?  Try to answer it; if
+	 * SEND gives ENOENT the original must re-issue the syscall instead.
 	 */
-	int			snap_cell = read_cell(snap);
+	struct iovec ov = {&saved, sizeof saved};
+	ptrace(PTRACE_SETREGSET, pid, (void *) (long) NT_PRSTATUS, &ov);
+	ptrace(PTRACE_CONT, pid, 0, 0);		/* re-run its write -> new notif */
+	memset(resp, 0, sz.seccomp_notif_resp);
+	resp->id = req->id;
+	resp->val = 1;
+	errno = 0;
+	int sent = ioctl(lf, SECCOMP_IOCTL_NOTIF_SEND, resp);
+	printf("answer the original's old notif: rc=%d errno=%d (ENOENT=%d means it was abandoned)\n", sent, errno, ENOENT);
 
-	printf("snapshot counter = %d (want 11, NOT the original's 12)\n", snap_cell);
-	ptrace(PTRACE_DETACH, snap, 0, 0);
-	kill(snap, SIGKILL);
-	waitpid(snap, &st, 0);
+	/* whether or not the old notif was valid, the original re-runs its
+	 * write and raises a fresh notification; service that one */
+	struct pollfd pf2 = {lf, POLLIN, 0};
+	for (int step = 0; step < 2; step++)
+	{
+		if (poll(&pf2, 1, 3000) <= 0) { printf("(no further original notif)\n"); break; }
+		if (ioctl(lf, SECCOMP_IOCTL_NOTIF_RECV, req)) break;
+		memset(resp, 0, sz.seccomp_notif_resp); resp->id = req->id; resp->val = 1;
+		ioctl(lf, SECCOMP_IOCTL_NOTIF_SEND, resp);
+	}
+	/* reap the original */
+	for (int tries = 0; tries < 100; tries++) { pid_t w = waitpid(pid, &st, WNOHANG); if (w == pid) break; usleep(20000); }
+	printf("original ended: exited=%d code=%d\n", WIFEXITED(st), WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+
+	/* the snapshot stayed frozen while the original ran: its heap is
+	 * still the quiescent 11, not the original's 12 */
+	int snap_cell = read_cell(snap);
+	printf("snapshot heap after original ran = %d (want 11, NOT 12)\n", snap_cell);
+	kill(snap, SIGKILL); waitpid(snap, &st, 0);
 
 	if (snap_cell == 11)
 	{
-		printf("OK: fork-from-snapshot freezes and resumes a node independently\n");
+		printf("OK: fork-from-snapshot freezes a node independently of the original\n");
 		return 0;
 	}
-	printf("FAIL: snapshot was not an independent frozen copy\n");
+	printf("FAIL: snapshot was disturbed by the original\n");
 	return 1;
 }

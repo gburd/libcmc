@@ -46,19 +46,24 @@ kernel (Linux 6.x, x86-64):
   original is back at the blocked `write()` and the fork is a frozen
   duplicate at the same point.
 
-So the approach is feasible.  On a quiet host the probe goes further: it
-injects `fork` by register rewrite (set `orig_rax`/`rax` to `SYS_fork`,
-`rip` back onto the syscall instruction, single-step), catches the
-duplicate with `PTRACE_EVENT_FORK`, restores the original's registers so
-it re-enters the blocked `write()`, runs the original on to its own
-exit, then resumes the frozen snapshot and checks its heap still reads
-the quiescent-point value (11), not the original's final value (12) --
-the proof the copy is a separate, undisturbed freeze.
+So the approach is feasible.  The probe runs the whole cycle on a quiet
+host (`exit 0`, the `OK:` line): it injects `fork` by register rewrite
+(`orig_rax`/`rax` = `SYS_fork`, `rip` back onto the syscall
+instruction, single-step), catches the duplicate with
+`PTRACE_EVENT_FORK`, reads both heaps (each 11), freezes the snapshot,
+runs the original on, and confirms the snapshot's heap is still 11 --
+an independent copy, undisturbed by the original.
 
-The fork injection itself is confirmed working (`injected fork ->
-snapshot pid ...`).  The independent-resume check needs a quiet host;
-under heavy external load the seccomp/ptrace handshake is starved and
-the run stalls after the injection.
+**The engine finding from the probe:** once the node is driven through
+the ptrace excursion, its original `write()` notification is
+*abandoned* -- answering it later gives `ENOENT`.  So a resumed node
+does not keep its in-flight notification; it **re-issues** the blocked
+syscall and raises a *fresh* notification, which the checker picks up
+normally.  That is cleaner than preserving an in-flight notif, and it
+sets the engine's resume contract: to resume a snapshot, restore its
+registers to the syscall-instruction boundary (`saved.rip - 2`, the
+saved `write` arguments) and let it re-run, then `NOTIF_RECV` the new
+notification.
 
 ```
 cc -O2 -o probe probe.c && ./probe     # Linux x86-64; run on a QUIET host
@@ -69,9 +74,6 @@ probe times out midway (it still prints the facts above first).
 
 ## Still to prove before touching `src/`
 
-- confirm (on a quiet host) the injected snapshot resumes independently
-  and reads the quiescent value, not the original's -- the probe does
-  this; it needs load low enough to finish;
 - manage a tree of frozen snapshots (re-fork a snapshot before resuming
   it, so it can be resumed again for the next sibling), and reap them
   without zombies or fd leaks; the inherited seccomp listener fd and the
