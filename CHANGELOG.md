@@ -19,6 +19,11 @@ change the API in `include/cmc.h`; this file says when it does.
 - The loader refuses every model-file section, key or value it does not
   implement, and every invariant it cannot parse whole, instead of
   ignoring it.
+- Every intercepted syscall is pinned by a fixture with teeth
+  (`test/proc/clocks.c`).  This caught a bug: `gettimeofday` wrote the
+  logical clock to the wrong argument (the `tz` pointer, not the `tv`
+  buffer), so a target reading wall time through it got zero instead of
+  the checker's clock; fixed.
 - `make install` installs the `cmc` binary and `lib/libcmc/cmc-preload.so`,
   the deterministic heap and logical clock a checked program runs under;
   an installed `cmc` finds it from its own location, or from

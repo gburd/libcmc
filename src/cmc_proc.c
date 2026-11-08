@@ -603,9 +603,10 @@ try_pending_for(Node *nd)
 		}
 		case SYS_gettimeofday:
 		{
+			/* gettimeofday(tv, tz): the buffer is the FIRST argument */
 			struct { long long sec, usec; } tv;
 			tv.sec = logical_ns / 1000000000ULL; tv.usec = (logical_ns % 1000000000ULL) / 1000;
-			cr_write(nd->pid, a[1], &tv, sizeof tv); g_resp->val = 0; break;
+			cr_write(nd->pid, a[0], &tv, sizeof tv); g_resp->val = 0; break;
 		}
 		case SYS_getrandom:
 		{

@@ -28,7 +28,7 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg paxos; do
+for f in repl elect lease durlog idle fifo chain bigmsg paxos clocks; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 for f in repl elect lease durlog paxos; do
@@ -69,6 +69,16 @@ expect "paxos: --simulate is not a pass"   2 "not exhaustive" $(run paxos paxos)
 expect "idle: time passing is not merged"  1 "never_late is violated" $(run idle idle)
 expect "fifo: a connection is in order"    0 "No error has been found" $(run fifo fifo)
 expect "chain: any topology the nodes dial" 1 "not_reached is violated" $(run chain chain)
+
+# every intercepted syscall is pinned by a fixture.  clocks reads
+# gettimeofday and getrandom and uses sendto/recvfrom; its invariants
+# are the checker's contract.  The teeth: a model that expects the wrong
+# answer must be caught, so a regression in the handlers cannot pass.
+expect "clocks: gettimeofday, getrandom, sendto/recvfrom" 0 "3 invariants held" $(run clocks clocks)
+printf '[target]\nnodes = 2\n[environment]\ntimeouts = 1\n[invariants]\nwrong_clock = "node[0][0] != 1"\n' > "$OUT/clk-wrong.model"
+expect "clocks teeth: gettimeofday is the logical clock" 1 "wrong_clock is violated" --model-file "$OUT/clk-wrong.model" --binary "$B/proc/clocks"
+printf '[target]\nnodes = 2\n[environment]\ntimeouts = 1\n[invariants]\nwrong_random = "node[0][1] != 0"\n' > "$OUT/rnd-wrong.model"
+expect "clocks teeth: getrandom is engine-zeroed"      1 "wrong_random is violated" --model-file "$OUT/rnd-wrong.model" --binary "$B/proc/clocks"
 expect "a depth bound is INCOMPLETE"       2 "depth bound" $(run durlog durlog-bug) --depth 2
 expect "a state bound is INCOMPLETE"       2 "max states" $(run paxos paxos) --max-states 10
 expect "an over-long write is an error"    1 "limit is 64" $(run bigmsg bigmsg)

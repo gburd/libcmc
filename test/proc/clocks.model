@@ -1,0 +1,13 @@
+# test/proc/clocks.c: pins the checker's answers for gettimeofday and
+# getrandom (no other fixture reads them), and that a timeout satisfies
+# a blocked recvfrom.  node[0] = [tv_sec start][random byte][tv_sec
+# after wake][woke].  Correct checker: start at logical second 1,
+# random byte 0 (engine-zeroed), wake at second 2 after one timeout.
+[target]
+nodes = 2
+[environment]
+timeouts = 1
+[invariants]
+clock_starts_at_one   = "node[0][0] == 1"
+random_is_zero        = "node[0][1] == 0"
+timeout_advances_clock = "node[0][2] == 0 or node[0][2] == 2"
