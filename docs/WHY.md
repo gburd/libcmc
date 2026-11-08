@@ -1,6 +1,6 @@
 ---
 title: "Why libcmc"
-nav_order: 5
+nav_order: 6
 permalink: /why/
 lede: >-
   Why a new checker rather than TLA+, Spin, LTSmin, CBMC, GenMC or Stateright.

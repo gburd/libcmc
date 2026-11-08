@@ -63,10 +63,12 @@ code; the model is the program.
    crash, a planted bug, and the counterexample libcmc prints for it.
 3. [Using libcmc in your project]({{ '/guide/03-in-your-project/' | relative_url }}):
    what your program must do, the model file, planted bugs, and CI.
-4. The manual pages: [cmc(1)]({{ '/reference/man/cmc.1/' | relative_url }}),
+4. [Examples]({{ '/examples/' | relative_url }}): real protocols checked
+   as they ship, starting with single-decree Paxos.
+5. The manual pages: [cmc(1)]({{ '/reference/man/cmc.1/' | relative_url }}),
    [libcmc(3)]({{ '/reference/man/libcmc.3/' | relative_url }}),
    [cmc(7)]({{ '/reference/man/cmc.7/' | relative_url }}).
-5. [Why libcmc]({{ '/why/' | relative_url }}) rather than TLA+, Spin,
+6. [Why libcmc]({{ '/why/' | relative_url }}) rather than TLA+, Spin,
    LTSmin, CBMC, GenMC or Stateright.
 
 libcmc is C11 and libc only, Apache-2.0.  Checking a program needs

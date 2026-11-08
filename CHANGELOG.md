@@ -19,6 +19,10 @@ change the API in `include/cmc.h`; this file says when it does.
 - The loader refuses every model-file section, key or value it does not
   implement, and every invariant it cannot parse whole, instead of
   ignoring it.
+- A worked example, `examples/paxos/`: single-decree Paxos (two
+  proposers, three acceptors, five processes) checked for agreement, with
+  a planted promised-values bug caught by search and by simulation.
+  `make check` builds and checks it.
 - Every intercepted syscall is pinned by a fixture with teeth
   (`test/proc/clocks.c`).  This caught a bug: `gettimeofday` wrote the
   logical clock to the wrong argument (the `tz` pointer, not the `tv`

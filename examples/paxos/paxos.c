@@ -1,34 +1,35 @@
 /*
- * paxos for process-mode M7 (test/proc): a sizing
- * workload.  It is not yet the Paxos example; the examples follow M8.
+ * paxos.c: single-decree Paxos, checked as it ships (examples/paxos).
  *
- * Single-decree Paxos: two proposers (nodes 0 and 1) and three acceptors
- * (nodes 2, 3 and 4), each its own process, written with ordinary
- * blocking TCP and no libcmc header.  Every request is its own
- * connection, a common server pattern: the proposer dials, sends, and
- * waits for the reply; the acceptor accepts, reads, replies, and goes
- * back to accept.  The order in which an acceptor takes requests is
- * therefore the network's (the checker's) choice.
+ * Two proposers (nodes 0 and 1) and three acceptors (nodes 2, 3 and 4),
+ * each its own process, written with ordinary blocking TCP and no
+ * libcmc header.  Every request is its own connection, a common server
+ * pattern: the proposer dials, sends, and waits for the reply; the
+ * acceptor accepts, reads, replies, and goes back to accept.  The order
+ * in which an acceptor takes requests is therefore the network's -- the
+ * checker's -- choice, which is what makes the search meaningful.
  *
  * Proposer i uses ballot i+1 and proposes value i+1.  Phase 1 sends
  * PREPARE to acceptors 2, 3, 4 in turn until a majority has promised;
  * phase 2 sends ACCEPT(ballot, v) to those that promised, where v is
  * the value of the highest-ballot acceptance among the promises, else
- * its own.  It decides v once a majority accepted.
+ * its own.  It decides v once a majority accepted.  The safety property
+ * is agreement: the two proposers never decide different values.
  *
  * -DBUG: the proposer ignores the values in the promises and always
  * proposes its own -- the classic mistake that lets the two proposers
- * decide different values.
+ * decide different values.  cmc finds it.
  *
  * Canonical state on fd 3 (it must hold everything the node's future
  * depends on, its program position included):
- *   proposer: [count=8][phase][k][ok][prom][hb][hv][acc][decided]
+ *   proposer: [count=8][phase][k][ok][prom][hb][hv][decided]
  *   acceptor: [count=3][promised][accepted ballot][accepted value]
  * The acceptor persists its state (fd 193) before it replies, as Paxos
- * requires; a proposer persists its decision.  A crashed node keeps only
- * that.
+ * requires; a proposer persists its decision.  A crashed node keeps
+ * only that durable state.
  *
- *   cc -O1 -no-pie -o paxos test/proc/paxos.c
+ *   cc -no-pie -o paxos examples/paxos/paxos.c
+ *   cmc --model-file examples/paxos/paxos.model --binary ./paxos
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>

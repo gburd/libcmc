@@ -479,7 +479,12 @@ simulation per M7).  `demo/paxos.c` is the M7 sizing workload, not yet
 the Paxos example: the example adds a client, the durable-state
 invariants, and the write-up:
 
-1. single-decree **Paxos** -- the smallest real consensus;
+1. single-decree **Paxos** -- the smallest real consensus.  **Done**
+   (`examples/paxos/`): two proposers and three acceptors as five
+   processes, agreement checked; the correct protocol passes (561 states
+   with no faults, 30,075 with one crash and one drop), the
+   promised-values bug is caught by search and by simulation.  `make
+   check` builds and checks it;
 2. **Raft** -- leader election plus log replication, the recognised one;
 3. **Humming Consensus** -- checked as a real implementation (its safety
    properties, agreement and no-lost-ack; not the shared-register state

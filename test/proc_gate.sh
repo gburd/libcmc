@@ -28,12 +28,15 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg paxos clocks; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
-for f in repl elect lease durlog paxos; do
+for f in repl elect lease durlog; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
+# the Paxos example is a real, tested fixture too (examples/paxos/)
+$CC -O1 -no-pie -w -o "$B/proc/paxos" "$HERE/examples/paxos/paxos.c" || { echo "proc_gate: paxos.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/paxos-bug" "$HERE/examples/paxos/paxos.c" || { echo "proc_gate: paxos.c -DBUG does not build"; fail=1; }
 
 # expect DESC EXIT NEEDLE cmc-args...: the exit status, and a line of output
 expect() {
@@ -51,6 +54,9 @@ expect() {
 run() {		# run MODEL BINARY: the --model-file arguments for a fixture
 	echo "--model-file $T/$1.model --binary $B/proc/$2"
 }
+runx() {	# runx MODELPATH BINARY: for a model file outside test/proc/
+	echo "--model-file $1 --binary $B/proc/$2"
+}
 
 echo "-- verdicts"
 expect "repl: correct holds"               0 "No error has been found" $(run repl repl)
@@ -62,10 +68,10 @@ expect "lease: stale lease caught"         1 "no_write_after_expiry is violated"
 expect "durlog: correct holds"             0 "No error has been found" $(run durlog durlog)
 expect "durlog: lost commit caught"        1 "no_lost_commit is violated" $(run durlog durlog-bug)
 expect "durlog: the bug needs the crash"   0 "No error has been found" $(run durlog durlog-bug) --crashes 0
-expect "paxos: correct holds (N=5)"        0 "No error has been found" $(run paxos paxos)
-expect "paxos: two values decided"         1 "agreement is violated" $(run paxos paxos-bug)
-expect "paxos: --simulate finds it"        1 "agreement is violated" $(run paxos paxos-bug) --simulate --seed 1 --walks 2000
-expect "paxos: --simulate is not a pass"   2 "not exhaustive" $(run paxos paxos) --simulate --seed 1 --walks 50
+expect "paxos: correct holds (N=5)"        0 "No error has been found" $(runx "$HERE/examples/paxos/paxos.model" paxos)
+expect "paxos: two values decided"         1 "agreement is violated" $(runx "$HERE/examples/paxos/paxos.model" paxos-bug)
+expect "paxos: --simulate finds it"        1 "agreement is violated" $(runx "$HERE/examples/paxos/paxos.model" paxos-bug) --simulate --seed 1 --walks 2000
+expect "paxos: --simulate is not a pass"   2 "not exhaustive" $(runx "$HERE/examples/paxos/paxos.model" paxos) --simulate --seed 1 --walks 50
 expect "idle: time passing is not merged"  1 "never_late is violated" $(run idle idle)
 expect "fifo: a connection is in order"    0 "No error has been found" $(run fifo fifo)
 expect "chain: any topology the nodes dial" 1 "not_reached is violated" $(run chain chain)
@@ -80,7 +86,7 @@ expect "clocks teeth: gettimeofday is the logical clock" 1 "wrong_clock is viola
 printf '[target]\nnodes = 2\n[environment]\ntimeouts = 1\n[invariants]\nwrong_random = "node[0][1] != 0"\n' > "$OUT/rnd-wrong.model"
 expect "clocks teeth: getrandom is engine-zeroed"      1 "wrong_random is violated" --model-file "$OUT/rnd-wrong.model" --binary "$B/proc/clocks"
 expect "a depth bound is INCOMPLETE"       2 "depth bound" $(run durlog durlog-bug) --depth 2
-expect "a state bound is INCOMPLETE"       2 "max states" $(run paxos paxos) --max-states 10
+expect "a state bound is INCOMPLETE"       2 "max states" $(runx "$HERE/examples/paxos/paxos.model" paxos) --max-states 10
 expect "an over-long write is an error"    1 "limit is 64" $(run bigmsg bigmsg)
 expect "the counterexample is named"       1 "crash n0" $(run durlog durlog-bug)
 

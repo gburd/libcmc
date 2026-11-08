@@ -1,0 +1,20 @@
+# examples/paxos/paxos.c, single-decree Paxos, checked as it ships.
+# Two proposers (nodes 0, 1) and three acceptors (nodes 2, 3, 4), each a
+# process; cmc is the network between them.  node[0][7] and node[1][7]
+# are the proposers' decided values (0 = none; a crashed proposer that
+# never decided has no state, so the byte reads -1, also "none").
+#
+#   cc -no-pie -o paxos examples/paxos/paxos.c
+#   cmc --model-file examples/paxos/paxos.model --binary ./paxos
+#
+# Add crashes and drops to search harder (see the README):
+#   cmc --model-file examples/paxos/paxos.model --binary ./paxos --crashes 1 --drops 1
+[target]
+nodes = 5
+
+[invariants]
+# Agreement: the one safety property of single-decree Paxos.  Two
+# proposers never decide different values.  Checked in every reachable
+# state, including after a crash (when a node's state is what it made
+# durable).
+agreement = "node[0][7] <= 0 or node[1][7] <= 0 or node[0][7] == node[1][7]"
