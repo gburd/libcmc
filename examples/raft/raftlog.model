@@ -1,0 +1,18 @@
+# examples/raft/raftlog.c: Raft log replication.  A log entry is
+# committed only once a quorum has stored it, then acknowledged; a
+# committed entry must never be lost.  node[i] = [term][committed
+# value]; a crash keeps the durable (committed) record.
+#
+#   cc -no-pie -o raftlog examples/raft/raftlog.c
+#   cmc --model-file examples/raft/raftlog.model --binary ./raftlog --crashes 1
+[target]
+nodes = 3
+
+[environment]
+client_write = 7        # a client submits command 7 to the leader (node 0)
+crashes = 1             # a node may crash
+
+[invariants]
+# State Machine Safety (committed entries): every committed (acknowledged)
+# command is still held by some node.  Ongaro, raft.tla.
+no_lost_committed = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"

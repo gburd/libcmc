@@ -9,7 +9,9 @@ theorem leader election must satisfy: **Election Safety**, at most one
 leader per term.
 
 (This is the election half of Raft.  Log replication is a separate
-concern; this example is complete and real for what it covers.)
+concern; this example is complete and real for what it covers.)  The
+companion [`raftlog.c`](raftlog.c) is the log-replication half: it checks
+that a committed entry is never lost, the failure Brooker animates.
 
 ## Reference
 
@@ -27,10 +29,13 @@ concern; this example is complete and real for what it covers.)
 - **See a lost write, animated**: Marc Brooker (AWS) animates a Raft
   cluster losing an acknowledged write when durability is not truly
   achieved, in *Animations for System Builders*:
-  <https://brooker.co.za/blog/2026/10/23/animations.html>.  libcmc
-  catches that failure class in the chain-replication
-  ([`examples/hc`](../hc)) and ZAB ([`examples/zab`](../zab)) examples; a
-  future Raft log-replication example will show it here directly.
+  <https://brooker.co.za/blog/2026/10/23/animations.html>.  The
+  companion `raftlog.c` here shows exactly that failure: a leader that
+  commits and acknowledges a client before a quorum has the entry, then
+  crashes, loses a committed entry (State Machine Safety), and cmc
+  prints the shortest schedule that does it.  The chain-replication
+  ([`examples/hc`](../hc)) and ZAB ([`examples/zab`](../zab)) examples
+  catch the same failure class.
 
 ## The protocol
 

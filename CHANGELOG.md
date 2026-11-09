@@ -11,7 +11,10 @@ change the API in `include/cmc.h`; this file says when it does.
   an early-ack bug loses an acknowledged write to a crash and is caught.
   `zab/`: ZooKeeper Atomic Broadcast (a leader and two followers)
   checked for no-lost-commit; an early-ack bug loses a committed
-  transaction to a leader crash.  Both are the acknowledged-write-lost
+  transaction to a leader crash.  `raft/raftlog.c`: Raft log
+  replication, checked for State Machine Safety (a committed entry is
+  never lost); the leader that commits before a quorum has the entry
+  loses it on a crash -- the failure Marc Brooker (AWS) animates.  Both are the acknowledged-write-lost
   failure Marc Brooker (AWS) animates in "Animations for System
   Builders".
 - Each example cites its canonical formal reference -- Paxos (Lamport's
