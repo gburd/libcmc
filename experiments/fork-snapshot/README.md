@@ -74,10 +74,34 @@ probe times out midway (it still prints the facts above first).
 
 ## Still to prove before touching `src/`
 
-- manage a tree of frozen snapshots (re-fork a snapshot before resuming
-  it, so it can be resumed again for the next sibling), and reap them
-  without zombies or fd leaks; the inherited seccomp listener fd and the
-  `PTRACE_SEIZE` relationship both need care across the fork;
+`refork.c` tests the step the DFS search needs: re-forking **one** frozen
+snapshot repeatedly, resuming each copy to re-issue its blocked syscall.
+It surfaced two mechanics the single-snapshot `probe.c` did not:
+
+- A snapshot made by fork injection is left **already ptrace-stopped and
+  attached** (`waitpid` reports `PTRACE_EVENT_STOP`, `GETREGSET`
+  succeeds).  So to re-fork it you read its registers directly -- a
+  second `PTRACE_INTERRUPT` waits for a stop that never comes and hangs.
+- Re-forking that snapshot a *second* time currently fails: the first
+  re-fork drives the snapshot through a `fork` syscall and restores its
+  registers, but it does not return to the same re-forkable stopped
+  state, so the next `GETREGSET`/inject does not take.  And a resumed
+  copy, detached and let run, did not raise a serviceable fresh
+  notification on the shared listener in the test harness.
+
+So the DFS engine design -- freeze a quiescent world once and re-fork it
+once per enabled action -- is not yet mechanically sound.  Resolving it
+(the exact ptrace state a re-forkable snapshot must be left in, and the
+listener/notif handshake for a resumed copy) is the gate before any of
+this goes into `src/cmc_proc.c`.  The single freeze + resume is proven
+(`probe.c`); repeated re-fork from one snapshot is not.
+
+And then, once the mechanics hold:
+
+- manage a tree of frozen snapshots and reap them without zombies or fd
+  leaks; drain the shared fd-3/fd-4 canon pipes when switching copies
+  (forked copies inherit one pipe, confirmed), with one live descendant
+  at a time so the single seccomp listener fd stays valid;
 - gate it against the replay engine: a fork-snapshot run must give
   byte-identical distinct-state counts and the same counterexamples as
   stateless replay on every `test/proc/` fixture, and be measurably
