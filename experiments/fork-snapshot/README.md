@@ -72,31 +72,31 @@ cc -O2 -o probe probe.c && ./probe     # Linux x86-64; run on a QUIET host
 A heavily loaded host starves the seccomp/ptrace handshake and the
 probe times out midway (it still prints the facts above first).
 
-## Still to prove before touching `src/`
+## The snapshot chain works (`chain.c`)
 
-`refork.c` tests the step the DFS search needs: re-forking **one** frozen
-snapshot repeatedly, resuming each copy to re-issue its blocked syscall.
-It surfaced two mechanics the single-snapshot `probe.c` did not:
+`refork.c` found that re-forking **one** snapshot repeatedly did not
+work.  `chain.c` resolves it with the right model, proven on Linux
+x86-64: a frozen master is forked **exactly once**, yielding a worker
+(the parent, resumed for this action) and a next frozen master (the
+child).  The DFS holds one frozen master per stack level and chains
+forward; no master is re-forked.  Three mechanics the single-snapshot
+probe did not show:
 
-- A snapshot made by fork injection is left **already ptrace-stopped and
-  attached** (`waitpid` reports `PTRACE_EVENT_STOP`, `GETREGSET`
-  succeeds).  So to re-fork it you read its registers directly -- a
-  second `PTRACE_INTERRUPT` waits for a stop that never comes and hangs.
-- Re-forking that snapshot a *second* time currently fails: the first
-  re-fork drives the snapshot through a `fork` syscall and restores its
-  registers, but it does not return to the same re-forkable stopped
-  state, so the next `GETREGSET`/inject does not take.  And a resumed
-  copy, detached and let run, did not raise a serviceable fresh
-  notification on the shared listener in the test harness.
+1. Fork once -> (worker, next master).  The child is auto-attached
+   (`PTRACE_O_TRACEFORK`) and left stopped at the syscall boundary -- a
+   pristine snapshot, re-forkable in turn.
+2. Resume a worker with `PTRACE_CONT`, **not** `PTRACE_DETACH`: it must
+   stay our tracee or `process_vm_readv` gives `EPERM` under yama
+   `ptrace_scope = 1` (a detached grandchild is not readable).
+3. Zero the `seccomp_notif` buffer before **every** `NOTIF_RECV`, or the
+   ioctl gives `EINVAL`.
 
-So the DFS engine design -- freeze a quiescent world once and re-fork it
-once per enabled action -- is not yet mechanically sound.  Resolving it
-(the exact ptrace state a re-forkable snapshot must be left in, and the
-listener/notif handshake for a resumed copy) is the gate before any of
-this goes into `src/cmc_proc.c`.  The single freeze + resume is proven
-(`probe.c`); repeated re-fork from one snapshot is not.
+Each worker re-issues its blocked `write()` and raises a fresh
+notification the checker services; every chained master stays pristine.
+`chain.c` prints `OK` for three workers.  This is the gate that was
+missing; the engine integration follows it.
 
-And then, once the mechanics hold:
+## Still to do in `src/`
 
 - manage a tree of frozen snapshots and reap them without zombies or fd
   leaks; drain the shared fd-3/fd-4 canon pipes when switching copies
