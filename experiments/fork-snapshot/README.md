@@ -98,6 +98,29 @@ missing; the engine integration follows it.
 
 ## Still to do in `src/`
 
+The `--fast` snapshot-DFS is wired into `src/cmc_proc.c` on the branch
+`m9-fast-wip` (off `main`, off by default, not sound yet).  Two results
+from integrating it:
+
+- **Resume is by the kernel's syscall-restart, not a hand rewind.**  The
+  single-snapshot probe suggested rewinding `rip` to the syscall
+  instruction.  In the engine that makes the resumed task take `SIGSYS`
+  and die.  The correct resume restores the *exact* ptrace-stop
+  registers (`rip` just past the syscall, `rax = -ERESTARTSYS`) and lets
+  the kernel re-issue the interrupted syscall itself; it then raises the
+  fresh notification.  Verified: a one-node `accept()`-blocked worker,
+  resumed, re-traps to the notification (process state S) instead of
+  running on.
+- **Open bug: connection fds across a resume.**  Through the full
+  `dfs()`, a resumed node ends up reading a *real* fd (~75000) that the
+  checker's connection map does not know, instead of a checker-assigned
+  virtual fd (>= 500).  The re-issued syscall of a connection-mediated
+  node is escaping interception / fd bookkeeping in the forked copy.
+  This must be resolved before `--fast` gives a verdict on any
+  multi-connection fixture.
+
+Then, before `--fast` can ship (still off by default):
+
 - manage a tree of frozen snapshots and reap them without zombies or fd
   leaks; drain the shared fd-3/fd-4 canon pipes when switching copies
   (forked copies inherit one pipe, confirmed), with one live descendant
@@ -105,5 +128,5 @@ missing; the engine integration follows it.
 - gate it against the replay engine: a fork-snapshot run must give
   byte-identical distinct-state counts and the same counterexamples as
   stateless replay on every `test/proc/` fixture, and be measurably
-  faster, before it becomes the default.  (The replay engine stays as
-  the oracle it is checked against.)
+  faster.  (The replay engine stays as the oracle it is checked
+  against.)
