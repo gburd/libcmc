@@ -1,0 +1,15 @@
+# examples/raft/raft.c: Raft leader election, three nodes.  cmc owns the
+# election timers and the message order, so it explores every race.
+# node[i] = [role][currentTerm][votedFor+1]; role 2 = leader.
+#
+#   cc -no-pie -o raft examples/raft/raft.c
+#   cmc --model-file examples/raft/raft.model --binary ./raft
+[target]
+nodes = 3
+
+[environment]
+timeouts = 2        # two nodes may time out and stand for election
+
+[invariants]
+# Election Safety: no two nodes are leader in the same term.
+election_safety = "not (node[0][0] == 2 and node[1][0] == 2 and node[0][1] == node[1][1]) and not (node[0][0] == 2 and node[2][0] == 2 and node[0][1] == node[2][1]) and not (node[1][0] == 2 and node[2][0] == 2 and node[1][1] == node[2][1])"

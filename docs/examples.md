@@ -19,5 +19,11 @@ in the source tree, and `make check` builds and checks each one.
   proposer ignores the promised values decides two different values, and
   cmc prints the shortest schedule that reaches it.
 
-More consensus protocols (Raft, Humming Consensus, ZAB) follow, each as
-a real implementation checked for agreement and no lost committed entry.
+- **[Raft leader election](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/raft)**
+  -- three nodes; the checker owns the election timers and explores every
+  race, checking Election Safety (at most one leader per term).  The
+  correct protocol holds, with and without a crash; a build that grants a
+  vote twice in a term elects two leaders, and cmc finds it.
+
+More consensus protocols (Humming Consensus, ZAB) follow, each a real
+implementation checked for agreement and no lost committed entry.

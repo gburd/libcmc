@@ -19,10 +19,13 @@ change the API in `include/cmc.h`; this file says when it does.
 - The loader refuses every model-file section, key or value it does not
   implement, and every invariant it cannot parse whole, instead of
   ignoring it.
-- A worked example, `examples/paxos/`: single-decree Paxos (two
-  proposers, three acceptors, five processes) checked for agreement, with
-  a planted promised-values bug caught by search and by simulation.
-  `make check` builds and checks it.
+- Worked examples under `examples/`, checked as they ship.  `paxos/`:
+  single-decree Paxos (two proposers, three acceptors, five processes)
+  checked for agreement, with a planted promised-values bug caught by
+  search and by simulation.  `raft/`: Raft leader election (three nodes)
+  checked for Election Safety with and without a crash, with a
+  double-vote bug that elects two leaders in a term.  `make check`
+  builds and checks both.
 - A timeout can now fire at a node idle in `accept()`, not only one
   blocked in `recv`: the node accepts a synthetic timer connection and
   reads `T` from it.  A server that waits for a peer to connect can thus
