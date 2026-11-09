@@ -243,6 +243,8 @@ proc_main(int argc, char **argv)
 			po.simulate = 0;
 		else if (!strcmp(a, "--simulate"))
 			po.simulate = 1;
+		else if (!strcmp(a, "--fast"))
+			po.fast = 1;
 		else if (!strcmp(a, "--seed"))
 			po.seed = strtoull(ARG(), NULL, 10);
 		else if (!strcmp(a, "--walks"))

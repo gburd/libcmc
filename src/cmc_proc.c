@@ -43,6 +43,7 @@
 #if defined(__linux__) && defined(__x86_64__)
 
 #include <ctype.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -62,6 +63,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/user.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -715,8 +717,12 @@ reap(Node *nd)
 {
 	if (!nd->alive) return;
 	int st; pid_t r = waitpid(nd->pid, &st, WNOHANG);
-	/* clear the pid once reaped, so kill_all never signals a reused one */
-	if (r == nd->pid) { nd->alive = 0; nd->pid = 0; drain_canon(nd); }
+	/* only an exit or a fatal signal is death.  A --fast worker is a
+	 * ptrace tracee and may report ptrace stops (PTRACE_EVENT_STOP, a
+	 * group-stop); those are not death and must be left for the search's
+	 * own ptrace handling, not mistaken for a crash. */
+	if (r == nd->pid && (WIFEXITED(st) || WIFSIGNALED(st)))
+	{ nd->alive = 0; nd->pid = 0; drain_canon(nd); }
 }
 
 /* answer a blocked node's deferred syscall with return value val */
@@ -1180,6 +1186,232 @@ q_root(void)
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double) t.tv_sec + t.tv_nsec / 1e9; }
 
+/* ================================================================== */
+/* --fast: snapshot-DFS (experiments/fork-snapshot proved the mechanic) */
+/* ================================================================== */
+/*
+ * Instead of replaying each world from a fresh launch, freeze the node
+ * processes at a quiescent point and resume a copy per enabled action.
+ * A frozen "master" node is forked exactly once -> (a worker that runs
+ * the action, a next frozen master for the next action); the DFS holds
+ * one master per node per stack level and chains forward (chain.c).
+ *
+ * The search is the same as BFS's except for how a world is reached, so
+ * it reuses enum_actions/apply/drive_quiescent/check_invariants/
+ * world_fp/mark unchanged.  After resuming a world from a snapshot its
+ * fingerprint MUST equal the snapshot's, or the resume was not faithful
+ * -- the engine stops rather than risk a wrong verdict.
+ *
+ * It is complete (dedup via the seen set) but does not give shortest
+ * counterexamples, so it is opt-in (--fast); BFS stays the default and
+ * the oracle it is gated against.  Bounded live processes: one worker
+ * plus one master per node per depth level.
+ */
+typedef struct {
+	/* the checker-side world */
+	Node		node[MAXNODES];
+	Msg			bag[MAXMSG];
+	int			chcount[MAXNODES + 1][MAXNODES];
+	unsigned char rep_src[MAXREP], rep_val[MAXREP];
+	int			nrep;
+	Budget		bud;
+	unsigned long long logical_ns;
+	/* per node: the frozen master pid (ptrace-stopped at its boundary)
+	 * and its saved registers; 0 = node not alive at this world */
+	pid_t		master[MAXNODES];
+	struct user_regs_struct saved[MAXNODES];
+} WorldSnap;
+
+/* copy the live checker-side globals into / out of a WorldSnap */
+static void
+snap_save_globals(WorldSnap *w)
+{
+	memcpy(w->node, N, sizeof N);
+	memcpy(w->bag, bag, sizeof bag);
+	memcpy(w->chcount, chcount, sizeof chcount);
+	memcpy(w->rep_src, rep_src, sizeof rep_src);
+	memcpy(w->rep_val, rep_val, sizeof rep_val);
+	w->nrep = nrep; w->bud = bud; w->logical_ns = logical_ns;
+}
+static void
+snap_restore_globals(const WorldSnap *w)
+{
+	memcpy(N, w->node, sizeof N);
+	memcpy(bag, w->bag, sizeof bag);
+	memcpy(chcount, w->chcount, sizeof chcount);
+	memcpy(rep_src, w->rep_src, sizeof rep_src);
+	memcpy(rep_val, w->rep_val, sizeof rep_val);
+	nrep = w->nrep; bud = w->bud; logical_ns = w->logical_ns;
+}
+
+/* bring a live, blocked node process to a ptrace stop and read its
+ * registers; it becomes a frozen master */
+static int
+freeze_master(pid_t pid, struct user_regs_struct *saved)
+{
+	if (ptrace(PTRACE_INTERRUPT, pid, 0, 0)) return -1;
+	int st;
+	for (int t = 0; t < 2000; t++)
+	{
+		pid_t ww = waitpid(pid, &st, WNOHANG);
+		if (ww == pid) { struct iovec rv = {saved, sizeof *saved};
+			return ptrace(PTRACE_GETREGSET, pid, (void *) (long) NT_PRSTATUS, &rv); }
+		if (ww < 0) return -1;
+		usleep(500);
+	}
+	return -1;
+}
+
+/* fork a frozen master once; *worker = the parent (restored to the
+ * boundary, ptrace-stopped), return = the child (a fresh frozen master).
+ * chain.c proves this does not disturb either and can chain forward. */
+static pid_t
+fork_master(pid_t master, struct user_regs_struct saved, pid_t *worker)
+{
+	ptrace(PTRACE_SETOPTIONS, master, 0, (void *) (long) PTRACE_O_TRACEFORK);
+	struct user_regs_struct r = saved;
+	r.orig_rax = SYS_fork; r.rax = SYS_fork; r.rip = saved.rip - 2;
+	struct iovec wv = {&r, sizeof r};
+	ptrace(PTRACE_SETREGSET, master, (void *) (long) NT_PRSTATUS, &wv);
+	ptrace(PTRACE_CONT, master, 0, 0);
+	int st; waitpid(master, &st, 0);
+	if ((st >> 8) != (SIGTRAP | (PTRACE_EVENT_FORK << 8))) return -1;
+	unsigned long m = 0; ptrace(PTRACE_GETEVENTMSG, master, 0, &m);
+	pid_t child = (pid_t) m; waitpid(child, &st, 0);
+	/* the next master: restore it to the exact boundary, leave it frozen */
+	struct iovec rv = {&saved, sizeof saved};
+	ptrace(PTRACE_SETREGSET, child, (void *) (long) NT_PRSTATUS, &rv);
+	/* the worker: rewind rip onto the syscall instruction and re-arm the
+	 * syscall (rax = orig_rax) so, when resumed, it RE-ISSUES its blocked
+	 * syscall and raises a fresh notification -- rather than continuing
+	 * past it with the stale -ERESTARTSYS return */
+	struct user_regs_struct wrk = saved;
+	wrk.rip = saved.rip - 2;
+	wrk.rax = saved.orig_rax;
+	struct iovec wrkv = {&wrk, sizeof wrk};
+	ptrace(PTRACE_SETREGSET, master, (void *) (long) NT_PRSTATUS, &wrkv);
+	*worker = master;
+	return child;
+}
+
+/* kill a stopped/running pid we trace, reaping it */
+static void
+kill_pid(pid_t pid)
+{
+	if (pid <= 0) return;
+	kill(pid, SIGKILL);
+	int st; waitpid(pid, &st, 0);
+}
+
+/* Resume world `w` as the live world: for each alive node, fork its
+ * master to a worker (keeping a fresh master in w for the next sibling),
+ * PTRACE_CONT the worker so it re-issues its blocked syscall, then
+ * drive to quiescence so the fresh notifs re-establish N[].block_*.
+ * Drains the shared canon pipes first so no stale bytes from a prior
+ * sibling's worker are read.  Verifies the resumed fingerprint. */
+static void
+resume_world(WorldSnap *w, const uint64_t want_fp[2])
+{
+	snap_restore_globals(w);
+	for (int i = 0; i < M.nodes; i++)
+	{
+		if (!N[i].alive) continue;
+		/* drain any stale canon the pipe holds from a killed sibling */
+		unsigned char junk[4096];
+		int fl = fcntl(N[i].fd3[0], F_GETFL); fcntl(N[i].fd3[0], F_SETFL, fl | O_NONBLOCK);
+		while (read(N[i].fd3[0], junk, sizeof junk) > 0) ;
+		fl = fcntl(N[i].fd4[0], F_GETFL); fcntl(N[i].fd4[0], F_SETFL, fl | O_NONBLOCK);
+		while (read(N[i].fd4[0], junk, sizeof junk) > 0) ;
+		pid_t worker;
+		pid_t next = fork_master(w->master[i], w->saved[i], &worker);
+		if (next < 0) die(1, "--fast: could not fork the snapshot of node %d", i);
+		w->master[i] = next;		/* chain: keep a fresh master for the next action */
+		N[i].pid = worker;
+		N[i].blocked = 0;			/* the worker will re-raise its notif */
+		ptrace(PTRACE_CONT, worker, 0, 0);
+	}
+	drive_quiescent();
+	if (want_fp)
+	{
+		uint64_t got[2]; world_fp(got);
+		if (got[0] != want_fp[0] || got[1] != want_fp[1])
+			die(1, "--fast: a resumed world did not match its snapshot (resume is not faithful)");
+	}
+}
+
+/* kill every worker/master of the current live world + a snapshot */
+static void
+free_snap(WorldSnap *w)
+{
+	for (int i = 0; i < M.nodes; i++) kill_pid(w->master[i]);
+}
+
+/* the DFS result: -1 running, 0 complete-clean, 1 violation (reported) */
+static int g_violation;
+static size_t g_distinct, g_states;
+static int g_maxdepth;
+static long g_depthcap;
+static size_t g_maxstates;
+static double g_t0, g_tlimit;
+static int g_stop;				/* a limit was hit */
+
+/* explore the current live world and everything below it.  On entry the
+ * live N[]/bag ARE this world, already driven to quiescence. */
+static int
+dfs(int depth)
+{
+	int which = -1;
+	if (!check_invariants(&which))
+	{
+		if (which == -2) return 3;
+		g_violation = 1;
+		/* --fast gives no shortest trace; report the world, no action list */
+		printf("Error: Invariant %s is violated (found by --fast; rerun without --fast for the shortest trace).\n",
+			   M.inv[which].name);
+		printf("  node states:");
+		for (int i = 0; i < M.nodes; i++) { printf(" node[%d]=", i);
+			if (!N[i].canon_len) printf("()");
+			for (int k = 0; k < N[i].canon_len; k++) printf("%s%d", k ? "," : "", N[i].canon[k]); }
+		printf("\n  replies:"); for (int i = 0; i < nrep; i++) printf(" (n%d,%d)", rep_src[i], rep_val[i]);
+		printf("%s\n", nrep ? "" : " none");
+		return 1;
+	}
+	uint64_t fp[2]; world_fp(fp);
+	g_states++;
+	if (!mark(fp[0], fp[1])) return 0;		/* already explored */
+	g_distinct++;
+	if (depth > g_maxdepth) g_maxdepth = depth;
+
+	Act acts[MAXACT]; int na = enum_actions(acts);
+	if (na == 0) return 0;
+	if (g_depthcap >= 0 && depth >= g_depthcap) { g_stop = 1; return 0; }
+	if ((g_maxstates && g_distinct >= g_maxstates) ||
+		(g_tlimit > 0 && now_s() - g_t0 > g_tlimit)) { g_stop = 1; return 0; }
+
+	/* snapshot this world: freeze every live node to a master */
+	WorldSnap w;
+	for (int i = 0; i < M.nodes; i++) w.master[i] = 0;
+	for (int i = 0; i < M.nodes; i++)
+		if (N[i].alive)
+		{
+			if (freeze_master(N[i].pid, &w.saved[i])) die(1, "--fast: could not freeze node %d", i);
+			w.master[i] = N[i].pid;
+		}
+	snap_save_globals(&w);
+
+	int rc = 0;
+	for (int ai = 0; ai < na && !rc && !g_stop; ai++)
+	{
+		resume_world(&w, fp);			/* live world := this world (verified) */
+		apply(&acts[ai]);
+		rc = dfs(depth + 1);
+		/* kill this action's workers (the live world) */
+		for (int i = 0; i < M.nodes; i++) if (N[i].pid > 0) kill_pid(N[i].pid);
+	}
+	free_snap(&w);
+	return rc;
+}
+
 /* splitmix64: the walk's seeded choices */
 static uint64_t rng;
 static uint64_t next_rand(void) { uint64_t z = (rng += 0x9e3779b97f4a7c15ULL); z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL; z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL; return z ^ (z >> 31); }
@@ -1209,12 +1441,39 @@ cmc_proc_main(const CmcProcOptions *po)
 	double t0 = now_s();
 
 	printf("cmc: model file %s, binary %s, %d node%s, %s\n", po->model_file, M.binary, M.nodes,
-		   M.nodes == 1 ? "" : "s", po->simulate ? "random simulation" : "breadth-first search");
+		   M.nodes == 1 ? "" : "s", po->fast ? "snapshot-DFS (--fast)" : po->simulate ? "random simulation" : "breadth-first search");
 	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d",
 		   M.client_write, M.timeouts, M.crashes, M.drops);
 	if (depth >= 0) printf(", depth %ld", depth);
 	printf("\n");
 	fflush(stdout);
+
+	if (po->fast)
+	{
+		/* snapshot-DFS: freeze worlds and resume copies instead of
+		 * replaying from launch.  Complete but not shortest, so opt-in;
+		 * gated byte-identical against BFS by the proc gate. */
+		g_depthcap = depth; g_maxstates = po->max_states;
+		g_t0 = t0; g_tlimit = po->time_limit;
+		Act a[MAXACT]; int na;
+		if (run_seq(NULL, 0, a, &na)) die(3, "a node would not start");
+		int rc = dfs(0);
+		for (int i = 0; i < M.nodes; i++) if (N[i].pid > 0) kill_pid(N[i].pid);
+		double dt = now_s() - t0;
+		if (rc == 3) return 3;
+		if (rc == 1) return 1;
+		if (g_stop)
+		{
+			printf("INCOMPLETE (no violation found): a limit stopped --fast; %zu distinct states, %zu checked, %.1f s\n",
+				   g_distinct, g_states, dt);
+			return 2;
+		}
+		printf("Model checking completed. No error has been found.\n");
+		printf("%zu states generated, %zu distinct states found, 0 states left on queue.\n", g_states, g_distinct);
+		printf("The depth of the complete state graph search is %d.\n", g_maxdepth + 1);
+		printf("  %d invariant%s held; --fast (snapshot-DFS); %.1f s.\n", M.ninv, M.ninv == 1 ? "" : "s", dt);
+		return 0;
+	}
 
 	if (po->simulate)
 	{
