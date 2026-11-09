@@ -5,6 +5,8 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 0.3.0 (2026-11-09)
+
 - The Humming Consensus example (`hc/`) is now the GENERIC agreement
   protocol it is -- like Paxos, Raft and ZAB -- not chain replication.
   Three participants agree on an opaque configuration per epoch over
