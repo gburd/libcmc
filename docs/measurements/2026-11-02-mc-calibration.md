@@ -1,6 +1,6 @@
 ---
 title: "Calibration against TLC"
-parent: Background
+parent: History and provenance
 nav_order: 3
 permalink: /background/calibration/
 lede: >-

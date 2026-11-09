@@ -1,6 +1,6 @@
 ---
 title: "Survey and original design"
-parent: Background
+parent: History and provenance
 nav_order: 1
 permalink: /background/survey/
 lede: >-

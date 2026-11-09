@@ -1,6 +1,6 @@
 ---
 title: "Process mode M1: canonical state and a real search"
-parent: Background
+parent: History and provenance
 nav_order: 5
 permalink: /background/process-mode-m1/
 lede: >-

@@ -1,6 +1,6 @@
 ---
 title: "Process mode M5b: absolute time is engine-controlled"
-parent: Background
+parent: History and provenance
 nav_order: 11
 permalink: /background/process-mode-m5b/
 lede: >-

@@ -1,6 +1,6 @@
 ---
 title: "Decision: one engine, a model file, the shipping binary"
-parent: Background
+parent: History and provenance
 nav_order: 7
 permalink: /background/decision-model-file/
 lede: >-

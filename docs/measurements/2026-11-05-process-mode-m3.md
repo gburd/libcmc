@@ -1,6 +1,6 @@
 ---
 title: "Process mode M3: a model file drives the checker"
-parent: Background
+parent: History and provenance
 nav_order: 8
 permalink: /background/process-mode-m3/
 lede: >-

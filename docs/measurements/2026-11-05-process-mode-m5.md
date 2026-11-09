@@ -1,6 +1,6 @@
 ---
 title: "Process mode M5: time is an environment action"
-parent: Background
+parent: History and provenance
 nav_order: 10
 permalink: /background/process-mode-m5/
 lede: >-

@@ -1,16 +1,20 @@
 ---
-title: Background
-nav_order: 5
+title: History and provenance
+nav_exclude: true
 has_children: true
 permalink: /background/
 lede: >-
-  The research libcmc grew out of, the review that hardened it, and its calibration.
+  The research libcmc grew out of, the review that hardened it, its calibration, and the process-mode lab notebook.
 ---
 
-The survey that led to libcmc's design, the adversarial review of its
-actor mode with the fix for each finding, and its calibration against
-TLC, all from 2026-11-02.  The current design is
-[Design]({{ '/reference/design/' | relative_url }}).
+This is a lab notebook, not a roadmap: the survey that led to libcmc's
+design, the adversarial review of its actor mode with the fix for each
+finding, the calibration against TLC, and the process-mode milestones as
+they were built.  Every milestone below is done and shipped; the pages
+are dated records of work already in the engine.  For the tool as it is,
+start at [Design]({{ '/reference/design/' | relative_url }}),
+[the model file]({{ '/reference/model-file/' | relative_url }}) and the
+[examples]({{ '/examples/' | relative_url }}).
 
 - [Survey and original design]({{ '/background/survey/' | relative_url }})
 - [Adversarial review of actor mode]({{ '/background/review/' | relative_url }})

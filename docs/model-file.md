@@ -163,6 +163,27 @@ An invariant holds in a state when its expression is true there.  A
 violation prints the shortest sequence of actions that reaches the
 failing state, by name, and each node's state there.
 
+### `eventually`: a bounded reachability check
+
+An invariant prefixed `eventually` is satisfied if **some** reached
+state satisfies its expression; it is reported, as a violation, only at
+the end of an **exhaustive** search that reached no such state.  A
+bounded search (a depth, state or time limit, or `--simulate`) does not
+report it, since "not seen yet" there is not a real failure.
+
+This is reachability, not fairness-based liveness.  It answers "can the
+system reach a good state at all" (a leader is elected, a value is
+chosen), which catches a protocol that can *never* make progress.  It
+does not answer "does every execution eventually make progress" -- that
+is a temporal property over infinite fair runs, which the process front
+end does not check (it cannot restore a world to close a cycle).  The
+in-process calibration engine does have fair-schedule bounded liveness
+(`CMC_EVENTUALLY_PROP`); see [Design]({{ '/reference/design/' | relative_url }}).
+
+```
+elected = "eventually some i in nodes : node[i].role == 2"
+```
+
 ## Exit status
 
 0: no violation, and the search was complete.  1: a violation, or an

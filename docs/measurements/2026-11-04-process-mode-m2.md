@@ -1,6 +1,6 @@
 ---
 title: "Process mode M2: a real malloc heap, and the wall it hits"
-parent: Background
+parent: History and provenance
 nav_order: 6
 permalink: /background/process-mode-m2/
 lede: >-
