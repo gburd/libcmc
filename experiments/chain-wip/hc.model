@@ -1,0 +1,16 @@
+# examples/hc/hc.c: Humming Consensus / chain replication, with a
+# reconfiguration.  A client writes to the head; the spare (node 2) may
+# time out and reconfigure the chain to a new epoch, inheriting the
+# committed value; a crash may drop the old tail.  An acked write must
+# never be lost.  node[i] = [epoch][value].
+[target]
+nodes = 3
+
+[environment]
+client_write = 7        # a client writes 7 to the head (node 0)
+timeouts = 1            # the spare may reconfigure the chain once
+crashes = 1             # a node may crash (e.g. the old tail)
+
+[invariants]
+# every acknowledged write is still held by some node of the chain.
+no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"

@@ -25,5 +25,10 @@ in the source tree, and `make check` builds and checks each one.
   correct protocol holds, with and without a crash; a build that grants a
   vote twice in a term elects two leaders, and cmc finds it.
 
-More consensus protocols (Humming Consensus, ZAB) follow, each a real
-implementation checked for agreement and no lost committed entry.
+Humming Consensus and ZAB are not yet here.  Their characteristic bug --
+acknowledging a write before it is committed on a quorum -- is lost only
+if a node crashes *between* two of its own steps, and the checker today
+schedules a crash only when a node is blocked in a syscall.  Catching it
+needs the checker to interrupt a node between syscalls, a capability the
+engine does not yet have (see `experiments/chain-wip/`).  Rather than
+ship a protocol distorted to fit the tool, they wait for that.

@@ -485,11 +485,22 @@ invariants, and the write-up:
    with no faults, 30,075 with one crash and one drop), the
    promised-values bug is caught by search and by simulation.  `make
    check` builds and checks it;
-2. **Raft** -- leader election plus log replication, the recognised one;
-3. **Humming Consensus** -- checked as a real implementation (its safety
-   properties, agreement and no-lost-ack; not the shared-register state
-   counts, which were only ever the engine's TLC calibration);
-4. **ZAB** -- rounds out the set.
+2. **Raft** -- leader election, the recognised one.  **Done**
+   (`examples/raft/`): three nodes, Election Safety checked with and
+   without a crash; the double-vote bug elects two leaders and is caught.
+   (The log-replication half waits on the engine capability below.)
+3. **Humming Consensus** and 4. **ZAB** -- deferred.  Both have a
+   lost-commit bug that is lost only if a node crashes *between* two of
+   its own steps (ack-before-commit).  The checker schedules a crash
+   only at a quiescent point (a node blocked in a syscall), so that
+   window is unreachable and the planted bug is not caught; a faithful
+   example cannot be qualified yet, and distorting the protocol to force
+   a blocking point in the window would make it a toy.  They wait on a
+   new engine capability: interrupting and crashing a node *between*
+   syscalls, at an instruction boundary (adjacent to the ptrace
+   single-step machinery in `experiments/fork-snapshot/`).  A partial
+   chain-replication implementation and this finding are in
+   `experiments/chain-wip/`.
 
 They are the same shape for a checker (a leader and a replicated log,
 checked for agreement and no lost committed entry), so the engine work
