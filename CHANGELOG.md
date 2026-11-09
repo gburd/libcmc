@@ -5,6 +5,16 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The invariant language gained the expressiveness to state a protocol's
+  real safety property instead of a proxy.  `all i in nodes : EXPR` and
+  `some i in nodes : EXPR` quantify over node indices, so agreement over
+  all pairs reads like its TLA+ mirror rather than a hand-expanded list.
+  An optional `[fields]` section names byte offsets, so an invariant
+  says `node[i].epoch`, not `node[i][7]`, and does not depend on the
+  hook's layout.  An invariant prefixed `eventually` is a bounded
+  reachability check: some reached state must satisfy it, reported at
+  the end of an exhaustive search (not fairness-based liveness, which
+  the safety engine does not do).
 - Two more worked examples, checked as they ship.  `hc/`: Humming
   Consensus / chain replication (a replicated log down a chain of three
   nodes) checked for no-lost-ack across a crash and a reconfiguration;

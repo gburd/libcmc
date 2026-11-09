@@ -92,11 +92,13 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
  * drop per channel -- 2 * MAXNODES * (MAXNODES + 3) bounds the sum */
 #define MAXACT (2 * MAXNODES * (MAXNODES + 3))
 #define MAXINV 8
+#define MAXFIELD 16				/* named byte offsets in [fields] */
 
 /* =================================================================== */
 /* the model file (docs/model-file.md)                                 */
 /* =================================================================== */
-typedef struct { char name[32]; char expr[256]; } Inv;
+typedef struct { char name[32]; char expr[256]; int eventually; int seen; } Inv;
+typedef struct { char name[32]; int off; } Field;
 static struct
 {
 	char		binary[4096];	/* [target] binary, resolved against the file's directory */
@@ -106,6 +108,8 @@ static struct
 	long		depth;			/* -1 = unbounded */
 	Inv			inv[MAXINV];
 	int			ninv;
+	Field		field[MAXFIELD];/* [fields] name = byte offset, for node[i].name */
+	int			nfield;
 }			M;
 
 static char *trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
@@ -152,8 +156,8 @@ load_model(const char *path)
 			char *e = strchr(s, ']');
 			if (!e || *trim(e + 1)) { fprintf(stderr, "cmc: %s:%d: malformed section header\n", path, ln); goto bad; }
 			*e = 0;
-			if (strcmp(s + 1, "target") && strcmp(s + 1, "environment") && strcmp(s + 1, "invariants"))
-			{ fprintf(stderr, "cmc: %s:%d: unknown section [%s] (target, environment, invariants)\n", path, ln, s + 1); goto bad; }
+			if (strcmp(s + 1, "target") && strcmp(s + 1, "environment") && strcmp(s + 1, "invariants") && strcmp(s + 1, "fields"))
+			{ fprintf(stderr, "cmc: %s:%d: unknown section [%s] (target, environment, fields, invariants)\n", path, ln, s + 1); goto bad; }
 			snprintf(sect, sizeof sect, "%s", s + 1);
 			continue;
 		}
@@ -194,6 +198,19 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.drops = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
 		{ if (int_value(path, ln, k, v, 0, 1000000, &x)) goto bad; M.depth = x; }
+		else if (!strcmp(sect, "fields"))
+		{
+			/* name = byte offset, so an invariant can say node[i].epoch
+			 * instead of node[i][7] and not depend on the hook's layout */
+			if (M.nfield >= MAXFIELD) { fprintf(stderr, "cmc: %s:%d: more than %d fields\n", path, ln, MAXFIELD); goto bad; }
+			if (strlen(k) >= sizeof M.field[0].name) { fprintf(stderr, "cmc: %s:%d: field name too long\n", path, ln); goto bad; }
+			for (int i = 0; i < M.nfield; i++)
+				if (!strcmp(M.field[i].name, k)) { fprintf(stderr, "cmc: %s:%d: field %s defined twice\n", path, ln, k); goto bad; }
+			if (int_value(path, ln, k, v, 0, 254, &x)) goto bad;
+			snprintf(M.field[M.nfield].name, sizeof M.field[0].name, "%s", k);
+			M.field[M.nfield].off = (int) x;
+			M.nfield++;
+		}
 		else if (!strcmp(sect, "invariants"))
 		{
 			if (M.ninv >= MAXINV) { fprintf(stderr, "cmc: %s:%d: more than %d invariants\n", path, ln, MAXINV); goto bad; }
@@ -201,8 +218,16 @@ load_model(const char *path)
 			{ fprintf(stderr, "cmc: %s:%d: invariant name or expression too long\n", path, ln); goto bad; }
 			for (int i = 0; i < M.ninv; i++)
 				if (!strcmp(M.inv[i].name, k)) { fprintf(stderr, "cmc: %s:%d: invariant %s defined twice\n", path, ln, k); goto bad; }
+			/* a leading `eventually ` makes it a reachability check: some
+			 * reached state must satisfy it, reported at the end of the
+			 * search.  Not a fairness-based temporal property -- a bounded
+			 * search only tells you some reachable state satisfies it. */
+			int evv = 0;
+			if (!strncmp(v, "eventually", 10) && (v[10] == ' ' || v[10] == '\t'))
+			{ evv = 1; v += 10; while (*v == ' ' || *v == '\t') v++; }
 			snprintf(M.inv[M.ninv].name, sizeof M.inv[0].name, "%s", k);
 			snprintf(M.inv[M.ninv].expr, sizeof M.inv[0].expr, "%s", v);
+			M.inv[M.ninv].eventually = evv;
 			M.ninv++;
 		}
 		else { fprintf(stderr, "cmc: %s:%d: unknown key %s in [%s]\n", path, ln, k, sect); goto bad; }
@@ -232,43 +257,75 @@ typedef struct {
 	 * over replies, `var` binds the index and r.NAME reads the arrays */
 	int ranging_replies;
 	int checking;			/* parsing only: reply fields read as 0 */
+	/* index variables bound by `all I in nodes` / `some I in nodes`: each
+	 * names a node index, usable as node[I], node[I][k], node[I].field */
+	char ivar[MAXNODES][32]; long ival[MAXNODES]; int niv;
 } Ctx;
+
 static void skipws(const char **p){ while(**p&&isspace((unsigned char)**p))(*p)++; }
 static int word(const char **p,const char*w){ skipws(p); size_t n=strlen(w); if(!strncmp(*p,w,n)&&!isalnum((unsigned char)(*p)[n])&&(*p)[n]!='_'){*p+=n;return 1;} return 0; }
+/* resolve a node-index expression: a literal integer or a bound index
+ * variable.  On success advances *p and sets *out; returns 0, else -1. */
+static int
+node_index(const char **p, Ctx *c, long *out)
+{
+	skipws(p);
+	if (isdigit((unsigned char) **p)) { *out = strtol(*p, (char **) p, 10); return 0; }
+	const char *q = *p; char id[32]; int n = 0;
+	while ((isalnum((unsigned char) *q) || *q == '_') && n < 31) id[n++] = *q++;
+	id[n] = 0;
+	for (int i = 0; i < c->niv; i++)
+		if (!strcmp(id, c->ivar[i])) { *out = c->ival[i]; *p = q; return 0; }
+	return -1;
+}
 static int eval_expr(const char **p, Ctx *c);
 
 /* a set yields bytes to range over, OR the reply log (special) */
-enum { SET_BYTES, SET_REPLIES };
+enum { SET_BYTES, SET_REPLIES, SET_NODES };
 static int
 get_set(const char **p, Ctx *c, const unsigned char **buf, int *len, int *kind)
 {
 	skipws(p);
 	if (word(p, "replies")) { *kind = SET_REPLIES; *len = c->nrepl; *buf = NULL; return 0; }
+	if (word(p, "nodes")) { *kind = SET_NODES; *len = c->nnodes; *buf = NULL; return 0; }
 	if (word(p, "node"))
 	{
 		skipws(p); if (**p != '[') return -1; (*p)++;
-		long i = strtol(*p, (char **) p, 10); skipws(p); if (**p != ']') return -1; (*p)++;
+		long i; if (node_index(p, c, &i)) return -1;
+		skipws(p); if (**p != ']') return -1; (*p)++;
 		if (i < 0 || i >= c->nnodes) return -1;
 		*kind = SET_BYTES; *buf = c->node[i]; *len = c->node_len[i]; return 0;
 	}
 	return -1;
 }
 
-/* a term yields a value: NUMBER, bound var, or r.src / r.val */
+/* a term yields a value: NUMBER, bound index/reply var, node[i][k], or
+ * node[i].field (a named byte offset from [fields]) */
 static int
 get_term(const char **p, Ctx *c, long *out)
 {
 	skipws(p);
 	if (isdigit((unsigned char) **p)) { *out = strtol(*p, (char **) p, 10); return 0; }
+	const char *before = *p;
 	char id[32]; int n = 0; while ((isalnum((unsigned char) **p) || **p == '_') && n < 31) id[n++] = *(*p)++; id[n] = 0;
 	if (n == 0) return -1;
-	/* node[i][k] : byte k of node i's canonical state */
+	/* node[i][k] or node[i].field : a byte of node i's canonical state */
 	if (!strcmp(id, "node"))
 	{
 		skipws(p); if (**p != '[') return -1; (*p)++;
-		long i = strtol(*p, (char **) p, 10); skipws(p); if (**p != ']') return -1; (*p)++;
-		skipws(p); if (**p != '[') return -1; (*p)++;
-		long k = strtol(*p, (char **) p, 10); skipws(p); if (**p != ']') return -1; (*p)++;
+		long i; if (node_index(p, c, &i)) return -1;
+		skipws(p); if (**p != ']') return -1; (*p)++;
+		long k;
+		skipws(p);
+		if (**p == '[') { (*p)++; k = strtol(*p, (char **) p, 10); skipws(p); if (**p != ']') return -1; (*p)++; }
+		else if (**p == '.')
+		{
+			(*p)++; char fn[32]; int m = 0; while ((isalnum((unsigned char) **p) || **p == '_') && m < 31) fn[m++] = *(*p)++; fn[m] = 0;
+			int fi = -1; for (int j = 0; j < M.nfield; j++) if (!strcmp(M.field[j].name, fn)) fi = j;
+			if (fi < 0) return -1;			/* unknown field = parse error */
+			k = M.field[fi].off;
+		}
+		else return -1;
 		if (i < 0 || i >= c->nnodes || k < 0 || k >= c->node_len[i]) { *out = -1; return 0; }
 		*out = c->node[i][k]; return 0;
 	}
@@ -282,6 +339,10 @@ get_term(const char **p, Ctx *c, long *out)
 		*out = c->val; return 0;
 	}
 	if (c->varset && !strcmp(id, c->var)) { *out = c->val; return 0; }
+	/* a bound index variable used as a bare integer (e.g. i == j) */
+	for (int j = 0; j < c->niv; j++)
+		if (!strcmp(id, c->ivar[j])) { *out = c->ival[j]; return 0; }
+	(void) before;
 	return -1;
 }
 
@@ -298,12 +359,26 @@ eval_qc(const char **p, Ctx *c)
 		if (get_set(p, c, &set, &slen, &kind)) return -1;
 		skipws(p); if (**p != ':') return -1; (*p)++;
 		const char *body = *p; int result = isall ? 1 : 0;
-		Ctx inner = *c; inner.varset = 1; snprintf(inner.var, sizeof inner.var, "%s", var);
-		inner.ranging_replies = (kind == SET_REPLIES);
+		Ctx inner = *c;
+		int slot = -1;
+		if (kind == SET_NODES)
+		{
+			/* bind an index variable (for node[I] / node[I].field / I == J) */
+			if (inner.niv >= MAXNODES) return -1;
+			slot = inner.niv;
+			snprintf(inner.ivar[slot], sizeof inner.ivar[0], "%s", var);
+			inner.niv = slot + 1;
+		}
+		else
+		{
+			inner.varset = 1; snprintf(inner.var, sizeof inner.var, "%s", var);
+			inner.ranging_replies = (kind == SET_REPLIES);
+		}
 		for (int i = 0; i < slen; i++)
 		{
 			const char *bp = body;
-			inner.val = (kind == SET_REPLIES) ? i : set[i];
+			if (kind == SET_NODES) inner.ival[slot] = i;
+			else inner.val = (kind == SET_REPLIES) ? i : set[i];
 			int r = eval_expr(&bp, &inner); if (r < 0) return -1;
 			if (isall && !r) result = 0;
 			if (issome && r) result = 1;
@@ -314,7 +389,8 @@ eval_qc(const char **p, Ctx *c)
 		if (slen == 0)
 		{
 			const char *bp = body;
-			inner.val = 0; inner.checking = 1;
+			if (kind == SET_NODES) inner.ival[slot] = 0;
+			else { inner.val = 0; inner.checking = 1; }
 			if (eval_expr(&bp, &inner) < 0) return -1;
 			*p = bp;
 		}
@@ -326,7 +402,7 @@ eval_qc(const char **p, Ctx *c)
 	if (word(p, "in"))
 	{
 		const unsigned char *set; int slen, kind; if (get_set(p, c, &set, &slen, &kind)) return -1;
-		if (kind == SET_REPLIES) return -1;	/* 'in replies' not defined */
+		if (kind == SET_REPLIES || kind == SET_NODES) return -1;	/* 'in replies'/'in nodes' not defined */
 		for (int i = 0; i < slen; i++) if (set[i] == a) return 1;
 		return 0;
 	}
@@ -1069,9 +1145,21 @@ check_invariants(int *which)
 	for (int k = 0; k < M.ninv; k++) {
 		int r = eval_invariant(M.inv[k].expr, &c);
 		if (r < 0) { fprintf(stderr, "mc2: invariant %s parse error\n", M.inv[k].name); *which = -2; return 0; }
+		if (M.inv[k].eventually) { if (r) M.inv[k].seen = 1; continue; }
 		if (!r) { *which = k; return 0; }
 	}
 	return 1;
+}
+
+/* after an exhaustive search: an `eventually` invariant that no reached
+ * state satisfied is a violation.  Returns the first such invariant, or
+ * -1 if all held (or there were none). */
+static int
+unmet_eventually(void)
+{
+	for (int k = 0; k < M.ninv; k++)
+		if (M.inv[k].eventually && !M.inv[k].seen) return k;
+	return -1;
 }
 
 static const char *
@@ -1295,6 +1383,16 @@ cmc_proc_main(const CmcProcOptions *po)
 		printf("INCOMPLETE (no violation found): %s; %zu distinct states, %zu left on queue, %zu cut at depth %ld, %.1f s\n",
 			   why, distinct, qt - qh, cut, depth, dt);
 		return 2;
+	}
+	/* the search was exhaustive: an `eventually` property that no state
+	 * satisfied is a real violation (a bounded cut above would make this
+	 * unsound, so it is only checked here) */
+	int ev = unmet_eventually();
+	if (ev >= 0)
+	{
+		printf("Error: Invariant %s is violated (eventually: no reachable state satisfies it).\n", M.inv[ev].name);
+		printf("%zu states generated, %zu distinct states found; the whole state graph was searched.\n", replays, distinct);
+		return 1;
 	}
 	/* TLC's wording; depth counts the initial state as 1 */
 	printf("Model checking completed. No error has been found.\n");
