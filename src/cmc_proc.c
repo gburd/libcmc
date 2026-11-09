@@ -1281,15 +1281,13 @@ fork_master(pid_t master, struct user_regs_struct saved, pid_t *worker)
 	/* the next master: restore it to the exact boundary, leave it frozen */
 	struct iovec rv = {&saved, sizeof saved};
 	ptrace(PTRACE_SETREGSET, child, (void *) (long) NT_PRSTATUS, &rv);
-	/* the worker: rewind rip onto the syscall instruction and re-arm the
-	 * syscall (rax = orig_rax) so, when resumed, it RE-ISSUES its blocked
-	 * syscall and raises a fresh notification -- rather than continuing
-	 * past it with the stale -ERESTARTSYS return */
-	struct user_regs_struct wrk = saved;
-	wrk.rip = saved.rip - 2;
-	wrk.rax = saved.orig_rax;
-	struct iovec wrkv = {&wrk, sizeof wrk};
-	ptrace(PTRACE_SETREGSET, master, (void *) (long) NT_PRSTATUS, &wrkv);
+	/* the worker: restore the EXACT ptrace-stop registers (rip just past
+	 * the syscall instruction, rax = -ERESTARTSYS).  The kernel's own
+	 * syscall-restart machinery then re-issues the interrupted syscall on
+	 * resume, raising a fresh seccomp notification.  (Hand-rewinding rip
+	 * to the syscall instruction instead makes the task take SIGSYS and
+	 * die -- the kernel must drive the restart, not us.) */
+	ptrace(PTRACE_SETREGSET, master, (void *) (long) NT_PRSTATUS, &rv);
 	*worker = master;
 	return child;
 }
