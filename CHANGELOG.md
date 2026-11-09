@@ -3,7 +3,12 @@
 libcmc follows semantic versioning.  Before 1.0.0 a minor release may
 change the API in `include/cmc.h`; this file says when it does.
 
-## Unreleased
+## 0.2.0 (2026-11-09)
+
+Checking the program you ship.  `cmc --model-file` runs an unmodified
+binary as processes under interception and checks it; the in-process
+`CmcCore` interface becomes the engine's calibration path.  Two real
+consensus protocols ship as worked examples.
 
 - `cmc --model-file FILE` checks a program as it ships: each node is the
   shipped binary, run unmodified as a process under seccomp user

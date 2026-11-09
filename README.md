@@ -86,8 +86,8 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 0.1.0, 2026-11-03, checked in-process step functions only.  The
-process front end (`cmc --model-file`) is on main and not yet released.
+Release 0.2.0, 2026-11-09: `cmc --model-file` checks the shipped binary,
+with single-decree Paxos and Raft leader election as worked examples.
 Single-threaded.  Process mode replays every state from a fresh launch,
 about 300 replays a second: single-decree Paxos with five processes,
 one crash and one drop is 30,075 states in about four minutes.  Its
