@@ -72,9 +72,17 @@ connection is FIFO, as TCP is.
 .It EOF
 The peer is gone and the connection is drained: the read returns 0.
 .It TIMEOUT
-Timeout budget is left: the read is satisfied by the one byte
+Timeout budget is left: a node waiting for input has its timer fire.
+A node reading a connection gets the one byte
 .Ql T
-instead, and the logical clock advances one second.
+instead of a message; a node idle in
+.Fn accept
+accepts a synthetic timer connection and reads
+.Ql T
+from it.
+Either way the logical clock advances one second.
+This is how a server that waits for a request, or for a peer to connect,
+detects that it has waited long enough -- an election timeout.
 .It CRASH
 Crash budget is left: a live node dies.
 .It DROP

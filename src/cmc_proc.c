@@ -384,6 +384,7 @@ typedef struct {
 	int pend[MAXCONN]; int npend;	/* connectors queued at this node's listener */
 	int blocked; int block_kind; uint64_t block_id; uint64_t block_bufaddr; int block_want; int block_peer;
 	int next_fd;
+	int timer_fd;				/* -1, or an fd whose first recv is a fired timeout's 'T' */
 	const char *binary; int id;
 	int fd3[2];					/* volatile canonical-emit pipe */
 	int fd4[2];					/* durable canonical-emit pipe (survives a crash) */
@@ -395,6 +396,7 @@ typedef struct {
 
 static Node N[MAXNODES];
 enum { BK_RECV = 1, BK_ACCEPT = 2 };	/* what a blocked node waits in */
+#define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 
 static void kill_all(void);
 
@@ -516,7 +518,7 @@ launch(Node *nd)
 	close(sp[0]);
 	if (nd->listener < 0) return -1;
 	nd->pid = pid; nd->alive = 1; nd->blocked = 0; nd->block_kind = 0; nd->next_fd = 500; nd->nc = 0;
-	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->preload_ok = 0;
+	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
 	return 0;
 }
@@ -682,6 +684,17 @@ try_pending_for(Node *nd)
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* loader/lib reads */
 			int peer = cfd_peer(nd, fd);
 			if (peer == -2) die(1, "node %d reads fd %d, which is no connection", nd->id, fd);
+			if (fd == nd->timer_fd)
+			{
+				/* the first recv on a timer connection returns the fired
+				 * timeout's one byte 'T', then the fd is an ordinary
+				 * (empty, timer-peer) channel */
+				static const unsigned char t = 'T';
+				int want = (int) a[2]; int k = want < 1 ? want : 1;
+				nd->timer_fd = -1;
+				if (k > 0) cr_write(nd->pid, a[1], &t, (size_t) k);
+				g_resp->val = k; break;
+			}
 			/* Always DEFER a channel recv: whether it is satisfied by a
 			 * message or by a timeout is an environment choice the search
 			 * makes, so delivery must never be automatic (M5).  The node
@@ -935,6 +948,10 @@ enum_actions(Act *out)
 				for (int k = 0; k < nd->npend; k++) waiting |= nd->pend[k] == s;
 				if (waiting) ADD(A_ACCEPT, d, s);
 			}
+			/* a server idle in accept() can have its election timer fire:
+			 * the timeout arrives as a synthetic timer connection it
+			 * accepts and reads a 'T' from (peer = TIMER_PEER) */
+			if (bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER);
 			continue;
 		}
 		int p = nd->block_peer;
@@ -977,7 +994,17 @@ apply(const Act *a)
 			static const unsigned char t = 'T';
 			bud.timeouts--;
 			logical_ns += CLK_TICK;			/* time advances only here */
-			deliver(nd, &t, 1);
+			if (nd->block_kind == BK_ACCEPT)
+			{
+				/* answer the accept() with a timer connection; the node's
+				 * next recv on it returns 'T' (the recv handler) */
+				int fd = nd->next_fd++;
+				cfd_set(nd, fd, TIMER_PEER);
+				nd->timer_fd = fd;
+				answer(nd, fd);
+			}
+			else
+				deliver(nd, &t, 1);
 			break;
 		}
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
@@ -1052,6 +1079,7 @@ act_name(const Act *a, char *b, size_t n)
 {
 	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
 	else if (a->peer < 0) snprintf(b, n, "%s client->n%d", k[a->kind], a->node);
 	else snprintf(b, n, "%s n%d->n%d", k[a->kind], a->peer, a->node);
 	return b;

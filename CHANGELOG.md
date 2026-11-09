@@ -23,6 +23,11 @@ change the API in `include/cmc.h`; this file says when it does.
   proposers, three acceptors, five processes) checked for agreement, with
   a planted promised-values bug caught by search and by simulation.
   `make check` builds and checks it.
+- A timeout can now fire at a node idle in `accept()`, not only one
+  blocked in `recv`: the node accepts a synthetic timer connection and
+  reads `T` from it.  A server that waits for a peer to connect can thus
+  detect an election timeout, which real leader election needs.  Pinned
+  by `test/proc/accept_timeout.c`.
 - Every intercepted syscall is pinned by a fixture with teeth
   (`test/proc/clocks.c`).  This caught a bug: `gettimeofday` wrote the
   logical clock to the wrong argument (the `tz` pointer, not the `tv`

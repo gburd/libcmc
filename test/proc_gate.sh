@@ -28,7 +28,7 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 for f in repl elect lease durlog; do
@@ -89,6 +89,7 @@ expect "a depth bound is INCOMPLETE"       2 "depth bound" $(run durlog durlog-b
 expect "a state bound is INCOMPLETE"       2 "max states" $(runx "$HERE/examples/paxos/paxos.model" paxos) --max-states 10
 expect "an over-long write is an error"    1 "limit is 64" $(run bigmsg bigmsg)
 expect "the counterexample is named"       1 "crash n0" $(run durlog durlog-bug)
+expect "a server idle in accept() can time out" 1 "never_fires is violated" $(run accept_timeout accept_timeout)
 
 echo "-- the loader refuses what it does not implement"
 M=$OUT/m.model

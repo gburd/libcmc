@@ -1,0 +1,9 @@
+# test/proc/accept_timeout.c: a node idle in accept() must be able to
+# fire its election timer -- the capability real Raft needs.
+# never_fires is deliberately false: the right verdict is a violation.
+[target]
+nodes = 1
+[environment]
+timeouts = 1
+[invariants]
+never_fires = "node[0][0] == 0"
