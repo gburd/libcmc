@@ -86,9 +86,8 @@ expect "raft: --simulate finds it"          1 "election_safety is violated" $(ru
 expect "raftlog: no committed entry is lost" 0 "No error has been found" $(runx "$HERE/examples/raft/raftlog.model" raftlog)
 expect "raftlog: early-ack loses a committed entry" 1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug)
 expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug) --simulate --seed 1 --walks 2000
-expect "hc: no acknowledged write is lost"   0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
-expect "hc: early-ack loses a write on crash" 1 "no_lost_ack is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug)
-expect "hc: --simulate finds it"            1 "no_lost_ack is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --simulate --seed 1 --walks 2000
+expect "hc: agreement holds, even under a partition"   0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
+expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 6 --drops 1 --simulate --seed 3 --walks 5000
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)
 expect "zab: --simulate finds it"           1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug) --simulate --seed 1 --walks 2000

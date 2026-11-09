@@ -10,6 +10,13 @@ nodes = 3
 [environment]
 timeouts = 2        # two nodes may time out and stand for election
 
+[fields]
+role = 0            # node[i].role: 2 = leader
+term = 1            # node[i].term: currentTerm
+
 [invariants]
-# Election Safety: no two nodes are leader in the same term.
-election_safety = "not (node[0][0] == 2 and node[1][0] == 2 and node[0][1] == node[1][1]) and not (node[0][0] == 2 and node[2][0] == 2 and node[0][1] == node[2][1]) and not (node[1][0] == 2 and node[2][0] == 2 and node[1][1] == node[2][1])"
+# Election Safety: at most one leader per term.  Over all pairs of
+# nodes, two leaders never share a term.  This is Raft's Election Safety
+# property (Ongaro & Ousterhout, raft.tla / dissertation appendix B),
+# stated here as it reads there rather than hand-expanded per pair.
+election_safety = "all i in nodes : all j in nodes : i == j or not (node[i].role == 2 and node[j].role == 2 and node[i].term == node[j].term)"

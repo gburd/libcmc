@@ -1,21 +1,35 @@
-# examples/hc/hc.c: Humming Consensus / chain replication.  A client
-# write is committed only when the tail has stored it, then acked; an
-# acknowledged write must never be lost, even across a crash or a
-# reconfiguration.  node[i] = [epoch][value]; a crash keeps the durable
-# record.
+# examples/hc/hc.c, Humming Consensus as a generic agreement protocol,
+# checked as it ships.  Three participants (nodes 0, 1, 2), each a
+# process holding a write-once epoch register store; cmc is the network.
+# Each participant prefers its own config, so they suggest different
+# values at epoch 1 and must converge without disagreeing.
 #
 #   cc -no-pie -o hc examples/hc/hc.c
-#   cmc --model-file examples/hc/hc.model --binary ./hc --crashes 1
+#   cmc --model-file examples/hc/hc.model --binary ./hc
+#
+# The agreement rule is what HC's unanimity-before-adopt enforces; build
+# -DBUG (adopt without checking unanimity) to see it broken:
+#   cmc --model-file examples/hc/hc.model --binary ./hc-bug
 [target]
 nodes = 3
 
 [environment]
-client_write = 7        # a client writes 7 to the head (node 0)
-timeouts = 1            # the spare may reconfigure the chain once
-crashes = 1             # a node may crash (head, tail, or spare)
+# each timeout lets one participant take one iteration of the algorithm;
+# a drop is a lost message, i.e. an asymmetric network partition.  CP
+# mode (the correct build) keeps agreement even under a partition,
+# because adoption needs a quorum majority and quorums intersect.
+timeouts = 3
+drops = 1
+
+[fields]
+epoch  = 0      # node[i].epoch:  the epoch this participant has adopted
+config = 1      # node[i].config: the config it adopted there (0 = none)
 
 [invariants]
-# No lost ack: every value a client saw acknowledged is still held by
-# some node of the chain.  Chain replication's safety property (van
-# Renesse & Schneider, OSDI 2004): an acknowledged update is durable.
-no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"
+# Agreement -- HC's safety property.  No two participants adopt
+# DIFFERENT configurations for the SAME epoch.  (Maps to the paper's
+# guarantee that a chosen projection at an epoch is unique: dissent at
+# an epoch is visible to every reader and that epoch is ignored, so two
+# participants never commit to different configs at one epoch.)  Written
+# over all pairs; a participant that has adopted nothing has epoch 0.
+agreement = "all i in nodes : all j in nodes : node[i].epoch == 0 or node[j].epoch == 0 or node[i].epoch != node[j].epoch or node[i].config == node[j].config"

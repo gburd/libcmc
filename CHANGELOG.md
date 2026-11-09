@@ -5,6 +5,25 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The Humming Consensus example (`hc/`) is now the GENERIC agreement
+  protocol it is -- like Paxos, Raft and ZAB -- not chain replication.
+  Three participants agree on an opaque configuration per epoch over
+  write-once register stores, communicating only indirectly through
+  reads and writes of those stores (Fritchie, PaPoC 2016, Figure 2).
+  The checked property is HC's safety property, agreement: at most one
+  configuration is adopted per epoch.  The correct (CP-mode) build holds
+  agreement EVEN UNDER A NETWORK PARTITION -- a quorum majority is
+  required to adopt, and quorums intersect -- proven exhaustively; the
+  `-DBUG` build runs in eventual-consistency mode (adopt without a
+  quorum) and loses agreement under a partition.  The README cites the
+  paper, Machi's reference implementation, and the invariant's mapping
+  to the stated safety property.  (Supersedes the earlier chain-
+  replication framing, which was one use of HC, not HC itself.)
+- The Paxos, Raft and ZAB invariants are restated with the new
+  node-quantifiers and named fields, so each reads as the safety
+  property of its canonical specification -- Paxos agreement over all
+  proposer pairs, Raft Election Safety over all node pairs -- rather
+  than a hand-expanded list of pairs.
 - The invariant language gained the expressiveness to state a protocol's
   real safety property instead of a proxy.  `all i in nodes : EXPR` and
   `some i in nodes : EXPR` quantify over node indices, so agreement over
@@ -15,23 +34,20 @@ change the API in `include/cmc.h`; this file says when it does.
   reachability check: some reached state must satisfy it, reported at
   the end of an exhaustive search (not fairness-based liveness, which
   the safety engine does not do).
-- Two more worked examples, checked as they ship.  `hc/`: Humming
-  Consensus / chain replication (a replicated log down a chain of three
-  nodes) checked for no-lost-ack across a crash and a reconfiguration;
-  an early-ack bug loses an acknowledged write to a crash and is caught.
-  `zab/`: ZooKeeper Atomic Broadcast (a leader and two followers)
-  checked for no-lost-commit; an early-ack bug loses a committed
-  transaction to a leader crash.  `raft/raftlog.c`: Raft log
-  replication, checked for State Machine Safety (a committed entry is
-  never lost); the leader that commits before a quorum has the entry
-  loses it on a crash -- the failure Marc Brooker (AWS) animates.  Both are the acknowledged-write-lost
-  failure Marc Brooker (AWS) animates in "Animations for System
-  Builders".
+- Two more worked examples, checked as they ship.  `zab/`: ZooKeeper
+  Atomic Broadcast (a leader and two followers) checked for
+  no-lost-commit; an early-ack bug loses a committed transaction to a
+  leader crash.  `raft/raftlog.c`: Raft log replication, checked for
+  State Machine Safety (a committed entry is never lost); the leader
+  that commits before a quorum has the entry loses it on a crash -- the
+  acknowledged-write-lost failure Marc Brooker (AWS) animates in
+  "Animations for System Builders".  (The `hc/` example is rewritten as
+  generic Humming Consensus, above.)
 - Each example cites its canonical formal reference -- Paxos (Lamport's
-  `Paxos.tla`), Raft (Ongaro's `raft.tla`), chain replication (van
-  Renesse & Schneider, OSDI 2004), ZAB (Apache ZooKeeper's `Zab.tla`) --
-  and the safety property the libcmc invariant corresponds to, plus
-  links to animated/interactive visualizations.
+  `Paxos.tla`), Raft (Ongaro's `raft.tla`), Humming Consensus (Fritchie,
+  PaPoC 2016), ZAB (Apache ZooKeeper's `Zab.tla`) -- and the safety
+  property the libcmc invariant corresponds to, plus links to
+  animated/interactive visualizations.
 
 ## 0.2.0 (2026-11-09)
 

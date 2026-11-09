@@ -1,46 +1,70 @@
 /*
- * hc.c: Humming Consensus / chain replication, checked as it ships
- * (examples/hc).  The protocol shape libcmc was built for: a replicated
- * log kept by a chain of nodes under an epoch-fenced projection, where
- * the safety property is that an acknowledged write is never lost, even
- * across a crash or a reconfiguration.
+ * hc.c: Humming Consensus, checked as it ships (examples/hc).
  *
- * Reference: chain replication is van Renesse & Schneider, "Chain
- * Replication for Supporting High Throughput and Availability", OSDI
- * 2004 (https://www.cs.cornell.edu/home/rvr/papers/OSDI04.pdf); Humming
- * Consensus is the Machi chain-management protocol by Scott Lystig
- * Fritchie.  This is a faithful miniature of its commit path.
+ * Humming Consensus (Scott Lystig Fritchie, PaPoC 2016) is a GENERIC
+ * agreement protocol -- like Paxos, Raft or ZAB -- for agreeing on a
+ * SEQUENCE OF CONFIGURATIONS, one per epoch.  The configuration is an
+ * opaque, system-specific value; the paper's examples are "a list of
+ * replicas of a key-value store or a flat ASCII file".  Chain
+ * replication (Machi's use of HC) is just one such configuration; HC
+ * itself knows nothing about chains.  This example agrees on an opaque
+ * one-byte configuration, to show HC as the agreement protocol it is.
  *
- * Three nodes over ordinary blocking TCP, no libcmc header; node i
- * listens on 127.0.0.1 port 20000 + i.  The chain for epoch 1 is
- * head 0 -> tail 1; node 2 is a spare.  A reconfiguration (driven by a
- * timeout at the spare) moves to epoch 2 with chain head 0 -> tail 2,
- * inheriting the committed value, so a failed tail does not lose data.
+ * Reference: "Coordinating Distributed System Configuration Changes
+ * with Humming Consensus", PaPoC 2016,
+ * http://snookles.com/scott/publications/papoc2016-slf.pdf (the
+ * algorithm is Figure 2).  The only implementation is inside Machi:
+ * https://github.com/basho/machi/blob/master/src/machi_chain_manager1.erl
+ * (the ranking and unanimity rules).  See the README for how the
+ * invariant maps to HC's stated safety property.
  *
- * Commit rule (chain replication): a client write is committed -- and
- * only then acknowledged -- once the TAIL has stored it.  The head
- * forwards the write to the tail and waits for the tail's ack before
- * acking the client; the write is durable at the tail (the commit point)
- * and then at the head.
+ * Components (paper section 3):
+ *   - the opaque configuration (here one byte);
+ *   - the epoch number, strictly increasing logical time;
+ *   - a WRITE-ONCE epoch register store, one per participant, keyed by
+ *     epoch, readable by all.  All inter-participant communication is
+ *     indirect, through reads and writes of these stores.
  *
- * Messages, request/reply on a fresh connection (3 bytes):
- *   WRITE 'W' v _      client -> head
- *   REPL  'R' v epoch  head -> tail (the tail stores and acks)
- *   PULL  'P' _ _      new tail -> head: report the committed value
- *   ADOPT 'E' epoch _  new tail -> head: adopt the new projection
- * Reply byte 'a' = stored/committed, 'A' v = client ack.
+ * Three participants (nodes 0, 1, 2), each a process; cmc is the
+ * network between them.  Node i listens on 127.0.0.1 port 20000 + i and
+ * holds its own write-once store.  The store API (paper Figure 1):
+ *   READ  'R' epoch _     -> 'r' epoch config, or 'r' epoch 0 = unwritten
+ *   WRITE 'W' epoch config-> 'w' (ok) or 'x' (already written: ignored)
+ *   LATEST'L' _ _         -> 'l' epoch config (its highest written epoch)
  *
- * Canonical state fd 3 (volatile) and fd 193 (durable/committed):
- *   [count=2][epoch][value]   value 0 = none.  A crash keeps only the
- * durable record.
+ * A participant takes one iteration of the algorithm when the
+ * environment fires a TIMEOUT at it (the paper's periodic tick).  An
+ * iteration (Figure 2): read every participant's latest public
+ * projection; let E_max be the greatest epoch seen and C_max a config
+ * at E_max; if some participant has no value at E_max, repair by
+ * copying C_max there (write-once, so an existing value is never
+ * changed); else if the configs at E_max are UNANIMOUS and E_max is
+ * newer than what we have adopted, ADOPT C_max; else suggest our own
+ * new config at epoch E_max + 1.
  *
- * -DBUG: the head acks the client as soon as the write is in its memory,
- * before the tail has committed it.  If the head then crashes before the
- * tail stored it, the acknowledged write is on no node's durable state
- * -- a lost ack.  cmc finds it.
+ * To make two participants race, each starts preferring its own config
+ * (node i prefers value 10 + i), so at epoch 1 they suggest DIFFERENT
+ * configs.  HC must never let two participants ADOPT different configs
+ * for the same epoch: dissent at an epoch is visible to every reader
+ * (write-once + read-all), so a dissenting epoch is ignored and the
+ * participants advance to a later epoch and converge.
+ *
+ * Canonical state, fd 3 (volatile) and fd 193 (durable):
+ *   [count=2][adopted_epoch][adopted_config]   0 = nothing adopted yet.
+ * The store's write-once contents are durable; the adopted projection
+ * is what the participant has committed to.
+ *
+ * -DBUG: a participant adopts a projection it sees as unanimous WITHOUT
+ * a quorum majority of reachable stores (HC's eventual-consistency
+ * mode).  Under an asymmetric partition two participants each adopt from
+ * a different minority and end up with different configs at the same
+ * epoch -- the agreement violation the paper notes is invisible until
+ * the partition heals.  cmc finds it:
+ *   cmc --model-file examples/hc/hc.model --binary ./hc-bug \
+ *       --timeouts 6 --drops 1 --simulate --seed 3
  *
  *   cc -no-pie -o hc examples/hc/hc.c
- *   cmc --model-file examples/hc/hc.model --binary ./hc --crashes 1
+ *   cmc --model-file examples/hc/hc.model --binary ./hc
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -51,26 +75,31 @@
 #include <unistd.h>
 
 #define BASE 20000
+#define NPART 3
+#define MAJ 2					/* a quorum majority of NPART participants */
+#define MAXEPOCH 32
 
-static int		id;
-static unsigned char epoch = 1;
-static unsigned char value;		/* committed value, 0 = none */
+static int id;
+static unsigned char adopted_epoch;		/* highest epoch we have adopted */
+static unsigned char adopted_config;	/* its config, 0 = none */
+
+/* our own write-once store: store[e] = config at epoch e, 0 = unwritten */
+static unsigned char store[MAXEPOCH];
 
 static void
-emit_committed(void)
+emit_fd(int fd)
 {
-	unsigned char rec[3] = {2, epoch, value};
+	unsigned char rec[3] = {2, adopted_epoch, adopted_config};
 
-	(void) !write(193, rec, sizeof rec);	/* durable: survives a crash */
-	(void) !write(3, rec, sizeof rec);
+	(void) !write(fd, rec, sizeof rec);
 }
 
+/* the adopted projection is what we commit to; durable + volatile */
 static void
-emit_volatile(unsigned char v)
+emit(void)
 {
-	unsigned char rec[3] = {2, epoch, v};
-
-	(void) !write(3, rec, sizeof rec);		/* in memory only, not committed */
+	emit_fd(193);
+	emit_fd(3);
 }
 
 static struct sockaddr_in
@@ -87,11 +116,11 @@ addr(int port)
 static int
 read_full(int fd, unsigned char *m, int n)
 {
-	int			got = 0;
+	int got = 0;
 
 	while (got < n)
 	{
-		ssize_t		r = read(fd, m + got, (size_t) (n - got));
+		ssize_t r = read(fd, m + got, (size_t) (n - got));
 
 		if (r <= 0)
 			return -1;
@@ -100,35 +129,195 @@ read_full(int fd, unsigned char *m, int n)
 	return 0;
 }
 
+/* one request/reply on a fresh connection to participant `to` */
 static int
 rpc(int to, const unsigned char req[3], unsigned char rep[3])
 {
-	int			s = socket(AF_INET, SOCK_STREAM, 0);
+	int s = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in a = addr(BASE + to);
 
 	if (connect(s, (struct sockaddr *) &a, sizeof a) != 0)
 		return -1;
 	(void) !write(s, req, 3);
-	int			r = read_full(s, rep, 3);
+	int r = read_full(s, rep, 3);
 
 	close(s);
 	return r;
 }
 
+/* read participant `to`'s latest public projection into *ep, *cfg;
+ * returns 0 on success (a value exists), -1 on none/partition */
 static int
-tail_of(unsigned char e)
+read_latest(int to, unsigned char *ep, unsigned char *cfg)
 {
-	return e >= 2 ? 2 : 1;
+	unsigned char req[3] = {'L', 0, 0}, rep[3];
+
+	if (to == id)							/* our own store, read directly */
+	{
+		int hi = 0;
+
+		for (int e = 1; e < MAXEPOCH; e++)
+			if (store[e])
+				hi = e;
+		if (!hi)
+			return -1;
+		*ep = (unsigned char) hi;
+		*cfg = store[hi];
+		return 0;
+	}
+	if (rpc(to, req, rep) != 0 || rep[0] != 'l' || rep[1] == 0)
+		return -1;
+	*ep = rep[1];
+	*cfg = rep[2];
+	return 0;
+}
+
+/* read participant `to`'s value at a specific epoch; 0 = unwritten */
+static unsigned char
+read_at(int to, unsigned char ep)
+{
+	unsigned char req[3] = {'R', ep, 0}, rep[3];
+
+	if (to == id)
+		return store[ep];
+	if (rpc(to, req, rep) != 0 || rep[0] != 'r')
+		return 0;
+	return rep[2];
+}
+
+/* write-once: put `cfg` at epoch `ep` in participant `to`'s store */
+static void
+write_at(int to, unsigned char ep, unsigned char cfg)
+{
+	unsigned char req[3] = {'W', ep, cfg}, rep[3];
+
+	if (to == id)
+	{
+		if (store[ep] == 0)			/* write-once: never overwrite */
+			store[ep] = cfg;
+		return;
+	}
+	(void) !rpc(to, req, rep);
+}
+
+/* one iteration of Humming Consensus (paper Figure 2) */
+static void
+iterate(void)
+{
+	unsigned char e_max = 0, best = 0;
+	int have_e_max = 0;
+
+	/* read every participant's latest public projection; E_max is the
+	 * greatest epoch seen, `best` the best config at E_max (the ranking
+	 * is a total order -- here, the greatest config value wins; every
+	 * participant that can read all stores computes the same best) */
+	for (int p = 0; p < NPART; p++)
+	{
+		unsigned char ep, cfg;
+
+		if (read_latest(p, &ep, &cfg) == 0)
+		{
+			if (ep > e_max) { e_max = ep; best = cfg; have_e_max = 1; }
+			else if (ep == e_max && cfg > best) best = cfg;
+		}
+	}
+
+	unsigned char mine = (unsigned char) (10 + id);
+
+	if (!have_e_max)
+	{
+		/* nothing suggested yet: suggest our own config at epoch 1 in our
+		 * OWN store only, so participants genuinely diverge (write-once) */
+		write_at(id, 1, mine);
+		return;
+	}
+
+	/* read every store's value at E_max over a QUORUM: HC in strongly
+	 * consistent mode (paper 6.3) requires a quorum majority of
+	 * successful reads before a projection may be adopted.  `seen`
+	 * counts stores we could read a value from at E_max; `agree` counts
+	 * those equal to the best.  A store we cannot reach (the checker may
+	 * time a read out) does not count toward the quorum. */
+	int seen = 0, agree = 0, hole = 0;
+
+	for (int p = 0; p < NPART; p++)
+	{
+		unsigned char v = read_at(p, e_max);
+
+		if (v == 0)
+			hole = 1;
+		else
+		{
+			seen++;
+			if (v == best)
+				agree++;
+		}
+	}
+	int unanimous = (seen == agree) && (seen > 0);
+
+	if (hole && seen >= MAJ && unanimous)
+	{
+		/* repair: copy the best value to stores missing it (write-once) */
+		for (int p = 0; p < NPART; p++)
+			if (read_at(p, e_max) == 0)
+				write_at(p, e_max, best);
+		return;
+	}
+	if (hole && !unanimous)
+	{
+		/* a reachable store already dissents; fall through to abandon */
+	}
+
+#ifdef BUG
+	/* AP mode: adopt on a visible unanimity WITHOUT a quorum majority --
+	 * a participant isolated with a minority of reachable stores adopts
+	 * anyway (HC's eventual-consistency mode, where "groups of one" may
+	 * adopt).  Under an asymmetric partition two participants each see a
+	 * different minority and adopt different configs at the same epoch;
+	 * the paper notes the conflict is invisible until the partition
+	 * heals.  cmc finds it (try --simulate). */
+	if (unanimous && e_max > adopted_epoch)
+	{
+		adopted_epoch = e_max;
+		adopted_config = best;
+		emit();
+		return;
+	}
+#else
+	/* CP mode: adopt only a projection a QUORUM MAJORITY agrees on, and
+	 * only when it is strictly newer.  Quorums intersect, so two
+	 * participants cannot adopt different configs at one epoch. */
+	if (unanimous && seen >= MAJ && e_max > adopted_epoch)
+	{
+		adopted_epoch = e_max;
+		adopted_config = best;
+		emit();
+		return;
+	}
+#endif
+
+	if (seen >= MAJ && !unanimous)
+	{
+		/* dissent across a quorum at E_max: abandon it and converge on a
+		 * single new suggestion at epoch E_max + 1.  The paper's flapping
+		 * remedy is to fall back to one safe value all agree on; here the
+		 * lowest-id participant authors the next epoch's value (the
+		 * globally-best config), so E_max + 1 has a single author and
+		 * becomes unanimous once repair propagates it. */
+		if (id == 0 && e_max + 1 < MAXEPOCH)
+			write_at(id, (unsigned char) (e_max + 1), best);
+	}
 }
 
 int
 main(int argc, char **argv)
 {
 	id = argc > 1 ? atoi(argv[1]) : 0;
-	value = 0;
-	emit_committed();
+	adopted_epoch = 0;
+	adopted_config = 0;
+	emit();
 
-	int			ls = socket(AF_INET, SOCK_STREAM, 0);
+	int ls = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in a = addr(BASE + id);
 
 	bind(ls, (struct sockaddr *) &a, sizeof a);
@@ -136,60 +325,17 @@ main(int argc, char **argv)
 
 	for (;;)
 	{
-		int			c = accept(ls, NULL, NULL);
+		int c = accept(ls, NULL, NULL);
 
 		if (c < 0)
 			break;
-		unsigned char m[3], r[3] = {'a', 0, 0};
-		ssize_t		n = read(c, m, 3);
+		unsigned char m[3], r[3] = {0, 0, 0};
+		ssize_t n = read(c, m, 3);
 
-		if (n == 1 && m[0] == 'T')		/* timeout: the spare reconfigures */
+		if (n == 1 && m[0] == 'T')		/* timeout: take one HC iteration */
 		{
 			close(c);
-			if (id == 2 && epoch < 2)
-			{
-				unsigned char pull[3] = {'P', 0, 0}, rep[3];
-
-				if (rpc(0, pull, rep) == 0)
-				{
-					epoch = 2;
-					value = rep[1];			/* inherit the committed value */
-					emit_committed();
-					unsigned char adopt[3] = {'E', 2, 0}, r2[3];
-
-					(void) !rpc(0, adopt, r2);
-				}
-			}
-			continue;
-		}
-		if (n == 2 && m[0] == 'W')		/* client write to the head (2 bytes) */
-		{
-			unsigned char v = m[1];
-			int			t = tail_of(epoch);
-			unsigned char repl[3] = {'R', v, epoch}, rep[3];
-			unsigned char ack[2] = {'A', v};
-
-#ifdef BUG
-			/* ack the client before the tail has committed: a crash of
-			 * the head now loses an acknowledged write */
-			emit_volatile(v);
-			(void) !write(c, ack, 2);
-			close(c);
-			if (rpc(t, repl, rep) == 0 && rep[0] == 'a')
-			{
-				value = v;				/* commits late, too late if crashed */
-				emit_committed();
-			}
-#else
-			/* chain replication: commit at the tail first, then ack */
-			if (rpc(t, repl, rep) == 0 && rep[0] == 'a')
-			{
-				value = v;				/* now committed on the chain */
-				emit_committed();
-				(void) !write(c, ack, 2);
-			}
-#endif
-			close(c);
+			iterate();
 			continue;
 		}
 		if (n != 3)
@@ -197,29 +343,32 @@ main(int argc, char **argv)
 			close(c);
 			continue;
 		}
+		if (m[0] == 'R')				/* READ epoch: our store's value */
+		{
+			r[0] = 'r';
+			r[1] = m[1];
+			r[2] = m[1] < MAXEPOCH ? store[m[1]] : 0;
+		}
+		else if (m[0] == 'W')			/* WRITE epoch config (write-once) */
+		{
+			if (m[1] < MAXEPOCH && store[m[1]] == 0)
+			{
+				store[m[1]] = m[2];
+				r[0] = 'w';
+			}
+			else
+				r[0] = 'x';				/* already written: ignored */
+		}
+		else if (m[0] == 'L')			/* LATEST: highest written epoch */
+		{
+			int hi = 0;
 
-		if (m[0] == 'P')				/* reconfig pull: report committed value */
-		{
-			r[1] = value;
-			(void) !write(c, r, 3);
-		}
-		else if (m[0] == 'E')			/* adopt a new projection */
-		{
-			if (m[1] > epoch)
-			{
-				epoch = m[1];
-				emit_committed();
-			}
-		}
-		else if (m[0] == 'R')			/* replicate: the tail commits */
-		{
-			if (m[2] >= epoch)
-			{
-				epoch = m[2];
-				value = m[1];
-				emit_committed();		/* the tail's store is the commit */
-			}
-			r[0] = 'a';
+			for (int e = 1; e < MAXEPOCH; e++)
+				if (store[e])
+					hi = e;
+			r[0] = 'l';
+			r[1] = (unsigned char) hi;
+			r[2] = hi ? store[hi] : 0;
 		}
 		(void) !write(c, r, 3);
 		close(c);
