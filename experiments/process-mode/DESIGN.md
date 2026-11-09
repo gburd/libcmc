@@ -489,18 +489,19 @@ invariants, and the write-up:
    (`examples/raft/`): three nodes, Election Safety checked with and
    without a crash; the double-vote bug elects two leaders and is caught.
    (The log-replication half waits on the engine capability below.)
-3. **Humming Consensus** and 4. **ZAB** -- deferred.  Both have a
-   lost-commit bug that is lost only if a node crashes *between* two of
-   its own steps (ack-before-commit).  The checker schedules a crash
-   only at a quiescent point (a node blocked in a syscall), so that
-   window is unreachable and the planted bug is not caught; a faithful
-   example cannot be qualified yet, and distorting the protocol to force
-   a blocking point in the window would make it a toy.  They wait on a
-   new engine capability: interrupting and crashing a node *between*
-   syscalls, at an instruction boundary (adjacent to the ptrace
-   single-step machinery in `experiments/fork-snapshot/`).  A partial
-   chain-replication implementation and this finding are in
-   `experiments/chain-wip/`.
+3. **Humming Consensus** / chain replication -- **Done**
+   (`examples/hc/`): a replicated log down a chain, no-lost-ack across a
+   crash and a reconfiguration; the early-ack bug loses an acknowledged
+   write on a crash and is caught.  An earlier attempt was deferred over
+   a supposed need for mid-syscall crash scheduling, but that was an
+   artifact of synchronous request-per-connection replication; modelling
+   the commit path so the ack precedes a blocking point (as chain
+   replication really works) makes the lost-ack window reachable at a
+   quiescent point, as M6's durlog already showed.
+4. **ZAB** -- **Done** (`examples/zab/`): leader + two followers, commit
+   only after a quorum stores the transaction; the early-ack bug loses a
+   committed transaction on a leader crash and is caught.  Same shape as
+   HC.
 
 They are the same shape for a checker (a leader and a replicated log,
 checked for agreement and no lost committed entry), so the engine work

@@ -11,6 +11,27 @@ leader per term.
 (This is the election half of Raft.  Log replication is a separate
 concern; this example is complete and real for what it covers.)
 
+## Reference
+
+- **Canonical TLA+**: Diego Ongaro's `raft.tla`,
+  <https://github.com/ongardie/raft.tla>.  The five Raft safety
+  properties -- Election Safety, Leader Append-Only, Log Matching,
+  Leader Completeness, State Machine Safety -- are proved against it in
+  Appendix B of Ongaro's PhD dissertation.  The `election_safety`
+  invariant checked below is the first of them: at most one leader per
+  term.
+- **Visualizations**: *The Secret Lives of Data*,
+  <https://thesecretlivesofdata.com/raft/> (narrated, animated); and
+  RaftScope, the interactive visualization on the official site,
+  <https://raft.github.io/>.
+- **See a lost write, animated**: Marc Brooker (AWS) animates a Raft
+  cluster losing an acknowledged write when durability is not truly
+  achieved, in *Animations for System Builders*:
+  <https://brooker.co.za/blog/2026/10/23/animations.html>.  libcmc
+  catches that failure class in the chain-replication
+  ([`examples/hc`](../hc)) and ZAB ([`examples/zab`](../zab)) examples; a
+  future Raft log-replication example will show it here directly.
+
 ## The protocol
 
 `raft.c` is a faithful Raft election.  Each node listens on 127.0.0.1

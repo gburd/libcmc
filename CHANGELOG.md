@@ -3,6 +3,23 @@
 libcmc follows semantic versioning.  Before 1.0.0 a minor release may
 change the API in `include/cmc.h`; this file says when it does.
 
+## Unreleased
+
+- Two more worked examples, checked as they ship.  `hc/`: Humming
+  Consensus / chain replication (a replicated log down a chain of three
+  nodes) checked for no-lost-ack across a crash and a reconfiguration;
+  an early-ack bug loses an acknowledged write to a crash and is caught.
+  `zab/`: ZooKeeper Atomic Broadcast (a leader and two followers)
+  checked for no-lost-commit; an early-ack bug loses a committed
+  transaction to a leader crash.  Both are the acknowledged-write-lost
+  failure Marc Brooker (AWS) animates in "Animations for System
+  Builders".
+- Each example cites its canonical formal reference -- Paxos (Lamport's
+  `Paxos.tla`), Raft (Ongaro's `raft.tla`), chain replication (van
+  Renesse & Schneider, OSDI 2004), ZAB (Apache ZooKeeper's `Zab.tla`) --
+  and the safety property the libcmc invariant corresponds to, plus
+  links to animated/interactive visualizations.
+
 ## 0.2.0 (2026-11-09)
 
 Checking the program you ship.  `cmc --model-file` runs an unmodified

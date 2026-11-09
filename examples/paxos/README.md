@@ -7,6 +7,18 @@ only the eight-line state hook every target has.  cmc is the network
 between them, and explores every order in which the acceptors take the
 proposers' requests.
 
+## Reference
+
+- **Canonical TLA+**: Leslie Lamport's `Paxos.tla`, refining `Voting.tla`,
+  in the TLA+ examples repository:
+  <https://github.com/tlaplus/Examples/tree/master/specifications/Paxos>.
+  Agreement is `Voting`'s consistency theorem (the chosen set is empty or
+  a single value), which Paxos refines; the `agreement` invariant checked
+  below is that property on the two proposers' decisions.
+- **Visualizations**: an interactive single-decree Paxos walkthrough,
+  <https://web.archive.org/web/2020/https://harry.me/blog/2014/12/27/neat-algorithms-paxos/>;
+  and *Paxos Made Moderately Complex*, <https://paxos.systems/>.
+
 ## The protocol
 
 `paxos.c` is textbook single-decree Paxos.  Nodes 0 and 1 are proposers,

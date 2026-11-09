@@ -1,0 +1,21 @@
+# examples/hc/hc.c: Humming Consensus / chain replication.  A client
+# write is committed only when the tail has stored it, then acked; an
+# acknowledged write must never be lost, even across a crash or a
+# reconfiguration.  node[i] = [epoch][value]; a crash keeps the durable
+# record.
+#
+#   cc -no-pie -o hc examples/hc/hc.c
+#   cmc --model-file examples/hc/hc.model --binary ./hc --crashes 1
+[target]
+nodes = 3
+
+[environment]
+client_write = 7        # a client writes 7 to the head (node 0)
+timeouts = 1            # the spare may reconfigure the chain once
+crashes = 1             # a node may crash (head, tail, or spare)
+
+[invariants]
+# No lost ack: every value a client saw acknowledged is still held by
+# some node of the chain.  Chain replication's safety property (van
+# Renesse & Schneider, OSDI 2004): an acknowledged update is durable.
+no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"
