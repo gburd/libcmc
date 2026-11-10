@@ -96,6 +96,37 @@ notification the checker services; every chained master stays pristine.
 `chain.c` prints `OK` for three workers.  This is the gate that was
 missing; the engine integration follows it.
 
+## The open bug, diagnosed precisely (2026-11-10)
+
+The `--fast` snapshot-DFS is wired in (`src/cmc_proc.c`, off `main`, off
+by default).  On the `repl` fixture (two nodes, each blocked in
+`accept()` at the root) it fails: after `resume_world` forks a snapshot
+and `PTRACE_CONT`s the worker, the worker does **not** re-trap its
+blocked `accept()` to the seccomp listener.  Tracing every
+`NOTIF_RECV` shows the worker instead running a real `read()` on a real
+fd (~500000, a pid-range number), which the checker's connection map
+(`cfd`/`cpeer`) does not know -> `die("node 0 reads fd N, which is no
+connection")`.  The restored node shows `nc=0`, `next_fd=501`,
+`block_kind=BK_ACCEPT`, `saved.orig_rax=43` (accept), `saved.rax=-512`
+(ERESTARTSYS) -- so the snapshot point is correct, but the resume does
+not re-raise the accept notification.
+
+`chain.c` resumes a worker blocked in `write(777)` and it DOES re-trap;
+the engine's `accept()` case does not.  The difference to chase: a
+re-issued `accept()` that was mid-flight (ERESTARTSYS) at snapshot time
+behaves differently under the fork-injection + register restore than a
+clean `write()` -- the resumed worker proceeds into the kernel instead
+of trapping to the filter's `USER_NOTIF`.  Next step: a minimal probe
+that freezes a node blocked in `accept()` (not `write()`), forks it, and
+checks whether the re-issued `accept()` notifies the held listener;
+reproduce chain.c's success for `accept` before touching the engine.
+
+Until that probe is green, `--fast` must not ship; BFS replay stays the
+sound default and the oracle.  Note the north-star work (the abstract
+model + binding + refinement checker, Milestones A-C in
+`docs/plans/tlaplus-scope.md`) does NOT depend on `--fast`; only liveness
+(F) and scale (G) do.
+
 ## Still to do in `src/`
 
 - manage a tree of frozen snapshots and reap them without zombies or fd
