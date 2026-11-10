@@ -17,6 +17,7 @@
  */
 #include "cmc.h"
 #include "cmc_proc.h"
+#include "cmc_spec.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -290,6 +291,22 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 	for (int i = 1; i < argc; i++)
 		if (!strcmp(argv[i], "--model-file"))
 			return proc_main(argc, argv);
+	/* cmc --spec FILE.cml [--define TAG ...]: the abstract-model front
+	 * end (cmc_spec.c), model-checking a declarative spec on its own. */
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--spec"))
+		{
+			const char *path = NULL;
+			char *defs[16]; int ndefs = 0;
+			for (int j = 1; j < argc; j++)
+			{
+				if (!strcmp(argv[j], "--spec") && j + 1 < argc) path = argv[++j];
+				else if (!strcmp(argv[j], "--define") && j + 1 < argc && ndefs < 16) defs[ndefs++] = argv[++j];
+				else { fprintf(stderr, "cmc: %s is not supported with --spec\n", argv[j]); return 3; }
+			}
+			if (!path) usage();
+			return cmc_spec_main(path, defs, ndefs);
+		}
 	cmc_options_default(&o);
 	o.progress_s = 60;
 	for (int i = 1; i < argc; i++)

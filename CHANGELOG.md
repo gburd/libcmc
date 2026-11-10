@@ -5,6 +5,20 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The abstract-model front end, `cmc --spec FILE.cml` (Milestone B of the
+  TLA+-scope plan): a small, TLC-like explicit-state checker for a
+  declarative specification on its own, no implementation.  A `.cml`
+  module has `const`, `var` (integer, set and function/record
+  variables), `init`, named guarded `action`s (with finite parameters,
+  so one action covers a family of transitions), and `invariant`s; the
+  search is breadth-first, so a violation is the shortest action
+  sequence.  Calibrated against single-worker TLC: on the counter and
+  mutex fixtures `cmc --spec` gives the same verdict, distinct-state
+  count and shortest-counterexample depth as TLC on the hand-written
+  TLA+ twin (test/spec/*.tla; `make check-spec-calibration`).  This is
+  the abstract half of "one model, many implementations" -- the model an
+  implementation will be checked to refine (Milestone C).
+
 - The invariant language gained integer arithmetic (`+`, `-`, `*`,
   `mod`) and `count V in SET : PRED` (cardinality), so a quorum property
   -- a committed value is held by a majority -- is now expressible; it

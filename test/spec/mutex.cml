@@ -1,0 +1,44 @@
+# test/spec/mutex.cml: two processes competing for a lock, as an abstract
+# model.  Each process is idle, trying, or in its critical section.  The
+# safety property is mutual exclusion: never are both in the critical
+# section at once.
+#
+# This is the red test for the .cml checker: built as-is it is SAFE;
+# with `-D BUG` (enter without checking the lock) two processes can be
+# critical together and the checker must report MutualExclusion violated
+# at the shortest depth.
+#
+#   cmc --spec test/spec/mutex.cml
+#   cmc --spec test/spec/mutex.cml --define BUG     (the unsafe variant)
+
+module mutex
+
+const N = 2                 # processes 0 .. N-1
+
+# pc[i]: 0 = idle, 1 = trying, 2 = critical
+var pc : [0 .. N-1 -> 0 .. 2]
+var held : 0 .. 1           # 1 = the lock is held
+
+init pc == [i in 0 .. N-1 -> 0] and held == 0
+
+action try(i in 0 .. N-1):
+  when pc[i] == 0
+  pc' = [pc except [i] = 1]
+
+action enter(i in 0 .. N-1):
+  when pc[i] == 1 and held == 0
+  pc' = [pc except [i] = 2]
+  held' = 1
+
+# the planted bug: enter without requiring the lock to be free
+action enter_bug(i in 0 .. N-1) [BUG]:
+  when pc[i] == 1
+  pc' = [pc except [i] = 2]
+  held' = 1
+
+action leave(i in 0 .. N-1):
+  when pc[i] == 2
+  pc' = [pc except [i] = 0]
+  held' = 0
+
+invariant mutual_exclusion: (count i in 0 .. N-1 : pc[i] == 2) <= 1

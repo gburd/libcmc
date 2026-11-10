@@ -55,11 +55,13 @@ $(B):
 
 $(B)/cmc.o: src/cmc.c include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(B)/cmc_cli.o: src/cmc_cli.c src/cmc_proc.h include/cmc.h | $(B)
+$(B)/cmc_cli.o: src/cmc_cli.c src/cmc_proc.h src/cmc_spec.h include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 $(B)/cmc_proc.o: src/cmc_proc.c src/cmc_proc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o
+$(B)/cmc_spec.o: src/cmc_spec.c src/cmc_spec.h | $(B)
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o $(B)/cmc_spec.o
 	$(AR) rcs $@ $^
 $(B)/cmc-preload.so: src/cmc_preload.c | $(B)
 	$(CC) $(ALL_CFLAGS) -fPIC -shared -o $@ $<
@@ -93,6 +95,7 @@ check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 	CMC_BUILD=$(B) $(B)/test_cmc
 	test/toy_gate.sh $(B)/cmc
 	CC=$(CC) test/proc_gate.sh $(B)
+	test/spec_gate.sh $(B)
 
 # man pages lint clean and cover the API and every option; the guide's
 # model builds and behaves as the guide says (test/docs_gate.sh)
@@ -127,6 +130,13 @@ check-calibration-fast: $(B)/cmc
 # the calibration's own teeth: planted HC port bugs must fail calibration
 check-hc-bugs:
 	calib/hc/hc_bug_gate.sh
+
+# the abstract-model checker against live single-worker TLC: cmc --spec
+# and TLC must agree on verdict, distinct-state count and shortest-
+# counterexample depth for every .cml fixture with a .tla twin.  Needs
+# nix (tlc); run under `nix develop`.
+check-spec-calibration: $(B)/cmc
+	test/spec_calibrate.sh $(B)/cmc
 
 check-all: check-unit check-msan check-calibration check-hc-bugs
 
