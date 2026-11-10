@@ -28,10 +28,10 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
-for f in repl elect lease durlog; do
+for f in repl elect lease durlog quorum; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 # the consensus examples are real, tested fixtures too
@@ -80,15 +80,20 @@ expect "paxos: correct holds (N=5)"        0 "No error has been found" $(runx "$
 expect "paxos: two values decided"         1 "agreement is violated" $(runx "$HERE/examples/paxos/paxos.model" paxos-bug)
 expect "paxos: --simulate finds it"        1 "agreement is violated" $(runx "$HERE/examples/paxos/paxos.model" paxos-bug) --simulate --seed 1 --walks 2000
 expect "paxos: --simulate is not a pass"   2 "not exhaustive" $(runx "$HERE/examples/paxos/paxos.model" paxos) --simulate --seed 1 --walks 50
+# refinement (Milestone C): the shipping Paxos binary is checked against
+# the REUSABLE abstract model examples/spec/paxos.cml via a binding --
+# the same abstract model `cmc --spec` checks standalone and TLC
+# calibrates.  Correct refines; the planted bug does not.
+expect "paxos: the binary refines the abstract spec" 0 "No error has been found" $(runx "$HERE/examples/spec/paxos-refine.model" paxos) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind"
+expect "paxos: the bug does NOT refine (agreement)"  1 "does not refine" $(runx "$HERE/examples/spec/paxos-refine.model" paxos-bug) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --simulate --seed 1 --walks 3000
 expect "raft: election safety holds"        0 "No error has been found" $(runx "$HERE/examples/raft/raft.model" raft)
 expect "raft: double vote -> two leaders"   1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug)
 expect "raft: --simulate finds it"          1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug) --simulate --seed 1 --walks 2000
 expect "raftlog: no committed entry is lost" 0 "No error has been found" $(runx "$HERE/examples/raft/raftlog.model" raftlog)
 expect "raftlog: early-ack loses a committed entry" 1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug)
 expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug) --simulate --seed 1 --walks 2000
-expect "hc: no acknowledged write is lost"   0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
-expect "hc: early-ack loses a write on crash" 1 "no_lost_ack is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug)
-expect "hc: --simulate finds it"            1 "no_lost_ack is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --simulate --seed 1 --walks 2000
+expect "hc: agreement holds, even under a partition"   0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
+expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 6 --drops 1 --simulate --seed 3 --walks 5000
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)
 expect "zab: --simulate finds it"           1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug) --simulate --seed 1 --walks 2000
@@ -134,6 +139,46 @@ model '[target]\nnodes = 9\n[invariants]\nx = "1 == 1"\n'
 expect "too many nodes is an error"        3 "nodes" --model-file "$M" --binary "$B/proc/repl"
 model '[tagret]\nnodes = 2\n[invariants]\nx = "1 == 1"\n'
 expect "an unknown section is an error"    3 "unknown section" --model-file "$M" --binary "$B/proc/repl"
+
+echo "-- the invariant language: quantify over nodes, and named fields"
+# the agreement property written as it reads in TLA+ (for all pairs of
+# proposers), with a [fields] name instead of a raw byte offset, catches
+# the same bug the hand-expanded two-node form did.  This is the red
+# test for the quantifier: a broken binding would make it pass.
+printf '[target]\nnodes = 5\n[fields]\ndecided = 7\n[invariants]\nagreement = "all i in nodes : all j in nodes : node[i].decided <= 0 or node[j].decided <= 0 or node[i].decided == node[j].decided"\n' > "$OUT/q.model"
+expect "nodes-quantifier + field: correct Paxos holds"  0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/paxos"
+expect "nodes-quantifier + field: the bug is caught"    1 "agreement is violated" --model-file "$OUT/q.model" --binary "$B/proc/paxos-bug"
+printf '[target]\nnodes = 2\n[fields]\nx = 0\n[invariants]\nt = "node[0].nosuch == 0"\n' > "$OUT/q.model"
+expect "an unknown field is a parse error"             3 "invariant t" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+printf '[target]\nnodes = 2\n[invariants]\nt = "3 in nodes"\n' > "$OUT/q.model"
+expect "membership in nodes is not defined"            3 "invariant t" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+printf '[target]\nnodes = 2\n[fields]\nx = 0\nx = 1\n[invariants]\nt = "1 == 1"\n' > "$OUT/q.model"
+expect "a field defined twice is an error"             3 "field x defined twice" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+# `eventually` is a reachability check: some reached state must satisfy
+# it, reported at the end of an exhaustive search.  Met => holds;
+# unreachable => a violation.  (Not fairness-based liveness.)
+printf '[target]\nnodes = 2\n[environment]\ntimeouts = 2\n[invariants]\nreached = "eventually node[1][0] == 1"\n' > "$OUT/q.model"
+expect "eventually: a reachable state satisfies it"     0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/elect"
+printf '[target]\nnodes = 2\n[environment]\ntimeouts = 2\n[invariants]\nreached = "eventually node[0][0] == 200"\n' > "$OUT/q.model"
+expect "eventually: never reached is a violation"       1 "reached is violated" --model-file "$OUT/q.model" --binary "$B/proc/elect"
+
+echo "-- the invariant language: arithmetic and counting (quorums)"
+# `count V in SET : PRED` and arithmetic let an invariant state a
+# cardinality property -- here, quorum safety: a committed value is held
+# by a majority.  Inexpressible without count; it is the red test for
+# Milestone A (the value model).
+expect "quorum: a committed value has a majority"      0 "No error has been found" $(run quorum quorum)
+expect "quorum: a sub-quorum commit is caught"         1 "quorum_commit is violated" $(run quorum quorum-bug)
+expect "quorum: --simulate finds it"                   1 "quorum_commit is violated" $(run quorum quorum-bug) --simulate --seed 1 --walks 2000
+# arithmetic evaluates with the usual precedence
+printf '[target]\nnodes = 2\n[invariants]\nt = "2 + 3 * 4 == 14 and 10 mod 3 == 1 and (1 + 1) * 2 == 4"\n' > "$OUT/q.model"
+expect "arithmetic: precedence and mod"                 0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+# count's body must parse even when the set is empty, so a broken body
+# is never hidden; mod by zero and a missing count body are errors
+printf '[target]\nnodes = 2\n[invariants]\nt = "count w in nodes : node[w].bad == 0"\n[fields]\nv = 0\n' > "$OUT/q.model"
+expect "count: an unknown field in the body is an error" 3 "invariant t" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+printf '[target]\nnodes = 2\n[invariants]\nt = "5 mod 0 == 0"\n' > "$OUT/q.model"
+expect "arithmetic: mod by zero is an error"            3 "invariant t" --model-file "$OUT/q.model" --binary "$B/proc/repl"
 expect "an option it cannot honour is an error" 3 "not supported with --model-file" $(run repl repl) --inv agree_on_ack
 $CC -O1 -w -fPIE -pie -o "$B/proc/repl-pie" "$T/repl.c" 2>/dev/null &&
 	expect "a PIE binary is an error"      3 "non-PIE" --model-file "$T/repl.model" --binary "$B/proc/repl-pie"

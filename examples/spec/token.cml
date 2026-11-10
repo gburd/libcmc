@@ -1,0 +1,33 @@
+# examples/spec/token.cml: a token passes among N interchangeable nodes.
+# The node identities are fully symmetric, so this is a clean example of
+# symmetry reduction (Milestone E): the states "node 1 holds it", "node 2
+# holds it", ... are all equivalent and collapse to one representative.
+#
+# IMPORTANT: the symmetric values (node ids 1 .. N) are a DEDICATED range
+# that does not overlap any other value the spec uses, so permuting them
+# is sound everywhere they appear.  This is the discipline TLA+ enforces
+# with model values; with plain integers it is the author's obligation,
+# and the gate checks it -- the verdict must be identical with symmetry
+# on and off.  (A reduction that changed the verdict would be an unsound
+# declaration.)
+#
+#   cmc --spec examples/spec/token.cml
+
+module token
+
+const N = 3                 # nodes are 1 .. N (0 = the token is nowhere yet)
+
+symmetry 1 .. N             # the node ids are interchangeable
+
+var holder : 0 .. N         # which node holds the token (0 = none)
+var last : 0 .. N           # the node that held it just before (0 = none)
+
+init holder == 0 and last == 0
+
+# a node takes the token; the previous holder becomes `last`
+action take(n in 1 .. N):
+  when holder != n
+  holder' = n
+  last' = holder
+
+invariant holder_sane: holder >= 0 and holder <= N and last >= 0 and last <= N

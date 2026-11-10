@@ -1,6 +1,6 @@
 ---
 title: "Adversarial review of actor mode"
-parent: Background
+parent: History and provenance
 nav_order: 2
 permalink: /background/review/
 lede: >-

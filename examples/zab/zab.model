@@ -16,4 +16,4 @@ crashes = 1             # a node may crash
 # No lost commit: every acknowledged (committed) transaction is still
 # held by some node.  Underlies ZAB's Agreement (apache/zookeeper
 # Zab.tla): a delivered transaction survives.
-no_lost_commit = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"
+no_lost_commit = "all r in replies : some j in nodes : r.val in node[j]"

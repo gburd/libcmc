@@ -20,10 +20,11 @@ in the source tree, and `make check` builds and checks each one.
 - **[Raft leader election](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/raft)**
   -- three nodes; Election Safety (at most one leader per term), with and
   without a crash.  Reference: Ongaro's `raft.tla`.
-- **[Humming Consensus / chain replication](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/hc)**
-  -- a replicated log down a chain; an acknowledged write is never lost,
-  even across a crash or reconfiguration.  Reference: van Renesse &
-  Schneider, OSDI 2004.
+- **[Humming Consensus](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/hc)**
+  -- a generic agreement protocol (like Paxos/Raft/ZAB): three
+  participants agree on a configuration per epoch over write-once
+  register stores; agreement holds even under a network partition.
+  Reference: Fritchie, PaPoC 2016.
 - **[ZooKeeper Atomic Broadcast](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/zab)**
   -- a leader and two followers; a committed transaction is never lost.
   Reference: Apache ZooKeeper's `Zab.tla`.

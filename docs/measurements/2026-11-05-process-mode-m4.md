@@ -1,6 +1,6 @@
 ---
 title: "Process mode M4: multi-node, the checker owns the network"
-parent: Background
+parent: History and provenance
 nav_order: 9
 permalink: /background/process-mode-m4/
 lede: >-

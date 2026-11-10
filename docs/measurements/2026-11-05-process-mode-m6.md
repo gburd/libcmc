@@ -1,6 +1,6 @@
 ---
 title: "Process mode M6: crash loses volatile, keeps durable"
-parent: Background
+parent: History and provenance
 nav_order: 12
 permalink: /background/process-mode-m6/
 lede: >-

@@ -1,0 +1,24 @@
+# test/spec/counter.cml: the smallest abstract model -- a bounded
+# counter.  Two actions race (increment and reset); the invariant is that
+# the counter never leaves its range.  This pins the .cml checker's core:
+# init, guarded actions, a safety invariant, and bounded enumeration.
+#
+#   cmc --spec test/spec/counter.cml
+
+module counter
+
+const N = 3
+
+var x : 0 .. N
+
+init x == 0
+
+action inc:
+  when x < N
+  x' = x + 1
+
+action reset:
+  when x == N
+  x' = 0
+
+invariant in_range: x >= 0 and x <= N

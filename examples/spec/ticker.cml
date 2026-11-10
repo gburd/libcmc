@@ -1,0 +1,33 @@
+# examples/spec/ticker.cml: a counter that should eventually reach its
+# maximum.  This is the liveness example (Milestone F): under weak
+# fairness -- every continuously-enabled action eventually fires -- the
+# `tick` action keeps firing and the counter must reach N, so the
+# property `eventually x == N` holds.
+#
+# Built with `--define RESET`, a `reset` action can fire forever, giving
+# a fair cycle (tick, reset, tick, reset, ...) in which x never reaches
+# N: liveness then FAILS, and the checker reports the lasso.
+#
+#   cmc --spec examples/spec/ticker.cml                 (liveness holds)
+#   cmc --spec examples/spec/ticker.cml --define RESET   (liveness fails)
+
+module ticker
+
+const N = 3
+
+var x : 0 .. N
+
+init x == 0
+
+action tick:
+  when x < N
+  x' = x + 1
+
+# with RESET, this fair cycle lets x avoid N forever
+action reset [RESET]:
+  when x > 0
+  x' = 0
+
+fairness weak
+
+property reaches_max: eventually x == N

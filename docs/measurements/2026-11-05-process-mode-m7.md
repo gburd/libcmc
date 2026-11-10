@@ -1,6 +1,6 @@
 ---
 title: "Process mode M7: honest verdicts, and what Paxos costs"
-parent: Background
+parent: History and provenance
 nav_order: 13
 permalink: /background/process-mode-m7/
 lede: >-

@@ -1,6 +1,6 @@
 ---
 title: "Process mode M0: catching a bug in code written as it ships"
-parent: Background
+parent: History and provenance
 nav_order: 4
 permalink: /background/process-mode-m0/
 lede: >-

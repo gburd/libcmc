@@ -17,6 +17,7 @@
  */
 #include "cmc.h"
 #include "cmc_proc.h"
+#include "cmc_spec.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -225,6 +226,8 @@ static int
 proc_main(int argc, char **argv)
 {
 	CmcProcOptions po = {0};
+	const char *spec_path = NULL, *bind_path = NULL;
+	char *defs[16]; int ndefs = 0;
 
 	po.seed = 1;
 	po.walks = 1000;
@@ -261,12 +264,25 @@ proc_main(int argc, char **argv)
 			po.drops = atoi(ARG());
 		else if (!strcmp(a, "--timeouts"))
 			po.timeouts = atoi(ARG());
+		else if (!strcmp(a, "--refine"))
+			{ spec_path = ARG(); po.refine = 1; }
+		else if (!strcmp(a, "--bind"))
+			bind_path = ARG();
+		else if (!strcmp(a, "--define"))
+			{ if (ndefs < 16) defs[ndefs++] = (char *) ARG(); else usage(); }
 		else
 		{
 			fprintf(stderr, "cmc: %s is not supported with --model-file\n", a);
 			return 3;
 		}
 #undef ARG
+	}
+	if (po.refine)
+	{
+		char err[256];
+		if (!bind_path) { fprintf(stderr, "cmc: --refine needs --bind FILE\n"); return 3; }
+		if (cmc_refine_load_spec(spec_path, defs, ndefs)) return 3;
+		if (cmc_refine_load_bind(bind_path, err, sizeof err)) { fprintf(stderr, "cmc: binding: %s\n", err); return 3; }
 	}
 	return cmc_proc_main(&po);
 }
@@ -290,8 +306,39 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 	models = tab;
 	nmodels = ntab;
 	for (int i = 1; i < argc; i++)
-		if (!strcmp(argv[i], "--model-file"))
+		if (!strcmp(argv[i], "--model-file") || !strcmp(argv[i], "--refine"))
 			return proc_main(argc, argv);
+	/* cmc --spec FILE.cml [--define TAG ...]: the abstract-model front
+	 * end (cmc_spec.c), model-checking a declarative spec on its own. */
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--spec"))
+		{
+			const char *path = NULL;
+			char *defs[16]; int ndefs = 0;
+			for (int j = 1; j < argc; j++)
+			{
+				if (!strcmp(argv[j], "--spec") && j + 1 < argc) path = argv[++j];
+				else if (!strcmp(argv[j], "--define") && j + 1 < argc && ndefs < 16) defs[ndefs++] = argv[++j];
+				else { fprintf(stderr, "cmc: %s is not supported with --spec\n", argv[j]); return 3; }
+			}
+			if (!path) usage();
+			return cmc_spec_main(path, defs, ndefs);
+		}
+	/* cmc --emit-tla FILE.cml [--define TAG ...]: translate to TLA+ */
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--emit-tla"))
+		{
+			const char *path = NULL;
+			char *defs[16]; int ndefs = 0;
+			for (int j = 1; j < argc; j++)
+			{
+				if (!strcmp(argv[j], "--emit-tla") && j + 1 < argc) path = argv[++j];
+				else if (!strcmp(argv[j], "--define") && j + 1 < argc && ndefs < 16) defs[ndefs++] = argv[++j];
+				else { fprintf(stderr, "cmc: %s is not supported with --emit-tla\n", argv[j]); return 3; }
+			}
+			if (!path) usage();
+			return cmc_emit_tla(path, defs, ndefs);
+		}
 	cmc_options_default(&o);
 	o.progress_s = 60;
 	for (int i = 1; i < argc; i++)

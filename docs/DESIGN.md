@@ -25,8 +25,32 @@ rules in `docs/steering/project.md`, but not yet a search loop: the
 in-process engine stores worlds and expands them, while a process cannot
 be restored from bytes, so the process front end stores action
 sequences and replays them from a fresh launch.  Joining them needs a
-restorable process (fork from a snapshot), which is the next engine
-work.
+restorable process (fork from a snapshot); the mechanic is proven
+(`experiments/fork-snapshot/chain.c`) and a `--fast` snapshot search is
+in progress, with breadth-first replay the sound default.
+
+## How the checker drives an unmodified binary
+
+The process front end needs to *be* the kernel for the program under
+check: hand it the bytes of a message when the checker schedules one,
+make a clock read return logical time, decide when a syscall blocks.
+It does this with **seccomp user notification** (`SECCOMP_FILTER_FLAG_
+NEW_LISTENER`, Linux >= 5.0), not eBPF.  The target installs a seccomp
+filter that, for the syscalls the checker owns (`socket`, `bind`,
+`accept`, `sendto`/`recvfrom`, `clock_gettime`, ...), **suspends** the
+target and hands the checker a notification on a listener descriptor.
+The checker reads the syscall and its arguments, reads or writes the
+target's memory with `process_vm_readv`/`process_vm_writev`, and writes
+back the result the target sees.  `ptrace` (`PTRACE_SEIZE`) is used to
+read registers and, for the snapshot search, to freeze and fork a node.
+
+The seccomp *filter* is classic BPF -- the bytecode `seccomp(2)` has
+always taken -- but there is no eBPF program, no `bpf(2)`, no kernel
+probe.  Observation tools built on eBPF uprobes/kprobes can watch
+syscalls but cannot cleanly substitute a result and hold the process at
+the boundary; seccomp user notification is the primitive that lets the
+checker stand in for the network, the clock and the disk of an
+otherwise unmodified, as-shipped binary.
 
 The original design of the in-process engine, written before the code,
 is `research/01-survey-and-design.md` §4a.  The review that changed the
@@ -146,6 +170,13 @@ timers and 8 wakes per node.  Going over any limit, or over a `--*-cap`,
 is reported as an engine violation, never truncated.
 
 ## Roadmap
+
+The north star past 0.3.0 is
+[TLA+ scope over the shipped code]({{ '/reference/plan-tlaplus-scope/' | relative_url }}):
+an abstract model plus a binding to the production binary, checked by
+refinement, so one model validates many implementations and a category
+of protocols shares a common base.  The milestones below are the
+tactical steps the engine needs regardless of that framing.
 
 For the process front end, next: fork from a snapshot instead of
 replaying from launch (the speed that larger models need), then the

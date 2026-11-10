@@ -13,6 +13,8 @@ client_write = 7        # a client submits command 7 to the leader (node 0)
 crashes = 1             # a node may crash
 
 [invariants]
-# State Machine Safety (committed entries): every committed (acknowledged)
-# command is still held by some node.  Ongaro, raft.tla.
-no_lost_committed = "all r in replies : r.val in node[0] or r.val in node[1] or r.val in node[2]"
+# State Machine Safety (committed entries): every committed
+# (acknowledged) command is still held by some node.  This is the
+# durable-commit half of Raft's State Machine Safety property (Ongaro &
+# Ousterhout, raft.tla): a committed entry is never lost.
+no_lost_committed = "all r in replies : some j in nodes : r.val in node[j]"

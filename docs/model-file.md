@@ -45,6 +45,15 @@ depth    = 40              # bound the search to this many actions
 no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1]"
 ```
 
+An optional `[fields]` section names byte offsets, so an invariant can
+say `node[i].epoch` instead of `node[i][7]`:
+
+```
+[fields]
+epoch = 0                  # node[i].epoch is byte 0 of node i's state
+value = 1
+```
+
 Any other section or key is an error, and so is a value out of range.
 A mistyped `crashs = 1` must not quietly check the model with no
 crashes, so the loader refuses it and names the line.
@@ -111,29 +120,87 @@ the protocol.
 ## Invariant language
 
 A small expression language over each node's reported state and the
-reply log.  It is deliberately not Turing-complete.
+reply log.  It is deliberately not Turing-complete.  It is a **safety**
+language: an invariant is checked in every reachable state.  (There is
+no temporal operator and no liveness; see
+[eventually](#eventually-a-bounded-reachability-check) for the one
+reachability check it does offer.)
 
 - `node[i]`: node `i`'s state, a byte array (`0 <= i < nodes`); after a
-  crash, its durable state.
+  crash, its durable state.  `i` may be a literal or an index variable
+  bound by `all i in nodes` / `some i in nodes`.
 - `node[i][k]`: byte `k` of it, or -1 when the node has reported fewer
   bytes (a crashed node that made nothing durable, for one).
+- `node[i].name`: the same byte, named by a `[fields]` offset.  An
+  unknown name is a parse error.
 - `replies`: the reply log; each entry `r` has `r.src` and `r.val`.
-- integers.
+- integers, with arithmetic `A + B`, `A - B`, `A * B`, `A mod B` (usual
+  precedence; parenthesise to group).
+- `count V in SET : PRED`: how many elements of SET satisfy PRED -- a
+  cardinality.  SET is `node[i]`, `replies` or `nodes`, and V binds as
+  in a quantifier.
 
 ```
-all V in SET : EXPR        some V in SET : EXPR     (SET: node[i] or replies)
+all V in SET : EXPR        some V in SET : EXPR
+    SET is node[i] (its bytes), replies (the log), or nodes (the
+    indices 0..nodes-1, binding V as an index for node[V])
+count V in SET : EXPR      how many V in SET make EXPR true
+A + B   A - B   A * B   A mod B        (arithmetic over integers)
 EXPR and EXPR    EXPR or EXPR    not EXPR    ( EXPR )
 A == B   A != B   A < B   A <= B   A > B   A >= B   A in node[i]
 ```
 
-`and` and `or` associate left to right with equal precedence; use
-parentheses.  Every invariant is parsed when the file is loaded, and a
-parse error, text after a complete expression, or an unclosed
-parenthesis is an error, even in a part no state reaches.
+Counting and arithmetic are how a quorum property reads.  "A committed
+value is held by a majority of the three workers":
+
+```
+quorum = "node[0].value == 0 or
+          (count w in nodes : w != 0 and node[w].value == node[0].value) * 2 > 3"
+```
+
+(all on one line in the file).  Everything stays bounded integers and
+finite counting -- the SMT-encodable fragment -- so the proof bridge
+(planned) can hand these to a solver.
+
+Quantifying over `nodes` is how an invariant reads like its TLA+
+mirror.  Agreement over all pairs, for instance:
+
+```
+agreement = "all i in nodes : all j in nodes :
+             node[i].decided <= 0 or node[j].decided <= 0
+             or node[i].decided == node[j].decided"
+```
+
+(all on one line in the file).  `and` and `or` associate left to right
+with equal precedence; use parentheses.  Every invariant is parsed when
+the file is loaded, and a parse error, an unknown field, text after a
+complete expression, or an unclosed parenthesis is an error, even in a
+part no state reaches.
 
 An invariant holds in a state when its expression is true there.  A
 violation prints the shortest sequence of actions that reaches the
 failing state, by name, and each node's state there.
+
+### `eventually`: a bounded reachability check
+
+An invariant prefixed `eventually` is satisfied if **some** reached
+state satisfies its expression; it is reported, as a violation, only at
+the end of an **exhaustive** search that reached no such state.  A
+bounded search (a depth, state or time limit, or `--simulate`) does not
+report it, since "not seen yet" there is not a real failure.
+
+This is reachability, not fairness-based liveness.  It answers "can the
+system reach a good state at all" (a leader is elected, a value is
+chosen), which catches a protocol that can *never* make progress.  It
+does not answer "does every execution eventually make progress" -- that
+is a temporal property over infinite fair runs, which the process front
+end does not check (it cannot restore a world to close a cycle).  The
+in-process calibration engine does have fair-schedule bounded liveness
+(`CMC_EVENTUALLY_PROP`); see [Design]({{ '/reference/design/' | relative_url }}).
+
+```
+elected = "eventually some i in nodes : node[i].role == 2"
+```
 
 ## Exit status
 

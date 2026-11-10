@@ -12,9 +12,16 @@
 [target]
 nodes = 5
 
+[fields]
+decided = 7      # node[i].decided: a proposer's decided value (0 = none)
+
 [invariants]
-# Agreement: the one safety property of single-decree Paxos.  Two
-# proposers never decide different values.  Checked in every reachable
-# state, including after a crash (when a node's state is what it made
-# durable).
-agreement = "node[0][7] <= 0 or node[1][7] <= 0 or node[0][7] == node[1][7]"
+# Agreement: the one safety property of single-decree Paxos.  No two
+# proposers decide different values.  Written over all pairs of nodes;
+# only proposers (0, 1) report a decided byte, and an acceptor's state
+# is shorter so node[acceptor].decided reads -1 ("none"), which the
+# `<= 0` guard excludes.  This maps to the consistency theorem of
+# Lamport's Paxos (the Voting refinement in tlaplus/Examples): at most
+# one value is ever chosen.  Checked in every reachable state, including
+# after a crash (when a node's state is what it made durable).
+agreement = "all i in nodes : all j in nodes : node[i].decided <= 0 or node[j].decided <= 0 or node[i].decided == node[j].decided"
