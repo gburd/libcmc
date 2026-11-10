@@ -45,6 +45,12 @@ echo "-- symmetry reduction: interchangeable node ids collapse"
 # check for the declaration.
 expect "token: symmetry collapses the state space" 0 "3 distinct states found" --spec "$HERE/examples/spec/token.cml"
 
+echo "-- liveness: temporal properties under weak fairness"
+# the ticker must eventually reach its max under weak fairness (holds);
+# with a reset action a fair cycle avoids the max (fails).
+expect "ticker: eventually-max holds under fairness" 0 "1 property held" --spec "$HERE/examples/spec/ticker.cml"
+expect "ticker: a fair reset cycle breaks it"        1 "reaches_max is violated" --spec "$HERE/examples/spec/ticker.cml" --define RESET
+
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
 expect "emit-tla: a well-formed module header" 0 "MODULE paxos" --emit-tla "$HERE/examples/spec/paxos.cml"
 expect "emit-tla: translates operators to TLA+" 0 "Cardinality" --emit-tla "$HERE/examples/spec/paxos.cml"

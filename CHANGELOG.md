@@ -5,6 +5,21 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Liveness with weak fairness for the abstract checker (Milestone F): a
+  `.cml` can declare `fairness weak` and temporal properties
+  `property P: eventually E` (`<>E`) and `property P: A ~> B`
+  (leads-to).  After the safety search, the checker builds the reachable
+  state graph and finds a fair violating lasso -- a cycle, all of whose
+  states miss the goal, that weak fairness does not forbid (no action
+  enabled throughout the cycle yet never taken) -- via SCC analysis on
+  the sub-graph restricted to goal-free states.  `examples/spec/ticker.cml`
+  (a counter that must reach its max) holds under fairness; built with a
+  `reset` action (`--define RESET`) a fair cycle avoids the max and the
+  property fails.  Cross-checked against TLC: `cmc --emit-tla` now emits
+  `WF_vars(...)` fairness and the temporal property, and TLC agrees on
+  both verdicts.  This is the in-process-engine liveness the plan scoped
+  for the abstract side; process-side liveness still waits on
+  fork-from-snapshot.
 - Symmetry reduction for the abstract checker (Milestone E): a
   `symmetry SET` declaration in a `.cml` names interchangeable values
   (node ids, say); the checker canonicalises each state to the

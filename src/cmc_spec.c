@@ -86,6 +86,7 @@ typedef struct {
 	char tag[SP_NAME];			/* a [TAG] gate: action active only if -D TAG */
 } Action;
 typedef struct { char name[SP_NAME]; char expr[SP_EXPR]; } SpInv;
+typedef struct { char name[SP_NAME]; int kind; char a[SP_EXPR]; char b[SP_EXPR]; } SpProp;	/* kind: 0 eventually(a), 1 a~>b */
 
 static struct {
 	char modname[SP_NAME];
@@ -97,6 +98,8 @@ static struct {
 	char define[SP_MAXCONST][SP_NAME]; int ndef;	/* -D tags given */
 	char fname[SP_MAXCONST][SP_NAME]; int foff[SP_MAXCONST]; int nfield;	/* binding [fields] */
 	char symmetry[SP_EXPR]; int has_sym;	/* a set of interchangeable values */
+	SpProp prop[SP_MAXINV]; int nprop;	/* liveness properties */
+	int fair_weak;						/* all actions weakly fair */
 } S;
 
 #include "cmc_spec.h"
@@ -360,12 +363,12 @@ static int sp_load_into(const char *path);
 
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
-	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0;
+	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0; S.nprop=0; S.fair_weak=0;
 	if(sp_load_into(path)) return -1;
 	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
 	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
 	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
-	if(S.ninv==0){ fprintf(stderr,"cmc: %s: no invariant\n",path); return -1; }
+	if(S.ninv==0 && S.nprop==0){ fprintf(stderr,"cmc: %s: no invariant or property\n",path); return -1; }
 	return 0;
 }
 
@@ -411,6 +414,17 @@ static int sp_load_into(const char *path){
 				snprintf(V->fdom,SP_EXPR,"%s",d); snprintf(V->dom,SP_EXPR,"%s",r);
 			} else { V->is_fun=0; snprintf(V->dom,SP_EXPR,"%s",dom); V->fdom[0]=0; }
 			S.nvar++; in_action=0; continue;
+		}
+		if(!strncmp(s,"fairness ",9)){ if(!strcmp(sp_trim(s+9),"weak")) S.fair_weak=1; else { fprintf(stderr,"cmc: %s:%d: only 'fairness weak' is supported\n",path,ln); goto bad; } in_action=0; continue; }
+		if(!strncmp(s,"property",8)){
+			char *rest=sp_trim(s+8); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: property needs name:\n",path,ln); goto bad; }
+			*col=0; if(S.nprop>=SP_MAXINV){ fprintf(stderr,"cmc: too many properties\n"); goto bad; }
+			SpProp *P=&S.prop[S.nprop]; snprintf(P->name,SP_NAME,"%s",sp_trim(rest)); char *body=sp_trim(col+1);
+			char *lt=strstr(body,"~>");
+			if(lt){ *lt=0; P->kind=1; snprintf(P->a,SP_EXPR,"%s",sp_trim(body)); snprintf(P->b,SP_EXPR,"%s",sp_trim(lt+2)); }
+			else if(!strncmp(body,"eventually",10)){ P->kind=0; snprintf(P->a,SP_EXPR,"%s",sp_trim(body+10)); P->b[0]=0; }
+			else { fprintf(stderr,"cmc: %s:%d: property must be 'eventually E' or 'A ~> B'\n",path,ln); goto bad; }
+			S.nprop++; in_action=0; continue;
 		}
 		if(!strncmp(s,"symmetry ",9)){ snprintf(S.symmetry,SP_EXPR,"%s",sp_trim(s+9)); S.has_sym=1; in_action=0; continue; }
 		if(!strncmp(s,"init ",5)){ const char *ic=sp_trim(s+5);
@@ -617,6 +631,140 @@ static int seen_insert(uint64_t h){
 
 typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
 
+/* =====================================================================
+ * liveness (Milestone F): weak-fairness-based temporal properties on the
+ * abstract model.  After the safety search, rebuild the reachable state
+ * graph explicitly (states, action-labeled edges, per-state enabled
+ * actions), then for each property find a FAIR violating cycle (lasso):
+ *   eventually P : a reachable cycle, all of whose states have ~P, that
+ *                  is weakly fair (no action is enabled throughout the
+ *                  cycle yet never taken in it) -> P is not guaranteed.
+ *   A ~> B       : a reachable A-state from which such a ~B fair cycle
+ *                  is reachable -> B does not always follow A.
+ * Sound under the stated weak-fairness-of-all-actions assumption; gated
+ * against TLC's liveness on the emitted TLA+.
+ * ===================================================================== */
+#define LV_MAX 200000
+static int lv_cap;
+static State *lv_st;				/* lv_st[i] = state i */
+static int *lv_eadj, *lv_eact, *lv_ehead, *lv_enext; /* edge lists */
+static int lv_ne;
+static unsigned char *lv_enabled;	/* lv_enabled[i*nact + a] = action a enabled at state i */
+static int lv_n;
+/* fp -> index map (open addressing) */
+static uint64_t *lv_fp; static int *lv_idx; static size_t lv_mcap;
+static int lv_find_or_add(uint64_t h, int *added){
+	size_t m=lv_mcap-1, i=h&m;
+	for(;;){ if(lv_fp[i]==0 && lv_idx[i]==0 && !(h==0)){ /* empty */ }
+		if(lv_idx[i]==-1){ lv_fp[i]=h; lv_idx[i]=lv_n; *added=1; return lv_n; }
+		if(lv_fp[i]==h){ *added=0; return lv_idx[i]; } i=(i+1)&m; }
+}
+static void lv_add_edge(int from,int to,int act){ lv_eadj[lv_ne]=to; lv_eact[lv_ne]=act; lv_enext[lv_ne]=lv_ehead[from]; lv_ehead[from]=lv_ne; lv_ne++; }
+
+/* build the reachable graph from init; returns 0 ok, -1 too big/err */
+static int lv_build(const State *init, char *err, size_t errcap){
+	lv_cap=LV_MAX; lv_mcap=1; while(lv_mcap<(size_t)LV_MAX*4) lv_mcap<<=1;
+	lv_st=malloc(sizeof(State)*lv_cap); lv_ehead=malloc(sizeof(int)*lv_cap); lv_enabled=calloc((size_t)lv_cap*S.nact,1);
+	lv_eadj=malloc(sizeof(int)*lv_cap*4); lv_eact=malloc(sizeof(int)*lv_cap*4); lv_enext=malloc(sizeof(int)*lv_cap*4);
+	lv_fp=calloc(lv_mcap,sizeof(uint64_t)); lv_idx=malloc(sizeof(int)*lv_mcap);
+	if(!lv_st||!lv_ehead||!lv_enabled||!lv_eadj||!lv_eact||!lv_enext||!lv_fp||!lv_idx){ snprintf(err,errcap,"out of memory"); return -1; }
+	for(size_t i=0;i<lv_mcap;i++) lv_idx[i]=-1;
+	for(int i=0;i<lv_cap;i++) lv_ehead[i]=-1;
+	lv_n=0; lv_ne=0;
+	int *queue=malloc(sizeof(int)*lv_cap); size_t qh=0,qt=0;
+	int added; int i0=lv_find_or_add(state_fp(init),&added); lv_st[lv_n++]=*init; queue[qt++]=i0;
+	while(qh<qt){
+		int si=queue[qh++]; State *cs=&lv_st[si];
+		for(int a=0;a<S.nact && lv_ne+16<lv_cap*4;a++){
+			if(!act_active(&S.act[a])) continue;
+			State succ[256]; int ns=0,rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
+			bind_params(&S.act[a],&env,0,cs,succ,&ns,256,err,errcap,&rc);
+			if(rc<0) return -1;
+			if(ns>0) lv_enabled[(size_t)si*S.nact+a]=1;
+			for(int k=0;k<ns;k++){
+				uint64_t h=state_fp(&succ[k]); int ad; int ti=lv_find_or_add(h,&ad);
+				if(ad){ if(lv_n>=lv_cap){ snprintf(err,errcap,"liveness: more than %d states",LV_MAX); return -1; } lv_st[lv_n++]=succ[k]; queue[qt++]=ti; }
+				lv_add_edge(si,ti,a);
+			}
+		}
+	}
+	free(queue); return 0;
+}
+
+/* Tarjan SCC restricted to states where mask[i]==1, over edges between
+ * masked states; fills comp[] (only for masked states).  lv_nscc SCCs. */
+static int *lv_low,*lv_num,*lv_comp,*lv_stk,*lv_onstk; static int lv_cnt,lv_sp,lv_nscc;
+static const unsigned char *lv_mask;
+static void lv_scc(int u){
+	lv_num[u]=lv_low[u]=lv_cnt++; lv_stk[lv_sp++]=u; lv_onstk[u]=1;
+	for(int e=lv_ehead[u];e!=-1;e=lv_enext[e]){ int v=lv_eadj[e]; if(!lv_mask[v]) continue;
+		if(lv_num[v]==-1){ lv_scc(v); if(lv_low[v]<lv_low[u]) lv_low[u]=lv_low[v]; }
+		else if(lv_onstk[v] && lv_num[v]<lv_low[u]) lv_low[u]=lv_num[v]; }
+	if(lv_low[u]==lv_num[u]){ int w; do{ w=lv_stk[--lv_sp]; lv_onstk[w]=0; lv_comp[w]=lv_nscc; }while(w!=u); lv_nscc++; }
+}
+
+/* is SCC c (within the masked subgraph) a weakly-fair cycle?  It must
+ * have an internal edge, and no action may be enabled at every state of
+ * c yet taken on no intra-c edge. */
+static int lv_fair(int c){
+	int has_internal=0;
+	for(int u=0;u<lv_n;u++){ if(!lv_mask[u]||lv_comp[u]!=c) continue;
+		for(int ed=lv_ehead[u];ed!=-1;ed=lv_enext[ed]) if(lv_mask[lv_eadj[ed]]&&lv_comp[lv_eadj[ed]]==c) has_internal=1; }
+	if(!has_internal) return 0;
+	if(S.fair_weak){
+		for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue;
+			int enabled_all=1, taken=0;
+			for(int u=0;u<lv_n;u++){ if(!lv_mask[u]||lv_comp[u]!=c) continue;
+				if(!lv_enabled[(size_t)u*S.nact+a]) enabled_all=0;
+				for(int ed=lv_ehead[u];ed!=-1;ed=lv_enext[ed]) if(lv_mask[lv_eadj[ed]]&&lv_comp[lv_eadj[ed]]==c && lv_eact[ed]==a) taken=1; }
+			if(enabled_all && !taken) return 0;	/* WF forbids staying in c */
+		}
+	}
+	return 1;
+}
+
+/* find a weakly-fair cycle entirely within states where `goal` is FALSE;
+ * returns the SCC id, or -1 if none.  (A fair ~goal cycle = a liveness
+ * counterexample for `eventually goal`.) */
+static unsigned char *lv_maskbuf;
+static int lv_bad_cycle(const char *goal){
+	for(int u=0;u<lv_n;u++){ Env env; memset(&env,0,sizeof env); env.var=lv_st[u].v; env.np=0; Value v; char e[64];
+		int g = sp_eval(goal,&env,&v,e,sizeof e) ? (int)v.i : 0; lv_maskbuf[u] = g?0:1; }
+	lv_mask=lv_maskbuf;
+	for(int i=0;i<lv_n;i++){ lv_num[i]=-1; lv_low[i]=0; lv_comp[i]=-1; lv_onstk[i]=0; }
+	lv_cnt=0; lv_sp=0; lv_nscc=0;
+	for(int i=0;i<lv_n;i++) if(lv_mask[i] && lv_num[i]==-1) lv_scc(i);
+	for(int c=0;c<lv_nscc;c++) if(lv_fair(c)) return c;
+	return -1;
+}
+
+/* check all liveness properties; returns index+1 of a violated property
+ * (name via *name), 0 if all hold, -1 on error */
+static int liveness_check(const State *init, const char **name, char *err, size_t errcap){
+	if(S.nprop==0) return 0;
+	if(lv_build(init,err,errcap)) return -1;
+	lv_low=malloc(sizeof(int)*lv_n); lv_num=malloc(sizeof(int)*lv_n); lv_comp=malloc(sizeof(int)*lv_n);
+	lv_stk=malloc(sizeof(int)*lv_n); lv_onstk=calloc(lv_n,sizeof(int)); lv_maskbuf=malloc(lv_n);
+	int rc=0;
+	for(int pi=0;pi<S.nprop && !rc;pi++){ SpProp *P=&S.prop[pi];
+		if(P->kind==0){ /* eventually a: fail if a fair ~a cycle is reachable */
+			if(lv_bad_cycle(P->a)>=0){ *name=P->name; rc=pi+1; }
+		} else { /* a ~> b: fail if an A-state can reach a fair ~b cycle */
+			int bad=lv_bad_cycle(P->b);
+			if(bad>=0){
+				unsigned char *canreach=calloc(lv_n,1);
+				for(int u=0;u<lv_n;u++) if(lv_maskbuf[u]&&lv_comp[u]==bad) canreach[u]=1;
+				int chg=1; while(chg){ chg=0; for(int u=0;u<lv_n;u++){ if(canreach[u]) continue; for(int ed=lv_ehead[u];ed!=-1;ed=lv_enext[ed]) if(canreach[lv_eadj[ed]]){ canreach[u]=1; chg=1; break; } } }
+				for(int u=0;u<lv_n && !rc;u++) if(canreach[u]){ Env env; memset(&env,0,sizeof env); env.var=lv_st[u].v; env.np=0; Value v; char e[64]; if(sp_eval(P->a,&env,&v,e,sizeof e) && v.i){ *name=P->name; rc=pi+1; } }
+				free(canreach);
+			}
+		}
+	}
+	free(lv_low);free(lv_num);free(lv_comp);free(lv_stk);free(lv_onstk);free(lv_maskbuf);
+	free(lv_st);free(lv_ehead);free(lv_enabled);free(lv_eadj);free(lv_eact);free(lv_enext);free(lv_fp);free(lv_idx);
+	return rc;
+}
+
 int cmc_spec_main(const char *path, char **defs, int ndefs){
 	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++){ snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]); }
 	if(sp_load(path)) return 3;
@@ -678,10 +826,19 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 		qh++;
 	}
 	if(ret==0){
-		printf("Model checking completed. No error has been found.\n");
-		printf("%zu states generated, %zu distinct states found, 0 states left on queue.\n", generated, distinct);
-		printf("The depth of the complete state graph search is %d.\n", maxdepth+1);
-		printf("  %d invariant%s held.\n", S.ninv, S.ninv==1?"":"s");
+		/* safety held; now check any liveness properties on the full graph */
+		if(S.nprop>0){
+			const char *pn=NULL; char lerr[256];
+			int lr=liveness_check(&init,&pn,lerr,sizeof lerr);
+			if(lr<0){ fprintf(stderr,"cmc: liveness: %s\n",lerr); ret=3; }
+			else if(lr>0){ printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",pn); ret=1; }
+		}
+		if(ret==0){
+			printf("Model checking completed. No error has been found.\n");
+			printf("%zu states generated, %zu distinct states found, 0 states left on queue.\n", generated, distinct);
+			printf("The depth of the complete state graph search is %d.\n", maxdepth+1);
+			printf("  %d invariant%s, %d propert%s held.\n", S.ninv, S.ninv==1?"":"s", S.nprop, S.nprop==1?"y":"ies");
+		}
 	}
 	for(size_t i=0;i<qt;i++) free(q[i]);
 	free(q); free(succ); free(seen);
@@ -867,9 +1024,16 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs){
 	}
 	/* Next = disjunction of actions */
 	fprintf(o,"Next ==\n"); { int any=0; for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o,"  \\/ %s\n",S.act[a].name); any=1; } if(!any) fprintf(o,"  UNCHANGED vars\n"); } fprintf(o,"\n");
-	fprintf(o,"Spec == Init /\\ [][Next]_vars\n\n");
+	fprintf(o,"Spec == Init /\\ [][Next]_vars");
+	if(S.fair_weak){ for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o," /\\ WF_vars(%s)",S.act[a].name); } }
+	fprintf(o,"\n\n");
 	/* invariants */
 	for(int i=0;i<S.ninv;i++){ fprintf(o,"%s ==\n  ",S.inv[i].name); tla_expr_fixup(S.inv[i].expr,o); fprintf(o,"\n"); }
+	/* liveness properties */
+	for(int i=0;i<S.nprop;i++){ SpProp *P=&S.prop[i]; fprintf(o,"%s ==\n  ",P->name);
+		if(P->kind==0){ fprintf(o,"<>("); tla_expr_fixup(P->a,o); fprintf(o,")"); }
+		else { fprintf(o,"("); tla_expr_fixup(P->a,o); fprintf(o,") ~> ("); tla_expr_fixup(P->b,o); fprintf(o,")"); }
+		fprintf(o,"\n"); }
 	fprintf(o,"====\n");
 	return 0;
 }

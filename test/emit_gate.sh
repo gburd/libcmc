@@ -44,6 +44,28 @@ printf '%s\n' "$rows" | while IFS='|' read -r dir cml mod cfgline inv want def; 
 	check "$dir" "$cml" "$mod" "$cfgline" "$inv" "$want" "$def"
 done
 
+# liveness: the generated TLA+ carries WF fairness and a temporal PROPERTY;
+# TLC must agree with cmc --spec (ticker holds; ticker+RESET violates)
+checkprop() {
+	dir=$1 cml=$2 mod=$3 cfgline=$4 prop=$5 want=$6 def=$7
+	d="$OUT/$mod-prop-$want"; mkdir -p "$d"
+	# shellcheck disable=SC2086
+	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
+	# the module name must match the filename for TLC
+	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
+	printf 'SPECIFICATION Spec\n%s\nPROPERTY %s\nCHECK_DEADLOCK FALSE\n' "$cfgline" "$prop" > "$d/$mod.cfg"
+	bash "$TLC" "$d/$mod.tla" "$d/$mod.cfg" -workers 1 > "$d/out.txt" 2>&1
+	if grep -qiE 'Parse Error|semantic analysis failed' "$d/out.txt"; then echo "FAIL $cml prop [$want]: TLC rejected the TLA+"; echo x>"$OUT/fail"; return; fi
+	v=$(grep -c 'Temporal properties were violated' "$d/out.txt")
+	if [ "$want" = VIOLATION ]; then
+		[ "$v" -ge 1 ] && echo "ok   $cml prop [$want]: TLC violates the temporal property" || { echo "FAIL $cml prop [$want]: expected a temporal violation"; echo x>"$OUT/fail"; }
+	else
+		[ "$v" = 0 ] && echo "ok   $cml prop [$want]: TLC holds the temporal property" || { echo "FAIL $cml prop [$want]: expected it to hold"; echo x>"$OUT/fail"; }
+	fi
+}
+checkprop examples/spec ticker ticker "CONSTANT N = 3" reaches_max PASS ""
+checkprop examples/spec ticker tickerb "CONSTANT N = 3" reaches_max VIOLATION "--define RESET"
+
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "emit_gate: ok (generated TLA+ parses and agrees with cmc --spec)" || echo "emit_gate: FAILED"
 exit $fail
