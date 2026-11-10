@@ -56,7 +56,7 @@ expect "emit-tla: a well-formed module header" 0 "MODULE paxos" --emit-tla "$HER
 expect "emit-tla: translates operators to TLA+" 0 "Cardinality" --emit-tla "$HERE/examples/spec/paxos.cml"
 
 echo "-- the loader refuses malformed specs"
-printf 'module m\nvar x : 0 .. 2\ninit x == 0\naction a:\n  x\x27 = x + 1\n' > "$OUT/noinv.cml"
+printf 'module m\nvar x : 0 .. 2\ninit x == 0\naction a:\n  when x < 2\n  x%s = x + 1\n' "'" > "$OUT/noinv.cml"
 expect "a spec with no invariant is an error" 3 "no invariant" --spec "$OUT/noinv.cml"
 printf 'var x : 0 .. 2\ninit x == 0\ninvariant t: x <= 2\n' > "$OUT/nomod.cml"
 expect "a spec with no module is an error"    3 "no module" --spec "$OUT/nomod.cml"
