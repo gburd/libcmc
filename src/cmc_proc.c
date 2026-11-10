@@ -1278,15 +1278,15 @@ fork_master(pid_t master, struct user_regs_struct saved, pid_t *worker)
 	if ((st >> 8) != (SIGTRAP | (PTRACE_EVENT_FORK << 8))) return -1;
 	unsigned long m = 0; ptrace(PTRACE_GETEVENTMSG, master, 0, &m);
 	pid_t child = (pid_t) m; waitpid(child, &st, 0);
-	/* the next master: restore it to the exact boundary, leave it frozen */
-	struct iovec rv = {&saved, sizeof saved};
+	/* restore BOTH to the rewound syscall boundary, exactly as the proven
+	 * chain.c / acctest.c probes do: rip on the syscall instruction and
+	 * rax = orig_rax (the syscall number), so when resumed each re-issues
+	 * its blocked syscall and raises a fresh notification.  The child is
+	 * the next frozen master; the parent becomes the worker. */
+	struct user_regs_struct b = saved;
+	b.rip = saved.rip - 2; b.rax = saved.orig_rax;
+	struct iovec rv = {&b, sizeof b};
 	ptrace(PTRACE_SETREGSET, child, (void *) (long) NT_PRSTATUS, &rv);
-	/* the worker: restore the EXACT ptrace-stop registers (rip just past
-	 * the syscall instruction, rax = -ERESTARTSYS).  The kernel's own
-	 * syscall-restart machinery then re-issues the interrupted syscall on
-	 * resume, raising a fresh seccomp notification.  (Hand-rewinding rip
-	 * to the syscall instruction instead makes the task take SIGSYS and
-	 * die -- the kernel must drive the restart, not us.) */
 	ptrace(PTRACE_SETREGSET, master, (void *) (long) NT_PRSTATUS, &rv);
 	*worker = master;
 	return child;
