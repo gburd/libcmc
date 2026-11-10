@@ -805,6 +805,13 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 			for(QN *x=cur; x; x=x->prev) steps[si++]=x->step;
 			for(int i=cn-2;i>=0;i--) printf("    %d. %s\n", cn-1-i, steps[i]);
 			free(steps);
+			/* the variable values at the failing state */
+			printf("  state:");
+			for(int vi=0;vi<S.nvar;vi++){ const Value *v=&cur->st.v[vi]; printf(" %s=",S.var[vi].name);
+				if(v->tag==T_FUN){ printf("["); for(int j=0;j<v->n;j++) printf("%s%ld:%ld",j?",":"",v->k[j],v->v[j]); printf("]"); }
+				else if(v->tag==T_SET){ printf("{"); for(int j=0;j<v->n;j++) printf("%s%ld",j?",":"",v->e[j]); printf("}"); }
+				else printf("%ld",v->i); }
+			printf("\n");
 			ret=1; break;
 		}
 		if(cur->depth>maxdepth) maxdepth=cur->depth;
