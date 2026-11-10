@@ -20,6 +20,15 @@
 .Op Fl -drops Ar n
 .Op Fl -timeouts Ar n
 .Nm
+.Fl -spec Ar file
+.Op Fl -define Ar tag ...
+.Nm
+.Fl -refine Ar spec
+.Fl -bind Ar file
+.Fl -binary Ar path
+.Op Fl -model-file Ar file
+.Op Fl -simulate
+.Nm
 .Fl -model Ar name
 .Op Fl -tlc-cfg Ar file | Fl -cfg Ar key Ns = Ns Ar value Ns Op , Ns ...
 .Op Fl -inv Ar name Ns Op , Ns ...
@@ -122,6 +131,39 @@ Check this program instead of the file's
 for example a build with a planted bug.
 It must be a non-PIE executable
 .Pq built with Fl no-pie .
+.It Fl -spec Ar file
+Model-check an abstract specification
+.Pq a Pa .cml No module
+on its own, the way TLC checks a TLA+ module: no implementation, just
+the declared variables, actions and invariants.
+See
+.Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.It Fl -define Ar tag
+Activate an action gated with
+.Op Ar tag
+in a
+.Pa .cml
+spec; repeatable.
+Used to turn on a planted-bug action.
+.It Fl -refine Ar spec
+Check that the implementation named by
+.Fl -binary
+or the model file
+.Em refines
+the abstract
+.Ar spec
+.Pq a Pa .cml No module .
+At each reached implementation state the abstract invariants are
+checked against the mapped state, so one abstract model validates many
+implementations.
+Requires
+.Fl -bind .
+.It Fl -bind Ar file
+The binding
+.Pq a Pa .bind No file
+that maps the implementation's observables onto the abstract variables,
+for
+.Fl -refine .
 .It Fl -crashes Ar n , Fl -drops Ar n , Fl -timeouts Ar n
 Override the file's budgets.
 .It Fl -depth Ar d

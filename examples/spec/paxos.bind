@@ -1,0 +1,29 @@
+# examples/spec/paxos.bind: the connective tissue that lets the abstract
+# model examples/spec/paxos.cml be checked against the running Paxos
+# binary examples/paxos/paxos.c.  It maps each abstract variable the
+# invariant reads to an expression over what the implementation OBSERVABLY
+# emits -- the state hook and the reply log -- never its internals.
+#
+# The abstract `chosen[v]` (value v has been decided) is observed as:
+# some proposer's hook reports decided == v.  In the implementation,
+# proposers are nodes 0 and 1 and byte 7 of their hook is the decided
+# value (0 = none).
+#
+#   cmc --refine examples/spec/paxos.cml --bind examples/spec/paxos.bind \
+#       --binary ./paxos --nodes 5
+#
+# Only the abstract variables the invariant depends on need a binding;
+# here that is `chosen`.  A function variable is bound element by element
+# over its declared domain.
+
+spec   = examples/spec/paxos.cml
+binary = examples/paxos/paxos.c
+
+[fields]
+decided = 7              # byte 7 of a proposer's hook is its decided value
+
+[map]
+# chosen[v] for each v in the abstract domain 1..V: 1 iff some node's
+# decided byte equals v.  `v` ranges over the abstract variable's domain;
+# the right-hand side is evaluated over the implementation's observables.
+chosen[v] = "some i in nodes : node[i].decided == v"

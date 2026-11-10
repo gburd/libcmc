@@ -1,0 +1,16 @@
+# examples/spec/paxos-refine.model: the target and environment for
+# checking that the Paxos implementation (examples/paxos/paxos.c) refines
+# the abstract model examples/spec/paxos.cml.  The abstract invariants
+# are the property; this file supplies only the process topology, so its
+# own [invariants] section is a trivial placeholder.
+#
+#   cmc --model-file examples/spec/paxos-refine.model \
+#       --binary ./paxos \
+#       --refine examples/spec/paxos.cml --bind examples/spec/paxos.bind
+[target]
+nodes = 5
+
+[invariants]
+# refinement supplies the real property (the abstract model's invariants);
+# this placeholder just satisfies the model-file loader
+ok = "1 == 1"

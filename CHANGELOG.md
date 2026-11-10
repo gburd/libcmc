@@ -5,6 +5,22 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Refinement checking, `cmc --refine SPEC.cml --bind FILE.bind --binary
+  PROG` (Milestone C, the heart of the plan): the shipping binary is
+  checked against the *reusable abstract model* -- the same `.cml` that
+  `cmc --spec` checks on its own and TLC calibrates.  A `.bind` file maps
+  the implementation's observables (state-hook fields, the reply log) to
+  the abstract variables; at each reached implementation state the
+  abstract state is built from the binding and the abstract invariants
+  are checked.  Demonstrated on Paxos: the shipping
+  `examples/paxos/paxos.c` refines `examples/spec/paxos.cml` (561 states,
+  no error), and the planted-bug build does not -- the abstract
+  Agreement is violated, sourced from the reusable model, not a
+  hand-written implementation-side invariant.  This is "one model, many
+  implementations": point the same spec and binding at any Paxos binary.
+  The binding may reference only observables, never internals (the
+  no-omniscient-oracle rule), so the refinement is as honest as the
+  state hook is complete.
 - Abstract-model modules: a `.cml` can `extends` (or `import`) another,
   merging its constants, variables, actions and invariants, so a shared
   base is written once.  `examples/spec/consensus.cml` is that base for

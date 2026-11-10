@@ -39,6 +39,7 @@
  */
 #define _GNU_SOURCE				/* seccomp, ptrace, process_vm_readv */
 #include "cmc_proc.h"
+#include "cmc_spec.h"
 
 #if defined(__linux__) && defined(__x86_64__)
 
@@ -1216,6 +1217,22 @@ kill_all(void)
 	}
 }
 
+/* refinement (Milestone C): expose the live nodes' observables to the
+ * abstract model, and check the implementation's state refines it. */
+static long ob_node_byte(void *cx, int i, int k){ (void)cx; if(i<0||i>=M.nodes||k<0||k>=N[i].canon_len) return -1; return N[i].canon[k]; }
+static int  ob_node_len(void *cx, int i){ (void)cx; return (i>=0&&i<M.nodes)?N[i].canon_len:0; }
+static long ob_repl_src(void *cx, int r){ (void)cx; return rep_src[r]; }
+static long ob_repl_val(void *cx, int r){ (void)cx; return rep_val[r]; }
+static int
+refine_check_state(const char **name, char *err, size_t errcap)
+{
+	CmcObs o = {0};
+	o.nnodes = M.nodes; o.nrepl = nrep;
+	o.node_byte = ob_node_byte; o.node_len = ob_node_len;
+	o.repl_src = ob_repl_src; o.repl_val = ob_repl_val;
+	return cmc_refine_check(&o, name, err, errcap);
+}
+
 static int
 check_invariants(int *which)
 {
@@ -1278,6 +1295,33 @@ report(int which, const int *seq, int len)
 	}
 	printf("\n  replies:"); for (int i = 0; i < nrep; i++) printf(" (n%d,%d)", rep_src[i], rep_val[i]);
 	printf("%s\n", nrep ? "" : " none");
+	kill_all();
+}
+
+/* report a refinement counterexample: the action trace and the state,
+ * the same way report() does, but the heading is printed by the caller. */
+static void
+report_refine(const int *seq, int len)
+{
+	char nm[48];
+	printf("Error: The behavior up to this point is (%d actions):\n", len);
+	Act a[MAXACT]; int na;
+	run_seq(NULL, 0, a, &na);
+	for (int i = 0; i < len; i++)
+	{
+		if (seq[i] >= na) die(1, "replay of the counterexample diverged at step %d", i);
+		printf("    %d. %s\n", i + 1, act_name(&a[seq[i]], nm, sizeof nm));
+		apply(&a[seq[i]]);
+		na = enum_actions(a);
+	}
+	printf("  node states:");
+	for (int i = 0; i < M.nodes; i++)
+	{
+		printf(" node[%d]=", i);
+		if (!N[i].canon_len) printf("()");
+		for (int k = 0; k < N[i].canon_len; k++) printf("%s%d", k ? "," : "", N[i].canon[k]);
+	}
+	printf("\n");
 	kill_all();
 }
 
@@ -1409,6 +1453,20 @@ cmc_proc_main(const CmcProcOptions *po)
 					free(seq);
 					return 1;
 				}
+				if (po->refine)
+				{
+					const char *inm = NULL; char rerr[256];
+					int rr = refine_check_state(&inm, rerr, sizeof rerr);
+					if (rr == -2) { fprintf(stderr, "cmc: refinement: %s\n", rerr); kill_all(); free(seq); return 3; }
+					if (rr >= 0)
+					{
+						kill_all();
+						printf("Walk %" PRIu64 " (seed %" PRIu64 "):\n", w + 1, po->seed);
+						printf("Error: the implementation does not refine the spec: abstract invariant %s is violated.\n", inm);
+						report_refine(seq, len);
+						free(seq); return 1;
+					}
+				}
 				if (na == 0 || len >= depth) break;
 				int pick = (int) (next_rand() % (uint64_t) na);
 				seq[len++] = pick;
@@ -1442,6 +1500,19 @@ cmc_proc_main(const CmcProcOptions *po)
 
 		int which = -1; int ok = check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
+		if (ok && po->refine)
+		{
+			/* refinement: does this reached state refine the abstract model? */
+			const char *inm = NULL; char rerr[256];
+			int rr = refine_check_state(&inm, rerr, sizeof rerr);
+			if (rr == -2) { fprintf(stderr, "cmc: refinement: %s\n", rerr); kill_all(); free(seq); return 3; }
+			if (rr >= 0)
+			{
+				printf("Error: the implementation does not refine the spec: abstract invariant %s is violated.\n", inm);
+				report_refine(seq, e.len);
+				free(seq); return 1;
+			}
+		}
 		uint64_t fp[2]; world_fp(fp);
 		int isnew = mark(fp[0], fp[1]);
 		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; }

@@ -18,6 +18,11 @@ typedef struct CmcProcOptions
 	size_t		max_states;		/* 0: no limit */
 	double		time_limit;		/* seconds; 0: no limit */
 	int			crashes, drops, timeouts;	/* -1: the model file's budget */
+	/* refinement (Milestone C): if refine is set, at each reached state
+	 * the implementation's observables are mapped to the abstract model
+	 * (spec_file) by the binding (bind_file) and the abstract invariants
+	 * are checked.  The spec and binding are loaded by the caller. */
+	int			refine;
 } CmcProcOptions;
 
 int			cmc_proc_main(const CmcProcOptions *po);

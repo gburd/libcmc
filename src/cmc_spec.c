@@ -95,13 +95,17 @@ static struct {
 	Action act[SP_MAXACT]; int nact;
 	SpInv inv[SP_MAXINV]; int ninv;
 	char define[SP_MAXCONST][SP_NAME]; int ndef;	/* -D tags given */
+	char fname[SP_MAXCONST][SP_NAME]; int foff[SP_MAXCONST]; int nfield;	/* binding [fields] */
 } S;
+
+#include "cmc_spec.h"
 
 /* ---- evaluation context: constants + variable values + bound params - */
 typedef struct {
 	const Value *var;			/* current value of each variable, by index */
 	char pname[SP_MAXPARAM][SP_NAME]; long pval[SP_MAXPARAM]; int np;	/* bound params */
 	const Value *primed; int have_primed;	/* for x' in assignments (unused in guards) */
+	const CmcObs *obs;			/* refinement: observable accessor, or NULL */
 } Env;
 
 static long cst_lookup(const char *name, int *found){
@@ -200,6 +204,30 @@ static Value sp_atom(Pst *s){
 	if(n==0){ fail(s,"expected an expression"); return z; }
 	if(!strcmp(id,"TRUE")) return vbool(1);
 	if(!strcmp(id,"FALSE")) return vbool(0);
+	/* refinement observables (only when an obs accessor is present) */
+	if(s->env->obs){
+		const CmcObs *o=s->env->obs;
+		if(!strcmp(id,"nodes")){ Value set={0}; set.tag=T_SET; for(int i=0;i<o->nnodes && set.n<SP_SETMAX;i++) set.e[set.n++]=i; set_canon(&set); return set; }
+		if(!strcmp(id,"replies")){ Value set={0}; set.tag=T_SET; for(int r=0;r<o->nrepl && set.n<SP_SETMAX;r++) set.e[set.n++]=r; set_canon(&set); return set; }
+		if(!strcmp(id,"node")){
+			sp_skip(s); if(*s->p!='['){ fail(s,"expected [ after node"); return z; } s->p++;
+			Value iv=sp_or(s); if(!s->ok) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++;
+			int i=(int)iv.i; long k=-1;
+			sp_skip(s);
+			if(*s->p=='['){ s->p++; Value kv=sp_or(s); if(!s->ok) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++; k=kv.i; }
+			else if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn); int fi=-1; for(int j=0;j<S.nfield;j++) if(!strcmp(S.fname[j],fn)) fi=j; if(fi<0){ fail(s,"unknown field"); return z; } k=S.foff[fi]; }
+			else { fail(s,"node[i] needs [k] or .field"); return z; }
+			return vint(o->node_byte(o->ctx,i,(int)k));
+		}
+		if(!strcmp(id,"r")){
+			/* r.src / r.val when ranging over replies (param r bound to index) */
+			if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn);
+				long ri=0; for(int i=0;i<s->env->np;i++) if(!strcmp("r",s->env->pname[i])) ri=s->env->pval[i];
+				if(!strcmp(fn,"src")) return vint(o->repl_src(o->ctx,(int)ri));
+				if(!strcmp(fn,"val")) return vint(o->repl_val(o->ctx,(int)ri));
+				fail(s,"reply has .src and .val"); return z; }
+		}
+	}
 	/* bound parameter? */
 	for(int i=0;i<s->env->np;i++) if(!strcmp(id,s->env->pname[i])) return vint(s->env->pval[i]);
 	/* constant? */
@@ -611,4 +639,79 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 	for(size_t i=0;i<qt;i++) free(q[i]);
 	free(q); free(succ); free(seen);
 	return ret;
+}
+
+/* =====================================================================
+ * refinement support (Milestone C): map an implementation's observables
+ * to the abstract variables via a binding, then check the abstract
+ * invariants.  The binding gives, per abstract variable, an expression
+ * over observables (node[i].field, nodes, replies) in the .cml grammar.
+ * A function variable is bound element by element over its domain.
+ * ===================================================================== */
+static struct { char var[SP_NAME]; char idx[SP_NAME]; char expr[SP_EXPR]; } B_map[SP_MAXVAR];
+static int B_nmap;
+
+int cmc_refine_load_spec(const char *path, char **defs, int ndefs){
+	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++) snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]);
+	return sp_load(path);
+}
+
+int cmc_refine_load_bind(const char *path, char *err, size_t errcap){
+	FILE *f=fopen(path,"r"); if(!f){ snprintf(err,errcap,"cannot open %s",path); return -1; }
+	B_nmap=0; S.nfield=0; char line[1024]; int sect=0; /* 1=fields 2=map */
+	while(fgets(line,sizeof line,f)){
+		char *h=strchr(line,'#'); if(h)*h=0; char *s=sp_trim(line); if(!*s) continue;
+		if(s[0]=='['){ if(!strncmp(s,"[fields]",8)) sect=1; else if(!strncmp(s,"[map]",5)) sect=2; else sect=0; continue; }
+		char *eq=strchr(s,'='); if(!eq){ continue; } /* spec=/binary= header lines ignored here */
+		*eq=0; char *k=sp_trim(s); char *v=sp_trim(eq+1);
+		/* strip quotes around v */
+		if(*v=='"'){ v++; char *q=strrchr(v,'"'); if(q)*q=0; }
+		if(sect==1){ if(S.nfield<SP_MAXCONST){ snprintf(S.fname[S.nfield],SP_NAME,"%s",k); S.foff[S.nfield]=atoi(v); S.nfield++; } }
+		else if(sect==2){
+			if(B_nmap>=SP_MAXVAR){ snprintf(err,errcap,"too many bindings"); fclose(f); return -1; }
+			/* k is VAR or VAR[idx] */
+			char *lb=strchr(k,'['); if(lb){ *lb=0; char *rb=strchr(lb+1,']'); if(rb)*rb=0; snprintf(B_map[B_nmap].idx,SP_NAME,"%s",sp_trim(lb+1)); } else B_map[B_nmap].idx[0]=0;
+			snprintf(B_map[B_nmap].var,SP_NAME,"%s",sp_trim(k)); snprintf(B_map[B_nmap].expr,SP_EXPR,"%s",v); B_nmap++;
+		}
+	}
+	fclose(f);
+	if(B_nmap==0){ snprintf(err,errcap,"binding has no [map]"); return -1; }
+	return 0;
+}
+
+/* evaluate the domain of a function variable (its key set) from its
+ * declared range-domain string, using constants only */
+static int var_domain(const Var *V, Value *dom, char *err, size_t errcap){
+	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	return sp_eval_set(V->fdom,&env,dom,err,errcap)?0:-1;
+}
+
+int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap){
+	/* build the abstract state: each variable's Value from its binding */
+	State st; for(int i=0;i<S.nvar;i++) st.v[i]=vint(0);
+	for(int m=0;m<B_nmap;m++){
+		int vi=var_index(B_map[m].var); if(vi<0){ snprintf(err,errcap,"binding for unknown var %s",B_map[m].var); return -2; }
+		Var *V=&S.var[vi];
+		if(B_map[m].idx[0] && V->is_fun){
+			/* function var: evaluate expr for each key in the domain, with idx bound */
+			Value dom; if(var_domain(V,&dom,err,errcap)){ return -2; }
+			Value fn={0}; fn.tag=T_FUN;
+			for(int e=0;e<dom.n && fn.n<SP_MAPMAX;e++){
+				Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=1;
+				snprintf(env.pname[0],SP_NAME,"%s",B_map[m].idx); env.pval[0]=dom.e[e];
+				Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -2;
+				fn.k[fn.n]=dom.e[e]; fn.v[fn.n]=r.i; fn.n++;
+			}
+			st.v[vi]=fn;
+		} else {
+			Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=0;
+			Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -2;
+			st.v[vi]=r;
+		}
+	}
+	/* check the abstract invariants on the built state */
+	int bad=sp_check(&st,err,errcap);
+	if(bad==-2) return -2;
+	if(bad>=0){ *name=S.inv[bad].name; return bad; }
+	return -1;
 }
