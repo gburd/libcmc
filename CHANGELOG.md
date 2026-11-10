@@ -5,6 +5,8 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 0.4.0 (2026-11-10)
+
 - Liveness with weak fairness for the abstract checker (Milestone F): a
   `.cml` can declare `fairness weak` and temporal properties
   `property P: eventually E` (`<>E`) and `property P: A ~> B`

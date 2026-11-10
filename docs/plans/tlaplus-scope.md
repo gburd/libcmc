@@ -193,6 +193,14 @@ the richer, opt-in path; nothing is forced to migrate.
 Each is independently useful, independently gated, and leaves every
 existing example green.  Ordered by dependency.
 
+**Status (as of v0.4.0):** A, B, C, D, E and F are implemented and
+calibrated against single-worker TLC; G (scale) is in progress -- the
+fork-from-snapshot search is proven as a mechanic
+(`experiments/fork-snapshot/`) but not yet a sound engine mode
+(`--fast`, on the `m9-fast-wip` branch).  C landed as C1 (invariant-
+mapping refinement, the sound first form); full action-level refinement
+with stuttering (C2) is future work.
+
 - **A -- a value model for abstract state.**  Grow the invariant language
   beyond bytes to sets, records, sequences, functions and quantifiers
   over them.  Keep it within the **SMT-encodable fragment** (finite
