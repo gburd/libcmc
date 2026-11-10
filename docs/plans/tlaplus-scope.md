@@ -89,7 +89,7 @@ lets the proper tool answer:
 | model-check it exhaustively (the calibration oracle) | **TLC** | `.cml -> .tla` (Milestone D) |
 | model-check it symbolically, over large/structured domains | **Apalache** (Z3-backed) | `.cml -> .tla` |
 | **prove** it, unbounded (is this invariant inductive? does the spec hold for all values?) | **TLAPS** (Isabelle/TLA+, Zenon, and SMT: Z3/CVC5/veriT) | `.cml -> .tla` |
-| discharge one obligation directly (inductive invariant, refinement step) | **Z3 / CVC5 / veriT** | optional `.cml -> SMT-LIB` |
+| discharge one obligation directly (inductive invariant, refinement step) | **Z3 / CVC5 / veriT** | optional `.cml -> SMT-LIB` *(tracked, deferred -- see Decisions)* |
 
 The last row is the asked-for "discharge proof obligations to the SMT
 solvers like TLA+ does": **yes, and it works** -- for the abstract model
@@ -223,15 +223,21 @@ existing example green.  Ordered by dependency.
   documented subset back), so the abstract model reaches the real
   engines: **TLC** (explicit), **Apalache** (symbolic, Z3-backed, for
   large/structured domains), and **TLAPS** (unbounded proof via
-  Isabelle/Zenon/SMT).  Plus an optional `.cml` -> **SMT-LIB** emitter
-  so libcmc can discharge a single obligation (an inductive invariant, a
-  refinement step) to **Z3/CVC5/veriT** directly, for the decidable
-  fragment from A.  Every one of these is an optional external tool, like
-  TLC today; none is a build dependency of `cmc`.  *Gate:* round-trip the
-  `consensus` base and the Paxos spec through TLC and Apalache (and, as a
-  worked example, a TLAPS proof); the emitted artifacts are accepted and
-  agree.  This supersedes the hand-kept `calib/hc` TLA+ as the
-  calibration path.
+  Isabelle/Zenon/SMT).  *Gate:* round-trip the `consensus` base and the
+  Paxos spec through TLC and Apalache (and, as a worked example, a TLAPS
+  proof); the emitted artifacts are accepted and agree.  This supersedes
+  the hand-kept `calib/hc` TLA+ as the calibration path.
+  - **D' (tracked, deferred) -- direct SMT.**  An optional `.cml` ->
+    **SMT-LIB** emitter so libcmc can discharge a single obligation (an
+    inductive invariant, a refinement step) to **Z3/CVC5/veriT**
+    directly, for the decidable fragment from A.  Decided worthwhile but
+    **not implemented at this stage**: the `.tla` bridge already reaches
+    these solvers through TLAPS/Apalache, so the direct path is an
+    optimisation, not a prerequisite.  Build it only when a concrete
+    obligation needs it without the TLA+ round-trip.
+
+  Every engine here is an optional external tool, like TLC today; none is
+  a build dependency of `cmc`.
 
 - **E -- symmetry reduction.**  Canonicalise interchangeable abstract
   values (node identities, ballots).  *Gate:* identical verdict and
@@ -286,3 +292,29 @@ correct, so it is retired *by* D, not before.
   (Isabelle/Zenon/SMT).  It never reimplements TLAPS's encoding of full
   TLA+ set theory, and never claims an internal proof the engines did
   not give.  The code-refinement verdict never depends on any of them.
+
+## Decisions and sequencing
+
+Settled with the maintainer:
+
+- Proof of the spec is **delegated** to the TLA+-native engines via the
+  `.tla` bridge (TLC, Apalache, TLAPS); libcmc does not grow a prover.
+- A **direct `.cml` -> SMT-LIB** path to Z3/CVC5/veriT is a good idea and
+  is **tracked but deferred** (D' above) -- not implemented at this
+  stage, since the bridge already reaches those solvers.
+- **Elle** and **Pure** are considered and set aside (above).
+
+Agreed order of work, each gated and leaving the examples green:
+
+1. **Land M9 `--fast`** (fork-from-snapshot search, the `m9-fast-wip`
+   branch).  It is the unblocker for liveness (F) and scale (G); the open
+   bug is known (a resumed connection-mediated node reads a real fd, not
+   a checker virtual fd).  Needs a quiet Linux x86-64 host.
+2. **Milestone A** -- the value model, kept inside the SMT-encodable
+   fragment from the start.
+3. **Milestone B** -- the abstract language + modules, with the TLA+
+   emission, moving calibration onto the bridge.
+4. **Milestone C** -- the binding + refinement checker.  Prototype the
+   refinement check on Paxos *before* fixing the `.cml`/`.bind` surface,
+   since its soundness is the riskiest part and will reveal what the
+   languages actually need.
