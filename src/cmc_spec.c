@@ -96,6 +96,7 @@ static struct {
 	SpInv inv[SP_MAXINV]; int ninv;
 	char define[SP_MAXCONST][SP_NAME]; int ndef;	/* -D tags given */
 	char fname[SP_MAXCONST][SP_NAME]; int foff[SP_MAXCONST]; int nfield;	/* binding [fields] */
+	char symmetry[SP_EXPR]; int has_sym;	/* a set of interchangeable values */
 } S;
 
 #include "cmc_spec.h"
@@ -359,7 +360,7 @@ static int sp_load_into(const char *path);
 
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
-	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0;
+	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0;
 	if(sp_load_into(path)) return -1;
 	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
 	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
@@ -411,6 +412,7 @@ static int sp_load_into(const char *path){
 			} else { V->is_fun=0; snprintf(V->dom,SP_EXPR,"%s",dom); V->fdom[0]=0; }
 			S.nvar++; in_action=0; continue;
 		}
+		if(!strncmp(s,"symmetry ",9)){ snprintf(S.symmetry,SP_EXPR,"%s",sp_trim(s+9)); S.has_sym=1; in_action=0; continue; }
 		if(!strncmp(s,"init ",5)){ const char *ic=sp_trim(s+5);
 			if(S.init[0]){ strncat(S.init," and ",SP_EXPR-strlen(S.init)-1); strncat(S.init,ic,SP_EXPR-strlen(S.init)-1); }
 			else snprintf(S.init,SP_EXPR,"%s",ic);
@@ -486,6 +488,51 @@ static size_t state_bytes(const State *st, unsigned char *buf, size_t cap){
 	return o;
 }
 static uint64_t fnv(const unsigned char *b, size_t n){ uint64_t h=1469598103934665603ULL; for(size_t i=0;i<n;i++){ h^=b[i]; h*=1099511628211ULL; } return h; }
+
+/* ---- symmetry reduction (Milestone E) -----------------------------
+ * When `symmetry S` names a set of interchangeable values, two states
+ * that differ only by a permutation of S's elements are equivalent.
+ * Canonicalise a state to the lexicographically-least serialisation over
+ * all permutations of S, and dedup on that.  Sound when the spec really
+ * is symmetric under permuting S (the user's declared obligation, as in
+ * TLC); the gate checks it empirically -- same verdict with symmetry on
+ * and off, strictly fewer states.  A permutation remaps every integer
+ * that is a member of S, wherever it appears (int values, set elements,
+ * and both the keys and values of functions). */
+static Value g_symset; static int g_symok;
+static void sym_init(void){
+	g_symok=0; if(!S.has_sym) return;
+	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	char e[128]; if(sp_eval_set(S.symmetry,&env,&g_symset,e,sizeof e) && g_symset.tag==T_SET && g_symset.n>=2 && g_symset.n<=8) g_symok=1;
+}
+/* remap x under a permutation perm[] of the symmetry set (perm[i] is the
+ * image of g_symset.e[i]); non-members pass through */
+static long sym_map(long x, const int *perm){
+	for(int i=0;i<g_symset.n;i++) if(g_symset.e[i]==x) return g_symset.e[perm[i]];
+	return x;
+}
+static void sym_apply(const State *in, State *out, const int *perm){
+	*out=*in;
+	for(int vi=0;vi<S.nvar;vi++){ Value *v=&out->v[vi];
+		if(v->tag==T_INT) v->i=sym_map(v->i,perm);
+		else if(v->tag==T_SET){ for(int j=0;j<v->n;j++) v->e[j]=sym_map(v->e[j],perm); set_canon(v); }
+		else if(v->tag==T_FUN){ /* remap keys and values; re-sort by key */
+			for(int j=0;j<v->n;j++){ v->k[j]=sym_map(v->k[j],perm); v->v[j]=sym_map(v->v[j],perm); }
+			/* insertion sort by key to keep canonical */
+			for(int a=1;a<v->n;a++){ long kk=v->k[a],vv=v->v[a]; int b=a-1; while(b>=0&&v->k[b]>kk){ v->k[b+1]=v->k[b]; v->v[b+1]=v->v[b]; b--; } v->k[b+1]=kk; v->v[b+1]=vv; }
+		}
+	}
+}
+/* the canonical fingerprint of a state (min over permutations if symmetric) */
+static void sym_perms(int *perm, int k, int n, const State *st, uint64_t *best, int *first){
+	if(k==n){ State p; sym_apply(st,&p,perm); unsigned char bb[65536]; size_t nb=state_bytes(&p,bb,sizeof bb); uint64_t h=fnv(bb,nb); if(*first||h<*best){ *best=h; *first=0; } return; }
+	for(int i=k;i<n;i++){ int t=perm[k]; perm[k]=perm[i]; perm[i]=t; sym_perms(perm,k+1,n,st,best,first); t=perm[k]; perm[k]=perm[i]; perm[i]=t; }
+}
+static uint64_t state_fp(const State *st){
+	if(!g_symok){ unsigned char bb[65536]; size_t nb=state_bytes(st,bb,sizeof bb); return fnv(bb,nb); }
+	int perm[8]; for(int i=0;i<g_symset.n;i++) perm[i]=i; uint64_t best=0; int first=1;
+	sym_perms(perm,0,g_symset.n,st,&best,&first); return best;
+}
 
 /* set the initial state from the `init` predicate (a conjunction of
  * `var == EXPR`).  Returns 0 ok. */
@@ -573,6 +620,7 @@ typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
 int cmc_spec_main(const char *path, char **defs, int ndefs){
 	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++){ snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]); }
 	if(sp_load(path)) return 3;
+	sym_init();
 	/* parse-check every invariant and guard once (over the init state) */
 	char err[256];
 	State init; if(sp_init_state(&init,err,sizeof err)){ fprintf(stderr,"cmc: %s: init: %s\n",path,err); return 3; }
@@ -586,8 +634,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 	size_t qcap = 1024, qh = 0, qt = 0;
 	QN **q = malloc(qcap * sizeof *q);
 	if (!q) { fprintf(stderr, "cmc: out of memory\n"); return 1; }
-	unsigned char bb[65536];
-	size_t nb=state_bytes(&init,bb,sizeof bb); seen_insert(fnv(bb,nb));
+	seen_insert(state_fp(&init));
 	QN *root = calloc(1, sizeof *root); root->st=init; root->prev=NULL; root->step[0]=0; root->depth=0;
 	q[qt++] = root;
 	size_t distinct=1, generated=1; int maxdepth=0;
@@ -620,7 +667,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 			if(rc<0){ fprintf(stderr,"cmc: action %s: %s\n",S.act[ai].name,err); ret=3; break; }
 			for(int k=0;k<ns;k++){
 				generated++;
-				size_t n2=state_bytes(&succ[k],bb,sizeof bb); uint64_t h=fnv(bb,n2);
+				uint64_t h=state_fp(&succ[k]);
 				if(!seen_insert(h)) continue;
 				if(seen_n>=SP_MAXSTATES){ printf("INCOMPLETE: more than %d states\n",SP_MAXSTATES); ret=2; break; }
 				if(qt>=qcap){ qcap*=2; QN **nq=realloc(q,qcap*sizeof *q); if(!nq){ fprintf(stderr,"cmc: out of memory\n"); ret=1; break; } q=nq; }

@@ -39,6 +39,12 @@ expect "paxos: extends consensus, agreement holds" 0 "117 distinct states found"
 expect "paxos: depth matches TLC (5)"         0 "complete state graph search is 5" --spec "$HERE/examples/spec/paxos.cml"
 expect "paxos: the double-vote bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
 
+echo "-- symmetry reduction: interchangeable node ids collapse"
+# the token spec's node ids are fully symmetric; with symmetry declared,
+# the state space shrinks (10 -> 3) with the SAME verdict -- the soundness
+# check for the declaration.
+expect "token: symmetry collapses the state space" 0 "3 distinct states found" --spec "$HERE/examples/spec/token.cml"
+
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
 expect "emit-tla: a well-formed module header" 0 "MODULE paxos" --emit-tla "$HERE/examples/spec/paxos.cml"
 expect "emit-tla: translates operators to TLA+" 0 "Cardinality" --emit-tla "$HERE/examples/spec/paxos.cml"

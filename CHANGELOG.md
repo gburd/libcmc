@@ -5,6 +5,20 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Symmetry reduction for the abstract checker (Milestone E): a
+  `symmetry SET` declaration in a `.cml` names interchangeable values
+  (node ids, say); the checker canonicalises each state to the
+  least image under permutations of SET before deduping, collapsing
+  states that differ only by a permutation.  `examples/spec/token.cml`
+  (a token among N interchangeable nodes) shrinks from 10 distinct
+  states to 3, with the same verdict -- the soundness check for the
+  declaration.  Obligation (as with TLA+ model values): the symmetric
+  values must be a dedicated range, interchangeable everywhere they
+  appear and disjoint from other integer uses, or the reduction is
+  unsound; the gate checks the verdict is identical with symmetry on and
+  off.  Invariants are evaluated on the real reached state, not the
+  canonical representative, so a specific-id property is still checked
+  correctly.
 - The TLA+ bridge, `cmc --emit-tla FILE.cml` (Milestone D): translate an
   abstract `.cml` module to a TLA+ module on stdout, so the same model
   reaches TLC (explicit), Apalache (symbolic), and TLAPS (proof) -- the
