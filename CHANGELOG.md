@@ -5,6 +5,15 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The invariant language gained integer arithmetic (`+`, `-`, `*`,
+  `mod`) and `count V in SET : PRED` (cardinality), so a quorum property
+  -- a committed value is held by a majority -- is now expressible; it
+  was not before.  This is the first increment of the value model
+  (Milestone A of the TLA+-scope plan), kept inside the SMT-encodable
+  fragment.  A `quorum` fixture pins it: the count-based invariant holds
+  when the coordinator commits only on a majority of stores, and catches
+  a sub-quorum commit.
+
 ## 0.3.0 (2026-11-09)
 
 - The Humming Consensus example (`hc/`) is now the GENERIC agreement

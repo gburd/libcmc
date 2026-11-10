@@ -1,0 +1,23 @@
+# test/proc/quorum.c: a coordinator commits a value only once a majority
+# of workers has stored it.  The safety property is a cardinality
+# statement -- "if committed, a majority of workers hold the committed
+# value" -- which needs the invariant language's `count` and arithmetic
+# (Milestone A).
+#
+#   cc -no-pie -o quorum test/proc/quorum.c
+#   cmc --model-file test/proc/quorum.model --binary ./quorum
+[target]
+nodes = 4            # node 0 coordinator, nodes 1-3 workers
+
+[environment]
+client_write = 5     # a client writes 5 to the coordinator
+
+[fields]
+value = 0            # node[i].value: committed (coordinator) or stored (worker)
+
+[invariants]
+# Quorum safety: if the coordinator (node 0) has committed a value, then
+# a MAJORITY of the three workers (nodes 1, 2, 3) hold that value.  The
+# count of workers holding it, doubled, must exceed the worker count --
+# a cardinality statement, inexpressible without `count` and arithmetic.
+quorum_commit = "node[0].value == 0 or (count w in nodes : w != 0 and node[w].value == node[0].value) * 2 > 3"

@@ -279,9 +279,65 @@ node_index(const char **p, Ctx *c, long *out)
 	return -1;
 }
 static int eval_expr(const char **p, Ctx *c);
+static int get_arith(const char **p, Ctx *c, long *out);
+enum { SET_BYTES, SET_REPLIES, SET_NODES };	/* a set a quantifier ranges over */
+
+/* Bind variable `var` over SET (kind/set/slen from get_set) into a copy
+ * of `c`, evaluate the boolean body at `*p` once per element, and call
+ * visit(r, ctx) for each result r.  Advances *p past the body.  An
+ * empty set still parses the body once (checking=1) so a broken body is
+ * never hidden.  Returns 0, or -1 on a parse error in the body.  Both
+ * the all/some quantifier and `count` go through this, so their binding
+ * can never diverge. */
+static int
+iter_set(const char **p, Ctx *c, const char *var, int kind,
+		 const unsigned char *set, int slen, void (*visit)(int r, void *), void *arg)
+{
+	const char *body = *p;
+	Ctx inner = *c;
+	int slot = -1;
+	if (kind == SET_NODES)
+	{
+		if (inner.niv >= MAXNODES) return -1;
+		slot = inner.niv;
+		snprintf(inner.ivar[slot], sizeof inner.ivar[0], "%s", var);
+		inner.niv = slot + 1;
+	}
+	else
+	{
+		inner.varset = 1; snprintf(inner.var, sizeof inner.var, "%s", var);
+		inner.ranging_replies = (kind == SET_REPLIES);
+	}
+	for (int i = 0; i < slen; i++)
+	{
+		const char *bp = body;
+		if (kind == SET_NODES) inner.ival[slot] = i;
+		else inner.val = (kind == SET_REPLIES) ? i : set[i];
+		int r = eval_expr(&bp, &inner); if (r < 0) return -1;
+		visit(r, arg);
+		*p = bp;
+	}
+	if (slen == 0)
+	{
+		const char *bp = body;
+		if (kind == SET_NODES) inner.ival[slot] = 0;
+		else { inner.val = 0; inner.checking = 1; }
+		if (eval_expr(&bp, &inner) < 0) return -1;
+		*p = bp;
+	}
+	return 0;
+}
+struct count_acc { long n; };
+static void count_visit(int r, void *a) { if (r) ((struct count_acc *) a)->n++; }
+/* all/some accumulator: fold each body result for the quantifier */
+struct qc_acc { int isall; int result; };
+static void qc_visit(int r, void *a) {
+	struct qc_acc *q = a;
+	if (q->isall && !r) q->result = 0;
+	if (!q->isall && r) q->result = 1;
+}
 
 /* a set yields bytes to range over, OR the reply log (special) */
-enum { SET_BYTES, SET_REPLIES, SET_NODES };
 static int
 get_set(const char **p, Ctx *c, const unsigned char **buf, int *len, int *kind)
 {
@@ -306,9 +362,24 @@ get_term(const char **p, Ctx *c, long *out)
 {
 	skipws(p);
 	if (isdigit((unsigned char) **p)) { *out = strtol(*p, (char **) p, 10); return 0; }
+	/* a parenthesised arithmetic sub-expression (so (count ...) * 2 works) */
+	if (**p == '(') { (*p)++; if (get_arith(p, c, out)) return -1; skipws(p); if (**p != ')') return -1; (*p)++; return 0; }
 	const char *before = *p;
 	char id[32]; int n = 0; while ((isalnum((unsigned char) **p) || **p == '_') && n < 31) id[n++] = *(*p)++; id[n] = 0;
 	if (n == 0) return -1;
+	/* count V in SET : PRED -- the number of elements of SET for which
+	 * PRED holds (a cardinality).  Binds V exactly as the quantifiers do. */
+	if (!strcmp(id, "count"))
+	{
+		skipws(p); char var[32]; int m = 0; while ((isalnum((unsigned char) **p) || **p == '_') && m < 31) var[m++] = *(*p)++; var[m] = 0;
+		if (m == 0 || !word(p, "in")) return -1;
+		const unsigned char *set; int slen, kind;
+		if (get_set(p, c, &set, &slen, &kind)) return -1;
+		skipws(p); if (**p != ':') return -1; (*p)++;
+		struct count_acc acc = {0};
+		if (iter_set(p, c, var, kind, set, slen, count_visit, &acc)) return -1;
+		*out = acc.n; return 0;
+	}
 	/* node[i][k] or node[i].field : a byte of node i's canonical state */
 	if (!strcmp(id, "node"))
 	{
@@ -346,6 +417,38 @@ get_term(const char **p, Ctx *c, long *out)
 	return -1;
 }
 
+/* arithmetic over integer terms, standard precedence: get_arith (+ -)
+ * over get_mul (* mod) over get_term.  Kept to bounded integers, which
+ * stays inside the SMT-encodable fragment; the explicit-state checker
+ * evaluates any product, while the proof bridge (Milestone D) requires
+ * a product to have a constant operand (linear arithmetic). */
+static int
+get_mul(const char **p, Ctx *c, long *out)
+{
+	long a; if (get_term(p, c, &a)) return -1;
+	for (;;)
+	{
+		skipws(p);
+		if (**p == '*') { (*p)++; long b; if (get_term(p, c, &b)) return -1; a *= b; }
+		else if (word(p, "mod")) { long b; if (get_term(p, c, &b)) return -1; if (b == 0) return -1; a %= b; }
+		else break;
+	}
+	*out = a; return 0;
+}
+static int
+get_arith(const char **p, Ctx *c, long *out)
+{
+	long a; if (get_mul(p, c, &a)) return -1;
+	for (;;)
+	{
+		skipws(p);
+		if (**p == '+') { (*p)++; long b; if (get_mul(p, c, &b)) return -1; a += b; }
+		else if (**p == '-') { (*p)++; long b; if (get_mul(p, c, &b)) return -1; a -= b; }
+		else break;
+	}
+	*out = a; return 0;
+}
+
 static int
 eval_qc(const char **p, Ctx *c)
 {
@@ -358,46 +461,14 @@ eval_qc(const char **p, Ctx *c)
 		const unsigned char *set; int slen, kind;
 		if (get_set(p, c, &set, &slen, &kind)) return -1;
 		skipws(p); if (**p != ':') return -1; (*p)++;
-		const char *body = *p; int result = isall ? 1 : 0;
-		Ctx inner = *c;
-		int slot = -1;
-		if (kind == SET_NODES)
-		{
-			/* bind an index variable (for node[I] / node[I].field / I == J) */
-			if (inner.niv >= MAXNODES) return -1;
-			slot = inner.niv;
-			snprintf(inner.ivar[slot], sizeof inner.ivar[0], "%s", var);
-			inner.niv = slot + 1;
-		}
-		else
-		{
-			inner.varset = 1; snprintf(inner.var, sizeof inner.var, "%s", var);
-			inner.ranging_replies = (kind == SET_REPLIES);
-		}
-		for (int i = 0; i < slen; i++)
-		{
-			const char *bp = body;
-			if (kind == SET_NODES) inner.ival[slot] = i;
-			else inner.val = (kind == SET_REPLIES) ? i : set[i];
-			int r = eval_expr(&bp, &inner); if (r < 0) return -1;
-			if (isall && !r) result = 0;
-			if (issome && r) result = 1;
-			*p = bp;
-		}
-		/* an empty set still parses the body, so a broken body is never
-		 * hidden by the set being empty in the states searched */
-		if (slen == 0)
-		{
-			const char *bp = body;
-			if (kind == SET_NODES) inner.ival[slot] = 0;
-			else { inner.val = 0; inner.checking = 1; }
-			if (eval_expr(&bp, &inner) < 0) return -1;
-			*p = bp;
-		}
-		return result;
+		/* reuse the shared binder so count and the quantifiers cannot
+		 * diverge; fold each body result into the all/some accumulator */
+		struct qc_acc acc = {isall, isall ? 1 : 0};
+		if (iter_set(p, c, var, kind, set, slen, qc_visit, &acc)) return -1;
+		return acc.result;
 	}
 	*p = save;
-	long a; if (get_term(p, c, &a)) return -1;
+	long a; if (get_arith(p, c, &a)) return -1;
 	skipws(p);
 	if (word(p, "in"))
 	{
@@ -407,17 +478,26 @@ eval_qc(const char **p, Ctx *c)
 		return 0;
 	}
 	const char *op = *p;
-	if (!strncmp(op, "==", 2)) { *p += 2; long b; if (get_term(p, c, &b)) return -1; return a == b; }
-	if (!strncmp(op, "!=", 2)) { *p += 2; long b; if (get_term(p, c, &b)) return -1; return a != b; }
-	if (!strncmp(op, "<=", 2)) { *p += 2; long b; if (get_term(p, c, &b)) return -1; return a <= b; }
-	if (!strncmp(op, ">=", 2)) { *p += 2; long b; if (get_term(p, c, &b)) return -1; return a >= b; }
-	if (*op == '<') { (*p)++; long b; if (get_term(p, c, &b)) return -1; return a < b; }
-	if (*op == '>') { (*p)++; long b; if (get_term(p, c, &b)) return -1; return a > b; }
+	if (!strncmp(op, "==", 2)) { *p += 2; long b; if (get_arith(p, c, &b)) return -1; return a == b; }
+	if (!strncmp(op, "!=", 2)) { *p += 2; long b; if (get_arith(p, c, &b)) return -1; return a != b; }
+	if (!strncmp(op, "<=", 2)) { *p += 2; long b; if (get_arith(p, c, &b)) return -1; return a <= b; }
+	if (!strncmp(op, ">=", 2)) { *p += 2; long b; if (get_arith(p, c, &b)) return -1; return a >= b; }
+	if (*op == '<') { (*p)++; long b; if (get_arith(p, c, &b)) return -1; return a < b; }
+	if (*op == '>') { (*p)++; long b; if (get_arith(p, c, &b)) return -1; return a > b; }
 	return -1;
 }
 static int eval_unary(const char **p, Ctx *c){ skipws(p);
 	if(word(p,"not")){int r=eval_unary(p,c);return r<0?r:!r;}
-	if(**p=='('){(*p)++;int r=eval_expr(p,c);if(r<0)return r;skipws(p);if(**p!=')')return -1;(*p)++;return r;}
+	if(**p=='('){
+		/* `(` is ambiguous: an arithmetic operand of a comparison, e.g.
+		 * (count ... ) * 2 > 3, or a boolean group, e.g. (a == b and c).
+		 * Try the comparison path first (eval_qc -> get_arith handles the
+		 * inner arithmetic paren); fall back to a boolean group.  A wrong
+		 * choice leaves trailing text, which eval_invariant rejects. */
+		const char *save=*p; int r=eval_qc(p,c);
+		if(r>=0) return r;
+		*p=save; (*p)++; r=eval_expr(p,c); if(r<0)return r; skipws(p); if(**p!=')')return -1; (*p)++; return r;
+	}
 	return eval_qc(p,c); }
 static int eval_expr(const char **p, Ctx *c){ int r=eval_unary(p,c); if(r<0)return r;
 	for(;;){ skipws(p); if(word(p,"and")){int b=eval_unary(p,c);if(b<0)return b;r=r&&b;}

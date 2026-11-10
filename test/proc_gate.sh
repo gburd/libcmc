@@ -28,10 +28,10 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
-for f in repl elect lease durlog; do
+for f in repl elect lease durlog quorum; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 # the consensus examples are real, tested fixtures too
@@ -155,6 +155,24 @@ printf '[target]\nnodes = 2\n[environment]\ntimeouts = 2\n[invariants]\nreached 
 expect "eventually: a reachable state satisfies it"     0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/elect"
 printf '[target]\nnodes = 2\n[environment]\ntimeouts = 2\n[invariants]\nreached = "eventually node[0][0] == 200"\n' > "$OUT/q.model"
 expect "eventually: never reached is a violation"       1 "reached is violated" --model-file "$OUT/q.model" --binary "$B/proc/elect"
+
+echo "-- the invariant language: arithmetic and counting (quorums)"
+# `count V in SET : PRED` and arithmetic let an invariant state a
+# cardinality property -- here, quorum safety: a committed value is held
+# by a majority.  Inexpressible without count; it is the red test for
+# Milestone A (the value model).
+expect "quorum: a committed value has a majority"      0 "No error has been found" $(run quorum quorum)
+expect "quorum: a sub-quorum commit is caught"         1 "quorum_commit is violated" $(run quorum quorum-bug)
+expect "quorum: --simulate finds it"                   1 "quorum_commit is violated" $(run quorum quorum-bug) --simulate --seed 1 --walks 2000
+# arithmetic evaluates with the usual precedence
+printf '[target]\nnodes = 2\n[invariants]\nt = "2 + 3 * 4 == 14 and 10 mod 3 == 1 and (1 + 1) * 2 == 4"\n' > "$OUT/q.model"
+expect "arithmetic: precedence and mod"                 0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+# count's body must parse even when the set is empty, so a broken body
+# is never hidden; mod by zero and a missing count body are errors
+printf '[target]\nnodes = 2\n[invariants]\nt = "count w in nodes : node[w].bad == 0"\n[fields]\nv = 0\n' > "$OUT/q.model"
+expect "count: an unknown field in the body is an error" 3 "invariant t" --model-file "$OUT/q.model" --binary "$B/proc/repl"
+printf '[target]\nnodes = 2\n[invariants]\nt = "5 mod 0 == 0"\n' > "$OUT/q.model"
+expect "arithmetic: mod by zero is an error"            3 "invariant t" --model-file "$OUT/q.model" --binary "$B/proc/repl"
 expect "an option it cannot honour is an error" 3 "not supported with --model-file" $(run repl repl) --inv agree_on_ack
 $CC -O1 -w -fPIE -pie -o "$B/proc/repl-pie" "$T/repl.c" 2>/dev/null &&
 	expect "a PIE binary is an error"      3 "non-PIE" --model-file "$T/repl.model" --binary "$B/proc/repl-pie"

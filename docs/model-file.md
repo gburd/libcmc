@@ -134,15 +134,33 @@ reachability check it does offer.)
 - `node[i].name`: the same byte, named by a `[fields]` offset.  An
   unknown name is a parse error.
 - `replies`: the reply log; each entry `r` has `r.src` and `r.val`.
-- integers.
+- integers, with arithmetic `A + B`, `A - B`, `A * B`, `A mod B` (usual
+  precedence; parenthesise to group).
+- `count V in SET : PRED`: how many elements of SET satisfy PRED -- a
+  cardinality.  SET is `node[i]`, `replies` or `nodes`, and V binds as
+  in a quantifier.
 
 ```
 all V in SET : EXPR        some V in SET : EXPR
     SET is node[i] (its bytes), replies (the log), or nodes (the
     indices 0..nodes-1, binding V as an index for node[V])
+count V in SET : EXPR      how many V in SET make EXPR true
+A + B   A - B   A * B   A mod B        (arithmetic over integers)
 EXPR and EXPR    EXPR or EXPR    not EXPR    ( EXPR )
 A == B   A != B   A < B   A <= B   A > B   A >= B   A in node[i]
 ```
+
+Counting and arithmetic are how a quorum property reads.  "A committed
+value is held by a majority of the three workers":
+
+```
+quorum = "node[0].value == 0 or
+          (count w in nodes : w != 0 and node[w].value == node[0].value) * 2 > 3"
+```
+
+(all on one line in the file).  Everything stays bounded integers and
+finite counting -- the SMT-encodable fragment -- so the proof bridge
+(planned) can hand these to a solver.
 
 Quantifying over `nodes` is how an invariant reads like its TLA+
 mirror.  Agreement over all pairs, for instance:
