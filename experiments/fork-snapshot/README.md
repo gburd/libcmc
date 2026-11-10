@@ -161,3 +161,34 @@ Then, before `--fast` can ship (still off by default):
   stateless replay on every `test/proc/` fixture, and be measurably
   faster.  (The replay engine stays as the oracle it is checked
   against.)
+
+## The --fast hang, diagnosed further (2026-11-10, v0.4.0 branch)
+
+With the resume mechanic aligned to acctest.c (rewind rip-2, rax =
+orig_rax), the "reads a real fd" error is gone, but `--fast` now
+LIVELOCKS in drive_quiescent on the repl fixture.  The precise finding:
+
+- freeze_master captures the right boundary: rip at the `accept`
+  syscall, orig_rax = 43, rax = -512 (ERESTARTSYS).
+- Just before PTRACE_CONT, the resumed worker's registers are PERFECT:
+  rip points at the `0f 05` (syscall) instruction, rax = 43, orig = 43.
+  So the worker is positioned to re-issue exactly `accept`.
+- Yet after CONT, the checker's listener receives the node's ENTIRE
+  startup sequence again -- read/close, getrandom, the preload
+  constructor's clock_gettime magic (nr=228 a0=0x434d43), write(fd3),
+  socket/bind/listen/accept.  The preload CONSTRUCTOR re-running means a
+  process is starting from the top, not resuming mid-accept.
+
+So: correct registers on the worker, but the notifications servicing
+drive_quiescent come from a process running main() from entry.  The
+contradiction (right regs, wrong execution) points at a process-identity
+confusion -- the worker whose regs we set is not the one whose notifs
+arrive on the listener, OR a fresh launch is happening (run_seq?)
+concurrently.  acctest.c (a trivial accept loop) does not hit this; repl
+(a long startup before the snapshot) does.
+
+NEXT: establish exactly which pid raises the post-resume notifs (tag the
+listener's seccomp_notif.pid against the worker pid and the next-master
+pid), and whether anything re-launches a node after resume_world.  The
+register-level mechanic is proven (acctest.c); the defect is in the
+engine's process bookkeeping across the fork, not the ptrace mechanic.
