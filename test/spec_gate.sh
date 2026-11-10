@@ -34,6 +34,11 @@ expect "mutex: depth matches TLC (4)"        0 "complete state graph search is 4
 expect "mutex: the bug is caught"            1 "mutual_exclusion is violated" --spec "$HERE/test/spec/mutex.cml" --define BUG
 expect "mutex: shortest trace is 4 actions"  1 "is (4 actions)" --spec "$HERE/test/spec/mutex.cml" --define BUG
 
+echo "-- modules: a protocol spec extends a shared base"
+expect "paxos: extends consensus, agreement holds" 0 "117 distinct states found" --spec "$HERE/examples/spec/paxos.cml"
+expect "paxos: depth matches TLC (5)"         0 "complete state graph search is 5" --spec "$HERE/examples/spec/paxos.cml"
+expect "paxos: the double-vote bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
+
 echo "-- the loader refuses malformed specs"
 printf 'module m\nvar x : 0 .. 2\ninit x == 0\naction a:\n  x\x27 = x + 1\n' > "$OUT/noinv.cml"
 expect "a spec with no invariant is an error" 3 "no invariant" --spec "$OUT/noinv.cml"

@@ -236,6 +236,7 @@ static Value sp_mul(Pst *s){
 	Value a=sp_atom(s);
 	for(;;){ sp_skip(s);
 		if(*s->p=='*'){ s->p++; Value b=sp_atom(s); a=vint(a.i*b.i); }
+		else if(*s->p=='/'){ s->p++; Value b=sp_atom(s); if(b.i==0){ fail(s,"divide by zero"); return a; } a=vint(a.i/b.i); }
 		else if(sp_word(s,"mod")){ Value b=sp_atom(s); if(b.i==0){ fail(s,"mod by zero"); return a; } a=vint(a.i%b.i); }
 		else break; }
 	return a;
@@ -326,18 +327,42 @@ static long sp_const_eval(const char *expr, int *ok){
 	*ok=1; return v.i;
 }
 
+static int sp_load_into(const char *path);
+
 static int sp_load(const char *path){
-	FILE *f=fopen(path,"r");
-	if(!f){ fprintf(stderr,"cmc: cannot open %s\n",path); return -1; }
 	memset(&S.modname,0,sizeof S.modname);
 	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0;
+	if(sp_load_into(path)) return -1;
+	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
+	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
+	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
+	if(S.ninv==0){ fprintf(stderr,"cmc: %s: no invariant\n",path); return -1; }
+	return 0;
+}
+
+/* parse one .cml file, APPENDING its declarations to S (so an `extends`
+ * base is merged in before the extending module's own additions).
+ * `extends FILE` loads FILE first, resolved relative to this file. */
+static int sp_load_into(const char *path){
+	FILE *f=fopen(path,"r");
+	if(!f){ fprintf(stderr,"cmc: cannot open %s\n",path); return -1; }
 	char line[1024]; int ln=0; Action *cur=NULL; int in_action=0;
 	while(fgets(line,sizeof line,f)){
 		ln++;
 		char *h=strchr(line,'#'); if(h)*h=0;
 		char *s=sp_trim(line);
 		if(!*s) continue;
-		if(!strncmp(s,"module ",7)){ snprintf(S.modname,SP_NAME,"%s",sp_trim(s+7)); in_action=0; continue; }
+		if(!strncmp(s,"module ",7)){ if(!S.modname[0]) snprintf(S.modname,SP_NAME,"%s",sp_trim(s+7)); in_action=0; continue; }
+		if(!strncmp(s,"extends ",8) || !strncmp(s,"import ",7)){
+			const char *base=sp_trim(s+(s[0]=='e'?8:7));
+			/* resolve relative to this file's directory; add .cml if absent */
+			char bp[1024]; const char *sl=strrchr(path,'/');
+			if(base[0]=='/'||!sl) snprintf(bp,sizeof bp,"%s",base);
+			else snprintf(bp,sizeof bp,"%.*s/%s",(int)(sl-path),path,base);
+			if(!strstr(bp,".cml")) strncat(bp,".cml",sizeof bp-strlen(bp)-1);
+			if(sp_load_into(bp)){ fprintf(stderr,"cmc: %s:%d: cannot extend %s\n",path,ln,base); goto bad; }
+			in_action=0; continue;
+		}
 		if(!strncmp(s,"const ",6)){
 			char *rest=sp_trim(s+6); char *eq=strchr(rest,'='); if(!eq){ fprintf(stderr,"cmc: %s:%d: const needs =\n",path,ln); goto bad; }
 			*eq=0; char *nm=sp_trim(rest), *vv=sp_trim(eq+1);
@@ -358,7 +383,10 @@ static int sp_load(const char *path){
 			} else { V->is_fun=0; snprintf(V->dom,SP_EXPR,"%s",dom); V->fdom[0]=0; }
 			S.nvar++; in_action=0; continue;
 		}
-		if(!strncmp(s,"init ",5)){ snprintf(S.init,SP_EXPR,"%s",sp_trim(s+5)); in_action=0; continue; }
+		if(!strncmp(s,"init ",5)){ const char *ic=sp_trim(s+5);
+			if(S.init[0]){ strncat(S.init," and ",SP_EXPR-strlen(S.init)-1); strncat(S.init,ic,SP_EXPR-strlen(S.init)-1); }
+			else snprintf(S.init,SP_EXPR,"%s",ic);
+			in_action=0; continue; }
 		if(!strncmp(s,"action ",7)){
 			if(S.nact>=SP_MAXACT){ fprintf(stderr,"cmc: too many actions\n"); goto bad; }
 			cur=&S.act[S.nact++]; memset(cur,0,sizeof *cur);
@@ -401,10 +429,6 @@ static int sp_load(const char *path){
 		fprintf(stderr,"cmc: %s:%d: cannot parse: %s\n",path,ln,s); goto bad;
 	}
 	fclose(f);
-	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
-	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
-	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
-	if(S.ninv==0){ fprintf(stderr,"cmc: %s: no invariant\n",path); return -1; }
 	return 0;
 bad: fclose(f); return -1;
 }

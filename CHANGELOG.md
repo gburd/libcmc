@@ -5,6 +5,18 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Abstract-model modules: a `.cml` can `extends` (or `import`) another,
+  merging its constants, variables, actions and invariants, so a shared
+  base is written once.  `examples/spec/consensus.cml` is that base for
+  the consensus family -- it declares the agreed-value record and the
+  Agreement property (at most one value chosen) -- and
+  `examples/spec/paxos.cml` extends it: single-decree Paxos in the
+  Voting style (acceptors vote per ballot; a value is chosen on a
+  quorum) inherits Agreement unchanged.  Calibrated against single-worker
+  TLC (examples/spec/paxos.tla): 117 distinct states, depth 5, identical
+  verdict; the planted double-vote bug breaks Agreement at the same
+  6-action depth as TLC.  This is the shared-base half of "a category of
+  protocols models its common requirements the same way".
 - The abstract-model front end, `cmc --spec FILE.cml` (Milestone B of the
   TLA+-scope plan): a small, TLC-like explicit-state checker for a
   declarative specification on its own, no implementation.  A `.cml`

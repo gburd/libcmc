@@ -1,0 +1,23 @@
+# examples/spec/consensus.cml: the shared base for the consensus family
+# (Paxos, Raft, Humming Consensus, ZAB).  It fixes the vocabulary and the
+# one safety property they all owe -- Agreement: at most one value is
+# ever chosen.  A protocol module `extends consensus`, adds its own
+# variables and actions that drive `chosen`, and inherits Agreement
+# unchanged, so the category's common requirement is modelled once.
+#
+# The base itself declares the agreed-value record `chosen` (a function
+# from a value to 1 if that value has been chosen, 0 otherwise) and the
+# Agreement invariant over it.  A protocol sets chosen[v] = 1 when its
+# own rule decides v.
+
+module consensus
+
+const V = 2                     # candidate values are 1 .. V (0 = none)
+
+# chosen[v] = 1 once value v is decided by the protocol
+var chosen : [1 .. V -> 0 .. 1]
+
+init chosen == [v in 1 .. V -> 0]
+
+# Agreement: never are two different values both chosen.
+invariant agreement: (count v in 1 .. V : chosen[v] == 1) <= 1

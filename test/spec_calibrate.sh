@@ -13,22 +13,24 @@ OUT=${CMC_SCRATCH:-$HOME/tmp/cmc-build}/spec-calib
 mkdir -p "$OUT"
 fail=0
 
-# row: CML [--define TAG] | TLA | CFG | want-verdict(PASS|VIOLATION)
+# row: DIR | CML [--define TAG] | TLA | CFG | want-verdict(PASS|VIOLATION)
 rows="
-counter.cml||counter.tla|counter.cfg|PASS
-mutex.cml||mutex.tla|mutex_safe.cfg|PASS
-mutex.cml|--define BUG|mutex.tla|mutex_bug.cfg|VIOLATION
+test/spec|counter.cml||counter.tla|counter.cfg|PASS
+test/spec|mutex.cml||mutex.tla|mutex_safe.cfg|PASS
+test/spec|mutex.cml|--define BUG|mutex.tla|mutex_bug.cfg|VIOLATION
+examples/spec|paxos.cml||paxos.tla|paxos_safe.cfg|PASS
+examples/spec|paxos.cml|--define BUG|paxos.tla|paxos_bug.cfg|VIOLATION
 "
 
 num() { grep -oE "$2" "$1" | grep -oE '[0-9]+' | head -1; }
-printf '%s\n' "$rows" | while IFS='|' read -r cml def tla cfg want; do
+printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
 	[ -z "$cml" ] && continue
 	co="$OUT/${cml%.cml}-${cfg%.cfg}.cmc.txt"
 	to="$OUT/${cml%.cml}-${cfg%.cfg}.tlc.txt"
 	# shellcheck disable=SC2086
-	"$CMC" --spec "$HERE/test/spec/$cml" $def > "$co" 2>&1
+	"$CMC" --spec "$HERE/$dir/$cml" $def > "$co" 2>&1
 
-	bash "$TLC" "$HERE/test/spec/$tla" "$HERE/test/spec/$cfg" -workers 1 > "$to" 2>&1
+	bash "$TLC" "$HERE/$dir/$tla" "$HERE/$dir/$cfg" -workers 1 > "$to" 2>&1
 
 	c_distinct=$(num "$co" '[0-9]+ distinct states found')
 	t_distinct=$(num "$to" '[0-9]+ distinct states found')
