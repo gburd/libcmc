@@ -138,6 +138,11 @@ check-hc-bugs:
 check-spec-calibration: $(B)/cmc
 	test/spec_calibrate.sh $(B)/cmc
 
+# the TLA+ bridge against live TLC: cmc --emit-tla must produce a module
+# TLC accepts and that agrees with cmc --spec.  Needs nix (tlc).
+check-emit-tla: $(B)/cmc
+	test/emit_gate.sh $(B)/cmc
+
 check-all: check-unit check-msan check-calibration check-hc-bugs
 
 install: $(LIB) $(B)/cmc $(PRELOAD)

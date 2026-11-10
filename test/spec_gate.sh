@@ -39,6 +39,10 @@ expect "paxos: extends consensus, agreement holds" 0 "117 distinct states found"
 expect "paxos: depth matches TLC (5)"         0 "complete state graph search is 5" --spec "$HERE/examples/spec/paxos.cml"
 expect "paxos: the double-vote bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
 
+echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
+expect "emit-tla: a well-formed module header" 0 "MODULE paxos" --emit-tla "$HERE/examples/spec/paxos.cml"
+expect "emit-tla: translates operators to TLA+" 0 "Cardinality" --emit-tla "$HERE/examples/spec/paxos.cml"
+
 echo "-- the loader refuses malformed specs"
 printf 'module m\nvar x : 0 .. 2\ninit x == 0\naction a:\n  x\x27 = x + 1\n' > "$OUT/noinv.cml"
 expect "a spec with no invariant is an error" 3 "no invariant" --spec "$OUT/noinv.cml"

@@ -23,6 +23,9 @@
 .Fl -spec Ar file
 .Op Fl -define Ar tag ...
 .Nm
+.Fl -emit-tla Ar file
+.Op Fl -define Ar tag ...
+.Nm
 .Fl -refine Ar spec
 .Fl -bind Ar file
 .Fl -binary Ar path
@@ -138,6 +141,14 @@ on its own, the way TLC checks a TLA+ module: no implementation, just
 the declared variables, actions and invariants.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.It Fl -emit-tla Ar file
+Translate the abstract specification
+.Pq a Pa .cml No module
+to TLA+ on standard output, so it can be checked with TLC or Apalache
+and proved with TLAPS.
+Name the output after the module
+.Pq Pa NAME.tla
+so TLC accepts it.
 .It Fl -define Ar tag
 Activate an action gated with
 .Op Ar tag

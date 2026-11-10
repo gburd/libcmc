@@ -5,6 +5,18 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The TLA+ bridge, `cmc --emit-tla FILE.cml` (Milestone D): translate an
+  abstract `.cml` module to a TLA+ module on stdout, so the same model
+  reaches TLC (explicit), Apalache (symbolic), and TLAPS (proof) -- the
+  proof and large-domain engines the plan delegates to.  Verified
+  against live TLC (`make check-emit-tla`): the generated module parses
+  and gives the same verdict as `cmc --spec` -- counter and Paxos hold,
+  Paxos with the planted bug violates, at the same depth.  `[TAG]`-gated
+  actions are emitted only when `--define`d, and operators are rewritten
+  faithfully (`and`->`/\`, `count`->`Cardinality({...})`,
+  `[f except ...]`->`[f EXCEPT ![...] ...]`, `/`->`\div`).  This is how
+  the hand-kept `calib/hc` TLA+ is, in time, superseded by a mechanical
+  bridge.
 - Refinement checking, `cmc --refine SPEC.cml --bind FILE.bind --binary
   PROG` (Milestone C, the heart of the plan): the shipping binary is
   checked against the *reusable abstract model* -- the same `.cml` that

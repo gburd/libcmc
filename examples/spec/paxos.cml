@@ -29,13 +29,13 @@ init voted == [a in 0 .. A-1 -> 0]
 # v is safe: no acceptor has already voted for a DIFFERENT value at a
 # ballot >= b (the Paxos safety condition, simplified to this bound)
 action vote(a in 0 .. A-1, v in 1 .. V, b in 1 .. B):
-  when voted[a] == 0 and (count c in 0 .. A-1 : voted[c] != 0 and voted[c] mod 10 >= b and (voted[c] - voted[c] mod 10) / 10 != v) == 0
+  when voted[a] == 0 and (count c in 0 .. A-1 : voted[c] != 0 and (voted[c] mod 10) >= b and ((voted[c] - (voted[c] mod 10)) / 10) != v) == 0
   voted' = [voted except [a] = v * 10 + b]
 
 # the planted bug: an acceptor votes again, for a different value, with
 # no safety check -- two values can then each reach a quorum
 action vote_bug(a in 0 .. A-1, v in 1 .. V, b in 1 .. B) [BUG]:
-  when voted[a] mod 10 != b
+  when (voted[a] mod 10) != b
   voted' = [voted except [a] = v * 10 + b]
 
 # a value v is chosen once a quorum of acceptors voted for it at some

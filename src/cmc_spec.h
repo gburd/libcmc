@@ -45,4 +45,8 @@ int cmc_refine_load_bind(const char *path, char *err, size_t errcap);
  * *name), -1 if all hold, -2 on an evaluation error (message in err). */
 int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap);
 
+/* Milestone D: translate the .cml spec to TLA+ on stdout (for TLC,
+ * Apalache, TLAPS).  Returns 0 ok, 3 on a model error. */
+int cmc_emit_tla(const char *path, char **defs, int ndefs);
+
 #endif

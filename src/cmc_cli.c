@@ -322,6 +322,21 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			if (!path) usage();
 			return cmc_spec_main(path, defs, ndefs);
 		}
+	/* cmc --emit-tla FILE.cml [--define TAG ...]: translate to TLA+ */
+	for (int i = 1; i < argc; i++)
+		if (!strcmp(argv[i], "--emit-tla"))
+		{
+			const char *path = NULL;
+			char *defs[16]; int ndefs = 0;
+			for (int j = 1; j < argc; j++)
+			{
+				if (!strcmp(argv[j], "--emit-tla") && j + 1 < argc) path = argv[++j];
+				else if (!strcmp(argv[j], "--define") && j + 1 < argc && ndefs < 16) defs[ndefs++] = argv[++j];
+				else { fprintf(stderr, "cmc: %s is not supported with --emit-tla\n", argv[j]); return 3; }
+			}
+			if (!path) usage();
+			return cmc_emit_tla(path, defs, ndefs);
+		}
 	cmc_options_default(&o);
 	o.progress_s = 60;
 	for (int i = 1; i < argc; i++)

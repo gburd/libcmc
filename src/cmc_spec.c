@@ -715,3 +715,114 @@ int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t err
 	if(bad>=0){ *name=S.inv[bad].name; return bad; }
 	return -1;
 }
+
+/* =====================================================================
+ * Milestone D: translate a .cml module to TLA+, so the abstract model
+ * reaches TLC, Apalache and TLAPS.  The .cml expression syntax is close
+ * to TLA+; this is a token-level rewrite of the operators, emitted into
+ * a standard module.  cmc --emit-tla FILE.cml writes to stdout.
+ * ===================================================================== */
+
+/* translate one .cml expression to TLA+ into out (bounded) */
+static int tla_word(const char **p, const char *w, FILE *o, const char *repl){
+	size_t n=strlen(w);
+	if(!strncmp(*p,w,n) && !isalnum((unsigned char)(*p)[n]) && (*p)[n]!='_'){ fputs(repl,o); *p+=n; return 1; }
+	return 0;
+}
+static void tla_expr(const char *e, FILE *o){
+	const char *p=e;
+	while(*p){
+		if(isspace((unsigned char)*p)){ fputc(*p++,o); continue; }
+		if(tla_word(&p,"all",o,"\\A")) continue;
+		if(tla_word(&p,"some",o,"\\E")) continue;
+		if(!strncmp(p,"count",5) && !isalnum((unsigned char)p[5]) && p[5]!='_'){ fputs("Cardinality({",o); p+=5;
+			while(*p&&isspace((unsigned char)*p))p++;
+			while(*p&&(isalnum((unsigned char)*p)||*p=='_')) fputc(*p++,o);
+			fputs(" \\in ",o); while(*p&&isspace((unsigned char)*p))p++;
+			if(!strncmp(p,"in",2)) p+=2;
+			while(*p&&isspace((unsigned char)*p))p++;
+			while(*p && *p!=':'){ fputc(*p++,o); }
+			if(*p==':'){ p++; fputs(" : ",o); }
+			int depth=0; while(*p){ if(*p=='(')depth++; if(*p==')'){ if(depth==0) break; depth--; }
+				if(tla_word(&p,"and",o,"/\\")) continue;
+				if(tla_word(&p,"or",o,"\\/")) continue;
+				if(!strncmp(p,"==",2)){ fputc('=',o); p+=2; continue; }
+				if(!strncmp(p,"!=",2)){ fputs("#",o); p+=2; continue; }
+				if(tla_word(&p,"mod",o,"%")) continue;
+				if(*p=='/' && p[1]!='\\'){ fputs("\\div ",o); p++; continue; }
+				fputc(*p++,o); }
+			fputs("})",o); continue; }
+		if(tla_word(&p,"not",o,"~")) continue;
+		if(tla_word(&p,"and",o,"/\\")) continue;
+		if(tla_word(&p,"or",o,"\\/")) continue;
+		if(tla_word(&p,"in",o,"\\in")) continue;
+		if(tla_word(&p,"mod",o,"%")) continue;
+		if(tla_word(&p,"except",o,"EXCEPT")) continue;
+		if(!strncmp(p,"->",2)){ fputs("|->",o); p+=2; continue; }
+		if(*p=='/' && p[1]!='\\'){ fputs("\\div ",o); p++; continue; }
+		if(!strncmp(p,"==",2)){ fputc('=',o); p+=2; continue; }
+		if(!strncmp(p,"!=",2)){ fputs("#",o); p+=2; continue; }
+		fputc(*p++,o);
+	}
+}
+
+/* some .cml forms need structural, not token, rewriting:
+ *   [i in S -> E]         -> [i \in S |-> E]   (handled: in-> \in, -> |->)
+ *   [f except [k]=v]      -> [f EXCEPT ![k]=v] (except-> EXCEPT; ! added below)
+ * We post-process: insert '!' before a '[' that follows "EXCEPT ".        */
+static void tla_expr_fixup(const char *e, FILE *o){
+	/* first pass into a buffer */
+	char buf[4096]; FILE *m=fmemopen(buf,sizeof buf,"w"); if(!m){ tla_expr(e,o); return; }
+	tla_expr(e,m); fclose(m);
+	/* insert ! after EXCEPT before each top [k] */
+	const char *p=buf;
+	while(*p){
+		if(!strncmp(p,"EXCEPT ",7)){ fputs("EXCEPT ",o); p+=7;
+			/* the following [k] groups each get a ! */
+			while(*p=='['){ fputs("![",o); p++; int d=1; while(*p&&d){ if(*p=='[')d++; if(*p==']')d--; if(d==0){ fputc(']',o); p++; break; } fputc(*p++,o);} 
+				while(*p&&isspace((unsigned char)*p)) fputc(*p++,o);
+				if(*p=='='){ fputc(*p++,o); /* copy value until , or ] */ while(*p&&*p!=','&&*p!=']'){ fputc(*p++,o);} if(*p==','){ fputc(*p++,o); while(*p&&isspace((unsigned char)*p))fputc(*p++,o);} }
+			}
+			continue; }
+		fputc(*p++,o);
+	}
+}
+
+int cmc_emit_tla(const char *path, char **defs, int ndefs){
+	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++) snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]);
+	if(sp_load(path)) return 3;
+	FILE *o=stdout;
+	fprintf(o,"---- MODULE %s ----\n",S.modname);
+	fprintf(o,"\\* Generated from %s by cmc --emit-tla.  Run with TLC,\n",path);
+	fprintf(o,"\\* Apalache or TLAPS; a .cfg binds the constants.\n");
+	fprintf(o,"EXTENDS Naturals, FiniteSets\n\n");
+	/* constants */
+	if(S.ncst){ fprintf(o,"CONSTANTS"); for(int i=0;i<S.ncst;i++) fprintf(o,"%s %s",i?",":"",S.cst[i].name); fprintf(o,"\n"); }
+	/* variables */
+	fprintf(o,"VARIABLES"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s %s",i?",":"",S.var[i].name); fprintf(o,"\n");
+	fprintf(o,"vars == <<"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s%s",i?", ":"",S.var[i].name); fprintf(o,">>\n\n");
+	/* Init */
+	fprintf(o,"Init ==\n  "); tla_expr_fixup(S.init,o); fprintf(o,"\n\n");
+	/* each action as a formula: \E params \in dom : guard /\ assignments /\ UNCHANGED rest */
+	for(int a=0;a<S.nact;a++){ Action *A=&S.act[a];
+		if(!act_active(A)) continue;	/* a [TAG] action not enabled by --define is omitted */
+		fprintf(o,"%s ==\n",A->name);
+		for(int pi=0;pi<A->nparam;pi++){ fprintf(o,"  \\E %s \\in ",A->pname[pi]); tla_expr_fixup(A->pdom[pi],o); fprintf(o," :\n"); }
+		fprintf(o,"    /\\ "); if(A->guard[0]) tla_expr_fixup(A->guard,o); else fprintf(o,"TRUE"); fprintf(o,"\n");
+		/* which vars are assigned */
+		int asgn[SP_MAXVAR]={0};
+		for(int i=0;i<A->nasgn;i++){ int vi=var_index(A->lhs[i]); if(vi>=0) asgn[vi]=1;
+			fprintf(o,"    /\\ %s' = ",A->lhs[i]); tla_expr_fixup(A->rhs[i],o); fprintf(o,"\n"); }
+		/* UNCHANGED the rest */
+		int any=0; for(int i=0;i<S.nvar;i++) if(!asgn[i]) any=1;
+		if(any){ fprintf(o,"    /\\ UNCHANGED <<"); int first=1; for(int i=0;i<S.nvar;i++) if(!asgn[i]){ fprintf(o,"%s%s",first?"":", ",S.var[i].name); first=0; } fprintf(o,">>\n"); }
+		fprintf(o,"\n");
+	}
+	/* Next = disjunction of actions */
+	fprintf(o,"Next ==\n"); { int any=0; for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o,"  \\/ %s\n",S.act[a].name); any=1; } if(!any) fprintf(o,"  UNCHANGED vars\n"); } fprintf(o,"\n");
+	fprintf(o,"Spec == Init /\\ [][Next]_vars\n\n");
+	/* invariants */
+	for(int i=0;i<S.ninv;i++){ fprintf(o,"%s ==\n  ",S.inv[i].name); tla_expr_fixup(S.inv[i].expr,o); fprintf(o,"\n"); }
+	fprintf(o,"====\n");
+	return 0;
+}
