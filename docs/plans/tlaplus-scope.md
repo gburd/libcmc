@@ -63,33 +63,87 @@ today's "canonical state must be complete", now stated for the mapping.
 
 ## What is in scope, and what is delegated
 
+The decisive asymmetry: **the abstract spec can be proved; the code can
+only be checked.**
+
+- The **abstract model** is a declarative artifact we design.  Kept in a
+  decidable fragment (finite sets over bounded domains, linear
+  arithmetic, uninterpreted functions), it can be handed to the same
+  engines TLA+ uses -- and libcmc can *discharge proof obligations about
+  it* to those engines directly, exactly as requested.
+- The **production code** has loops, `malloc`, pointers and syscalls.  It
+  is not faithfully encodable into a solver -- which is precisely *why*
+  libcmc runs it and model-checks it at the syscall boundary instead of
+  encoding it.  So "prove the code" is structurally a model-checking job,
+  bounded and explicit-state, done by libcmc running the binary.  No
+  solver can discharge it.
+
+So the two questions get two engines:
+
+**Proving / symbolically checking the abstract model** -- reuse the real
+engines, never rebuild them.  libcmc emits the standard artifact and
+lets the proper tool answer:
+
+| question about the spec | engine | reached by |
+|---|---|---|
+| model-check it exhaustively (the calibration oracle) | **TLC** | `.cml -> .tla` (Milestone D) |
+| model-check it symbolically, over large/structured domains | **Apalache** (Z3-backed) | `.cml -> .tla` |
+| **prove** it, unbounded (is this invariant inductive? does the spec hold for all values?) | **TLAPS** (Isabelle/TLA+, Zenon, and SMT: Z3/CVC5/veriT) | `.cml -> .tla` |
+| discharge one obligation directly (inductive invariant, refinement step) | **Z3 / CVC5 / veriT** | optional `.cml -> SMT-LIB` |
+
+The last row is the asked-for "discharge proof obligations to the SMT
+solvers like TLA+ does": **yes, and it works** -- for the abstract model
+kept in the SMT-encodable fragment, libcmc emits SMT-LIB and calls the
+solver, the same way TLAPS's SMT backend does.  What libcmc does **not**
+do is reimplement TLAPS's encoding of full, unrestricted TLA+ set theory
+into those solvers -- that faithful encoding is years of trusted work;
+for anything outside the decidable fragment, libcmc bridges to TLAPS and
+lets *it* drive Isabelle/Zenon/SMT.
+
+**Checking that the code refines the model** -- libcmc's own C, no
+external engine.  This is the irreducible part no other tool does.
+
+**The C-only guardrail holds.**  Every solver above is an *optional,
+external* tool invoked as a subprocess -- exactly as `calib/hc` invokes
+TLC today -- that produces an independently meaningful answer about the
+*spec*.  None is a build dependency of `cmc`, and none sits on the path
+of the core verdict (does the code refine the spec), which stays pure
+C11 + libc, `cc` and `make`, on any host.  A user without Z3 or TLAPS
+installed still gets the full refinement check of their binary; they
+lose only the optional proofs *about the specification*.
+
 libcmc is, and stays, an **explicit-state model checker** -- bounded,
-concrete, exhaustive to a bound -- like TLC.  The plan matches TLC's
-feature set over the running code:
+concrete, exhaustive to a bound -- like TLC.  Over the running code it
+matches TLC's feature set:
 
 - structured, quantified abstract state (sets, records, sequences,
-  functions);
+  functions), kept within the SMT-encodable fragment so the proof bridge
+  stays sound;
 - refinement of an implementation against an abstract model;
 - invariants, action properties, witnesses;
 - symmetry reduction;
 - liveness with fairness (`[]`, `<>`, `~>`, weak/strong fairness);
 - composable abstract modules (`import` / `extends`).
 
-One TLA+ capability is **delegated, not rebuilt**: deductive proof
-(TLAPS).  TLAPS is a theorem prover, a different engine (proof
-obligations discharged by SMT and Isabelle), not a model checker.
-libcmc will not grow a homegrown prover -- a weak one would be a
-liability for a tool others trust as a safety gate.  Instead, because
-the abstract model language is TLA+-shaped, libcmc will **translate the
-abstract model to and from TLA+** (Milestone D), so the user keeps the
-whole existing ecosystem for the specification itself: TLC to check the
-abstract model in isolation, and **TLAPS to prove it**.  libcmc's unique
-job -- the one no other tool does -- is to prove that the *shipped code*
-refines that specification.
-
 This is the honest reading of "replicate the scope of TLA+": do what TLC
-does, over the code; for deductive proof, hand the user the real TLAPS
-on the same artifact.
+does over the *code*; for proof and symbolic checking of the *spec*,
+discharge to the real engines (SMT directly where decidable, TLAPS and
+Apalache via the TLA+ bridge).
+
+### Two tools considered and set aside
+
+- **Elle** (Kingsbury, Jepsen) is a separate kind of tool: it checks a
+  *recorded history* of a live system against a fixed consistency model
+  (serializability, snapshot isolation) by Adya-style cycle detection.
+  It judges one observed run, not all runs, and against built-in models,
+  not an arbitrary spec; it is not an influence on libcmc's design.  Its
+  cycle-detection method is a useful *reference* only if libcmc later
+  adds a linearizability property over the ghost history it already
+  keeps.
+- **Pure** (a term-rewriting language, LLVM-JIT) is rejected: a second
+  language and an LLVM runtime on a path the project keeps C-only.  The
+  abstract-model interpreter is a few hundred lines of C, not a language
+  runtime.
 
 ## The three layers
 
@@ -141,8 +195,11 @@ existing example green.  Ordered by dependency.
 
 - **A -- a value model for abstract state.**  Grow the invariant language
   beyond bytes to sets, records, sequences, functions and quantifiers
-  over them.  *Gate:* re-express an existing invariant (Paxos agreement)
-  in the richer logic with the identical verdict on every fixture.
+  over them.  Keep it within the **SMT-encodable fragment** (finite
+  domains, linear arithmetic, uninterpreted functions) from the start,
+  so the proof bridge in D stays sound.  *Gate:* re-express an existing
+  invariant (Paxos agreement) in the richer logic with the identical
+  verdict on every fixture.
 
 - **B -- the abstract model language with modules.**  A `.cml` file with
   `CONSTANTS`, `VARIABLES`, `Init`, named actions (`Next`), `INVARIANTS`
@@ -162,11 +219,19 @@ existing example green.  Ordered by dependency.
   spec unchanged and also passes -- the "one model, many implementations"
   claim, demonstrated.
 
-- **D -- the TLA+ bridge.**  Mechanical `.cml` -> `.tla` (and a
-  documented subset back).  *Gate:* round-trip the `consensus` base and
-  the Paxos spec through TLC (and, as a worked example, TLAPS); the
-  emitted TLA+ is accepted and agrees.  This supersedes the hand-kept
-  `calib/hc` TLA+ as the calibration path.
+- **D -- the artifact bridge.**  Mechanical `.cml` -> `.tla` (and a
+  documented subset back), so the abstract model reaches the real
+  engines: **TLC** (explicit), **Apalache** (symbolic, Z3-backed, for
+  large/structured domains), and **TLAPS** (unbounded proof via
+  Isabelle/Zenon/SMT).  Plus an optional `.cml` -> **SMT-LIB** emitter
+  so libcmc can discharge a single obligation (an inductive invariant, a
+  refinement step) to **Z3/CVC5/veriT** directly, for the decidable
+  fragment from A.  Every one of these is an optional external tool, like
+  TLC today; none is a build dependency of `cmc`.  *Gate:* round-trip the
+  `consensus` base and the Paxos spec through TLC and Apalache (and, as a
+  worked example, a TLAPS proof); the emitted artifacts are accepted and
+  agree.  This supersedes the hand-kept `calib/hc` TLA+ as the
+  calibration path.
 
 - **E -- symmetry reduction.**  Canonicalise interchangeable abstract
   values (node identities, ballots).  *Gate:* identical verdict and
@@ -210,5 +275,14 @@ correct, so it is retired *by* D, not before.
 - **Liveness waits on fork-from-snapshot.**  Honest dependency: no
   fairness-based liveness over the process front end until the engine can
   revisit a state (M9).
-- **Proof is delegated.**  libcmc will not claim to prove what only a
-  theorem prover can; it bridges to TLAPS instead.
+- **The SMT path is only as sound as the fragment.**  Direct
+  `.cml -> SMT-LIB` is sound only while the abstract logic stays inside
+  the decidable fragment A fixes; a construct outside it must route
+  through TLAPS, not be mis-encoded to a solver.  The emitter refuses
+  what it cannot encode rather than guess.
+- **Proof is delegated to the right engine, not rebuilt.**  For the
+  decidable fragment libcmc discharges obligations to Z3/CVC5/veriT
+  directly (like TLAPS's SMT backend); beyond it, it bridges to TLAPS
+  (Isabelle/Zenon/SMT).  It never reimplements TLAPS's encoding of full
+  TLA+ set theory, and never claims an internal proof the engines did
+  not give.  The code-refinement verdict never depends on any of them.
