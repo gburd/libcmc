@@ -187,8 +187,23 @@ arrive on the listener, OR a fresh launch is happening (run_seq?)
 concurrently.  acctest.c (a trivial accept loop) does not hit this; repl
 (a long startup before the snapshot) does.
 
-NEXT: establish exactly which pid raises the post-resume notifs (tag the
-listener's seccomp_notif.pid against the worker pid and the next-master
-pid), and whether anything re-launches a node after resume_world.  The
-register-level mechanic is proven (acctest.c); the defect is in the
-engine's process bookkeeping across the fork, not the ptrace mechanic.
+RESOLVED the identity question: the post-resume notifs DO come from the
+worker pid (notif.pid == N.pid == worker), and no stray relaunch
+happens.  The sharper finding: the worker, after resume, raises nr=0
+(read), NOT nr=43 (accept) -- so it is executing PAST the accept it was
+frozen in, into the node's next syscall (the read of an accepted
+connection).  So the register rewind re-issues accept, the accept is
+somehow satisfied immediately (not deferred as BK_ACCEPT), and the node
+runs on to read, then the drive_quiescent loop churns (b1->b0) because
+the restored N[].pend keeps a connection the re-issued accept consumes.
+
+So the defect is the interaction between the re-issued accept and the
+RESTORED connection/pending state (N[].pend, N[].cfd): after a COW fork
+the worker's in-kernel/socket state and the checker's restored
+bookkeeping are not consistent for a connection-mediated node the way
+they are for acctest.c's standalone accept loop.  NEXT: make resume
+re-establish the blocked state by RE-DEFERRING the re-issued accept
+(ignore restored pend until the node re-traps), i.e. treat the first
+post-resume syscall of each worker as the fresh boundary and rebuild
+N[].pend/cfd from what the worker actually re-issues, rather than
+trusting the snapshot's restored connection maps.
