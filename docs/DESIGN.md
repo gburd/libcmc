@@ -171,6 +171,13 @@ is reported as an engine violation, never truncated.
 
 ## Roadmap
 
+The north star past 0.3.0 is
+[TLA+ scope over the shipped code]({{ '/reference/plan-tlaplus-scope/' | relative_url }}):
+an abstract model plus a binding to the production binary, checked by
+refinement, so one model validates many implementations and a category
+of protocols shares a common base.  The milestones below are the
+tactical steps the engine needs regardless of that framing.
+
 For the process front end, next: fork from a snapshot instead of
 replaying from launch (the speed that larger models need), then the
 consensus examples -- Paxos, Raft, Humming Consensus, ZAB -- as programs

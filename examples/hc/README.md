@@ -45,6 +45,17 @@ dissenting epoch and converge on a single new suggestion at `E_max + 1`.
   read-all unanimity; in strongly-consistent mode (section 6.3) a
   quorum majority of reads is required, and quorums intersect.  The
   `agreement` invariant below is exactly that property.
+- **TLA+ specification**: [`HummingConsensus.tla`](HummingConsensus.tla)
+  in this directory is a full TLA+ model of HC (write-once public/private
+  stores, read-repair, ranking, unanimity, chain data).  It is the model
+  libcmc's calibration core (`calib/hc/`) is checked against, row by row,
+  with single-worker TLC.  Note it models the Machi chain-oriented HC in
+  detail, which is richer than the opaque-config example here (`hc.c`);
+  it is included as the authoritative formal reference and the
+  calibration oracle, not a line-by-line spec of this example's C.  The
+  planned abstract-model + binding work (`docs/plans/tlaplus-scope.md`)
+  will close that gap, so one abstract model checks both the spec and the
+  shipped code.
 
 [hc]: https://www.snookles.com/scott/presentations/papoc2016-slf.slides.pdf
 [machi]: https://github.com/basho/machi
