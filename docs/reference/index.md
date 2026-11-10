@@ -21,6 +21,10 @@ lede: >-
   declarative file that points libcmc at the binary you ship, the
   environment to explore, and the invariants to check (the reasoning is
   in [the decision record]({{ '/background/decision-model-file/' | relative_url }})).
+- [The abstract model]({{ '/reference/abstract-model/' | relative_url }}): a
+  declarative `.cml` specification libcmc checks on its own
+  (`cmc --spec`), bridges to TLA+ (`cmc --emit-tla`), and checks the
+  shipping binary against by refinement (`cmc --refine`).
 
 After `make install` these are on your system as `man cmc`,
 `man libcmc` and `man 7 cmc`.  The header,
