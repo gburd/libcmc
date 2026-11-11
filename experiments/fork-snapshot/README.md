@@ -243,3 +243,34 @@ confirm the worker's accept(500) is or isn't producing a USER_NOTIF).
 STATUS: this is a deterministic logic/sequencing bug, not host noise -- a
 quiet or EC2 host does not change it.  It remains parked off main; the
 north-star milestones (A-F, shipped in v0.4.0) do not depend on --fast.
+
+
+## BREAKTHROUGH (2026-11-10, part 3): the mechanic works -- it's an engine bug
+
+fdtest.c settles the question.  It reproduces the engine's EXACT node
+pattern -- intercepted socket -> bind -> listen -> accept, all answered
+with virtual fds (socket = 500; the accept deferred and never answered,
+as the engine does) -- then freezes the accept-blocked node and
+fork-resumes it exactly as the engine does.  On a quiet Linux x86-64 box
+with ptrace_scope=1, the resumed worker correctly re-raises nr=43
+(accept).
+
+So the full mechanic works even with the rich virtual-fd syscall history
+that distinguishes repl from acctest.c.  The engine's --fast livelock
+(worker ends at read(-1), its accept neither deferred nor answered) is
+NOT a ptrace/seccomp limitation -- it is an ENGINE SEQUENCING bug.  The
+difference from fdtest.c / acctest.c: both service a worker's re-issued
+notification IMMEDIATELY after its PTRACE_CONT, whereas resume_world in
+the engine CONTs ALL workers and THEN calls drive_quiescent.  Between
+CONT(n0) and the RECV, the engine forks n1 (fork_master does
+PTRACE_CONT + waitpid on n1's master), which very likely consumes or
+races n0 worker's ptrace/notification event, so n0's re-issued accept is
+not received and deferred -- it escapes to the kernel and returns -1.
+
+THE FIX (bounded, next step): in resume_world, for each node, CONT its
+worker and immediately poll+RECV+defer its re-issued blocked syscall
+(probe-style) BEFORE forking the next node -- or fork all next-masters
+first, then CONT and service workers one at a time.  Do not interleave a
+fork_master's ptrace excursion with a live, un-serviced worker.  With
+that, --fast should reach a verdict; then gate it byte-identical vs BFS
+on every fixture before it ships (still off by default).
