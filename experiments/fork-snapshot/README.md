@@ -304,3 +304,29 @@ blocked syscall per worker and stop (leave it deferred, blocked=1),
 matching the snapshot's blocked state, rather than pumping
 try_pending_for until the node advances.  The mechanic and the
 sequencing are now sound; this is the last bookkeeping step.
+
+
+## Part 5 (2026-11-10): the remaining divergence from fdtest.c
+
+With two-phase resume, Phase 2 services each worker's first post-resume
+notification -- but it is `nr=0 read(fd=-1)`, NOT `nr=43 accept`, even
+though freeze_master captured orig_rax=43 (accept) and the worker's regs
+at CONT were rewound to re-issue accept.  So in the ENGINE the resumed
+worker is at read(-1) (accept already returned -1), while fdtest.c -- the
+same socket/bind/listen/accept-to-virtual-fds pattern, isolated -- has
+its resumed worker correctly re-raise accept.
+
+So the divergence is now localized to freeze_master/the engine's
+snapshot of a node with a long prior history vs fdtest.c's node frozen
+cleanly right after its accept notif.  Hypotheses to check next:
+- Does freeze_master's PTRACE_INTERRUPT catch the engine node at the
+  true accept boundary, or mid-glibc-wrapper?  Compare the exact rip and
+  the bytes at rip-2 for the engine node vs fdtest.c (fdtest.c's rip-2 is
+  0f05 = syscall; confirm the engine's is too AND that it is the ACCEPT
+  syscall site, not a read site inside glibc's accept).
+- a0=0xffffffff(-1) as a read fd strongly suggests the node's accept
+  returned -1 BEFORE the snapshot, i.e. the snapshot boundary is actually
+  a read, not the accept -- check whether block_kind=BK_ACCEPT is stale
+  (set at an earlier accept) while the node had already moved to a read.
+The two-phase sequencing fix stands (committed); this is a freeze-boundary
+question, isolated and concrete.
