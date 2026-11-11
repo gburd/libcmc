@@ -39,6 +39,21 @@ expect "paxos: extends consensus, agreement holds" 0 "117 distinct states found"
 expect "paxos: depth matches TLC (5)"         0 "complete state graph search is 5" --spec "$HERE/examples/spec/paxos.cml"
 expect "paxos: the double-vote bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
 
+# Raft leader election (Ongaro's raft.tla): Election Safety, at most one
+# leader per term.  Counts and depth match single-worker TLC (checked by
+# make check-emit-tla); the revote bug lets two candidates reach a quorum.
+expect "raft: election safety holds"          0 "38 distinct states found" --spec "$HERE/examples/spec/raft.cml"
+expect "raft: depth matches TLC (4)"          0 "complete state graph search is 4" --spec "$HERE/examples/spec/raft.cml"
+expect "raft: the revote bug elects two leaders" 1 "election_safety is violated" --spec "$HERE/examples/spec/raft.cml" --define BUG
+
+# Humming Consensus (Machi; generic agreement over write-once epoch
+# register stores): Agreement, at most one value chosen per epoch.
+# Counts and depth match single-worker TLC; the overwrite bug breaks
+# write-once so two values each reach a quorum.
+expect "hc: agreement holds under write-once" 0 "41 distinct states found" --spec "$HERE/examples/spec/hc.cml"
+expect "hc: depth matches TLC (5)"            0 "complete state graph search is 5" --spec "$HERE/examples/spec/hc.cml"
+expect "hc: the overwrite bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/hc.cml" --define BUG
+
 echo "-- symmetry reduction: interchangeable node ids collapse"
 # the token spec's node ids are fully symmetric; with symmetry declared,
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness

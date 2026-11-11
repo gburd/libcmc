@@ -1,0 +1,54 @@
+# examples/spec/hc.cml: Humming Consensus as an abstract model,
+# extending the shared consensus base.  It inherits Agreement (at most
+# one value chosen) unchanged; its own actions drive `chosen` the HC
+# way -- a value is chosen once a QUORUM of write-once epoch register
+# stores holds it for the epoch.
+#
+# Reference: the Humming Consensus design in the Machi file store
+#   (Basho / Scott Lystig Fritchie), "Chain Replication metadata
+#   management" / the Machi RFC; see the HC survey in docs/research and
+#   examples/hc/README.md.  HC agrees on a sequence of configurations,
+#   one per epoch; Agreement is per epoch, so one epoch suffices to
+#   state the property and show its violation.
+#
+# The safety hinges on two things: each participant's epoch register is
+# WRITE-ONCE (set once, never changed), and a value is chosen only with
+# a quorum.  Because two quorums of P participants overlap, and the
+# overlapping store holds a single write-once value, two different
+# values cannot both reach a quorum -- Agreement, and it holds even
+# under a partition (a minority simply cannot reach a quorum).
+#
+# Kept small: 3 participants (0 .. P-1), a quorum of 2, values 1 .. V.
+#
+#   cmc --spec examples/spec/hc.cml
+#   cmc --spec examples/spec/hc.cml --define BUG   (unsafe: overwrite)
+
+module hc
+extends consensus
+
+const P = 3                     # participants 0 .. P-1
+const Q = 2                     # a quorum majority of P
+
+# store[p] = the value participant p's write-once register holds for the
+# epoch (0 = empty, not yet written).
+var store : [0 .. P-1 -> 0 .. V]
+
+init store == [p in 0 .. P-1 -> 0]
+
+# a participant writes value v into its epoch register, but only if the
+# register is still empty -- the register is WRITE-ONCE.
+action write(p in 0 .. P-1, v in 1 .. V):
+  when store[p] == 0
+  store' = [store except [p] = v]
+
+# the planted bug: a participant overwrites its register with a
+# different value, breaking write-once -- two values can then each reach
+# a quorum and both be chosen.
+action write_bug(p in 0 .. P-1, v in 1 .. V) [BUG]:
+  when store[p] != v
+  store' = [store except [p] = v]
+
+# a value v is chosen once a quorum of participants' registers hold it.
+action choose(v in 1 .. V):
+  when (count p in 0 .. P-1 : store[p] == v) >= Q
+  chosen' = [chosen except [v] = 1]

@@ -1090,6 +1090,8 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs){
 	fprintf(o,"\\* Apalache or TLAPS; a .cfg binds the constants for TLC.  The\n");
 	fprintf(o,"\\* @type annotations and the CInit operator let Apalache check it\n");
 	fprintf(o,"\\* directly: apalache-mc check --cinit=CInit --inv=INV MODULE.tla\n");
+	fprintf(o,"\\* (add --no-deadlock, as TLC's CHECK_DEADLOCK FALSE, since a\n");
+	fprintf(o,"\\* terminal state is not a safety fault for these models).\n");
 	fprintf(o,"EXTENDS Naturals, FiniteSets\n\n");
 	/* constants, each with an Apalache @type (all our constants are Int) */
 	if(S.ncst){ fprintf(o,"CONSTANTS\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  \\* @type: Int;\n  %s%s\n",S.cst[i].name,i+1<S.ncst?",":""); }

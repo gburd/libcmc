@@ -1,0 +1,57 @@
+# examples/spec/raft.cml: Raft leader election as an abstract model.
+# The safety property is Election Safety: at most one leader is elected
+# per term.  Election Safety is a per-term guarantee, so one term
+# suffices to state it and to show its violation; the model is the
+# vote-and-win core for a single term.
+#
+# Reference: Diego Ongaro's raft.tla (the canonical TLA+ specification),
+#   https://github.com/ongardie/raft.tla
+# Election Safety there:
+#   \A i, j : state[i] = Leader /\ state[j] = Leader
+#             /\ currentTerm[i] = currentTerm[j] => i = j
+# In raft.tla a candidate accumulates votesGranted (the set of servers
+# that voted for it) and BecomeLeader fires on a quorum.  Each server
+# grants at most one vote per term (RequestVote), so a server appears in
+# at most one candidate's votesGranted, and two candidates cannot both
+# reach a quorum in the same term.
+#
+# Here, kept small: 3 servers (0 .. S-1), a quorum of 2.  votes[c]
+# accumulates the number of distinct servers that have granted candidate
+# c, and used[s] records that server s has already spent its one vote.
+# Because two quorums of 3 servers overlap, with each server voting once
+# at most one candidate can reach a quorum -- Election Safety.
+#
+#   cmc --spec examples/spec/raft.cml
+#   cmc --spec examples/spec/raft.cml --define BUG   (unsafe: revote)
+
+module raft
+
+const S = 3                     # servers and candidates 0 .. S-1
+const Q = 2                     # a quorum majority of S
+
+# used[s] = 1 once server s has granted its single vote for the term
+var used : [0 .. S-1 -> 0 .. 1]
+# votes[c] = how many distinct servers have granted candidate c
+var votes : [0 .. S-1 -> 0 .. S]
+
+init used == [s in 0 .. S-1 -> 0]
+init votes == [c in 0 .. S-1 -> 0]
+
+# a server grants its one vote to candidate c: it must not have voted
+# yet (RequestVote grants at most one vote per term).  The grant is
+# recorded by spending the server's vote and incrementing c's tally.
+action grant(s in 0 .. S-1, c in 0 .. S-1):
+  when used[s] == 0
+  used' = [used except [s] = 1]
+  votes' = [votes except [c] = votes[c] + 1]
+
+# the planted bug: a server grants a vote without spending its single
+# vote, so one server can grant two candidates -- two candidates can
+# then each reach a quorum and both win in one term.
+action grant_bug(s in 0 .. S-1, c in 0 .. S-1) [BUG]:
+  when votes[c] < S
+  votes' = [votes except [c] = votes[c] + 1]
+
+# Election Safety: at most one candidate reaches a quorum in the term,
+# so at most one leader is elected.
+invariant election_safety: (count c in 0 .. S-1 : votes[c] >= Q) <= 1

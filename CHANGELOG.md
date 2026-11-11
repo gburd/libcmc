@@ -5,6 +5,21 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Certified abstract models for Raft leader election and Humming
+  Consensus (`examples/spec/raft.cml`, `examples/spec/hc.cml`), joining
+  the existing Paxos model.  Each is checked three ways that agree:
+  `cmc --spec`, TLC (`make check-emit-tla`), and Apalache
+  (`make check-emit-apalache`).  Raft's model is the vote-and-win core
+  (each server grants one vote per term, a candidate wins on a quorum)
+  and its property is Election Safety (at most one leader per term,
+  following Ongaro's raft.tla); the `--define BUG` revote lets two
+  candidates win.  HC's model is agreement over write-once epoch
+  register stores with a quorum (following Machi's Humming Consensus)
+  and inherits the shared `consensus` Agreement; the `--define BUG`
+  overwrite breaks write-once so two values are chosen.  The emit gates
+  now set `CHECK_DEADLOCK FALSE` (TLC) and `--no-deadlock` (Apalache),
+  since a terminal state is not a safety fault.
+
 - The TLA+ bridge reaches Apalache (Milestone D): `cmc --emit-tla` now
   writes Apalache `@type` annotations (every constant and scalar
   variable is `Int`, a function variable is `Int -> Int`, the `vars`

@@ -36,6 +36,25 @@ Each example cites its canonical TLA+ specification (or paper) and the
 safety property the libcmc invariant corresponds to, so a run of the
 real binary cross-checks the property the formal model states.
 
+## Abstract models
+
+Three consensus-family protocols also have abstract `.cml` models under
+`examples/spec/`, checked three ways that agree -- `cmc --spec`, TLC
+(`make check-emit-tla`) and Apalache (`make check-emit-apalache`):
+
+- `paxos.cml` -- single-decree Paxos, extending the shared `consensus`
+  base; Agreement (at most one value chosen).  Reference: Lamport's
+  `Paxos.tla`.
+- `raft.cml` -- Raft leader election; Election Safety (at most one
+  leader per term).  Reference: Ongaro's `raft.tla`.
+- `hc.cml` -- Humming Consensus over write-once epoch register stores,
+  extending `consensus`; Agreement per epoch.  Reference: Machi.
+
+Each also ships a `--define BUG` build that breaks the safety rule (a
+double vote, a revote, an overwrite), and the checker finds the shortest
+counterexample.  Paxos also demonstrates "one model, many
+implementations" (`paxos.c` and `paxos2.c` refine the same model).
+
 ## The failure, animated
 
 Marc Brooker (AWS) has an animation of the failure the chain-replication

@@ -53,6 +53,10 @@ rows="
 test/spec|counter|counter|in_range|PASS|
 examples/spec|paxos|paxos|agreement|PASS|
 examples/spec|paxos|paxosbug|agreement|VIOLATION|--define BUG
+examples/spec|raft|raft|election_safety|PASS|
+examples/spec|raft|raftb|election_safety|VIOLATION|--define BUG
+examples/spec|hc|hc|agreement|PASS|
+examples/spec|hc|hcb|agreement|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 inv=$4 want=$5 def=$6
@@ -61,14 +65,14 @@ check() {
 	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
 	# module name must match the filename for the tools
 	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
-	( cd "$d" && RUN "$MC" check --cinit=CInit "--inv=$inv" --length=6 "$mod.tla" > out.txt 2>&1 )
+	( cd "$d" && RUN "$MC" check --no-deadlock --cinit=CInit "--inv=$inv" --length=6 "$mod.tla" > out.txt 2>&1 )
 	if grep -qiE 'Annotation required|type input error|Typing input error' "$d/out.txt"; then
 		echo "FAIL $cml [$want]: Apalache rejected the generated types"; grep -iE 'error|annotation' "$d/out.txt" | head -3 | sed 's/^/     /'; echo x>"$OUT/fail"; return
 	fi
 	if [ "$want" = VIOLATION ]; then
 		grep -q 'Checker has found an error' "$d/out.txt" && echo "ok   $cml [$want]: Apalache found the violation" || { echo "FAIL $cml [$want]: expected a violation"; grep -iE 'outcome|error' "$d/out.txt" | head -2 | sed 's/^/     /'; echo x>"$OUT/fail"; }
 	else
-		grep -q 'The outcome is: NoError' "$d/out.txt" && echo "ok   $cml [$want]: Apalache reports no error" || { echo "FAIL $cml [$want]: expected no error"; grep -iE 'outcome|error|violat' "$d/out.txt" | head -2 | sed 's/^/     /'; echo x>"$OUT/fail"; }
+		grep -qE 'Checker reports no error|The outcome is: NoError' "$d/out.txt" && echo "ok   $cml [$want]: Apalache reports no error" || { echo "FAIL $cml [$want]: expected no error"; grep -iE 'outcome|error|violat' "$d/out.txt" | head -2 | sed 's/^/     /'; echo x>"$OUT/fail"; }
 	fi
 }
 

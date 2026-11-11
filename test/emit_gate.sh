@@ -16,6 +16,10 @@ rows="
 test/spec|counter|counter|CONSTANT N = 3|in_range|PASS|
 examples/spec|paxos|paxos|CONSTANTS V = 2  A = 3  B = 2  Q = 2|agreement|PASS|
 examples/spec|paxos|paxos|CONSTANTS V = 2  A = 3  B = 2  Q = 2|agreement|VIOLATION|--define BUG
+examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|PASS|
+examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|VIOLATION|--define BUG
+examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|PASS|
+examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7
@@ -24,7 +28,7 @@ check() {
 	d="$OUT/$mod-$want"; mkdir -p "$d"
 	# shellcheck disable=SC2086
 	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
-	printf 'SPECIFICATION Spec\n%s\nINVARIANT %s\n' "$cfgline" "$inv" > "$d/$mod.cfg"
+	printf 'SPECIFICATION Spec\n%s\nINVARIANT %s\nCHECK_DEADLOCK FALSE\n' "$cfgline" "$inv" > "$d/$mod.cfg"
 	bash "$TLC" "$d/$mod.tla" "$d/$mod.cfg" -workers 1 > "$d/out.txt" 2>&1
 	if grep -qiE 'Parse Error|semantic analysis failed' "$d/out.txt"; then
 		echo "FAIL $cml [$want]: TLC rejected the generated TLA+"; sed 's/^/     /' "$d/out.txt" | grep -iE 'error|line' | head -4; echo x>"$OUT/fail"; return
