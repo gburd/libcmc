@@ -54,6 +54,14 @@ expect "hc: agreement holds under write-once" 0 "41 distinct states found" --spe
 expect "hc: depth matches TLC (5)"            0 "complete state graph search is 5" --spec "$HERE/examples/spec/hc.cml"
 expect "hc: the overwrite bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/hc.cml" --define BUG
 
+# ZAB (Apache ZooKeeper's Zab.tla): commit-durability, a committed
+# transaction is held by a quorum so it survives a leader change.
+# Counts and depth match single-worker TLC; the early-ack bug commits
+# before a quorum stored, so a committed transaction can be lost.
+expect "zab: commit-durability holds"         0 "20 distinct states found" --spec "$HERE/examples/spec/zab.cml"
+expect "zab: depth matches TLC (6)"           0 "complete state graph search is 6" --spec "$HERE/examples/spec/zab.cml"
+expect "zab: the early-ack bug loses a commit" 1 "durable is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
+
 echo "-- symmetry reduction: interchangeable node ids collapse"
 # the token spec's node ids are fully symmetric; with symmetry declared,
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness

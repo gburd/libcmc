@@ -1,0 +1,74 @@
+# examples/spec/zab.cml: ZooKeeper Atomic Broadcast (ZAB) as an abstract
+# model.  Its distinctive safety is commit-durability: a transaction a
+# leader has committed (acknowledged to the client) is never lost, even
+# across a leader crash and a new leader taking over.  This is the
+# property the ZAB process example (examples/zab/zab.c) checks on the
+# running code, and the one that underlies Zab.tla's Agreement.
+#
+# Reference: the Zab TLA+ specification (Apache ZooKeeper); its named
+# invariants are Leadership, PrefixConsistency, Agreement and
+# TotalOrder.  This model is the single-transaction commit-durability
+# core (as the zab.c and raftlog.c examples are), not the multi-slot log.
+#
+# Why durability holds across a leader change: a leader commits a
+# transaction only once a QUORUM of participants has durably stored it,
+# and a new leader synchronizes from a quorum.  Two quorums of P
+# participants overlap, so the new leader's quorum always contains a
+# participant that stored the committed transaction -- it cannot be lost.
+# The checkable heart of this is the invariant: if the transaction is
+# committed, then a quorum holds it.
+#
+# Kept small: 3 participants (0 .. P-1), a quorum of 2.
+#
+#   cmc --spec examples/spec/zab.cml
+#   cmc --spec examples/spec/zab.cml --define BUG   (unsafe: early ack)
+
+module zab
+
+const P = 3                     # participants 0 .. P-1
+const Q = 2                     # a quorum majority of P
+
+# stored[p] = 1 once participant p has durably stored the transaction
+# (a follower acking the leader's PROPOSE).
+var stored : [0 .. P-1 -> 0 .. 1]
+# committed = 1 once the leader has committed the transaction and
+# acknowledged the client.
+var committed : 0 .. 1
+# recovered = 1 once a new leader has taken over and re-committed the
+# transaction from what it found in its synchronization quorum.
+var recovered : 0 .. 1
+
+init stored == [p in 0 .. P-1 -> 0]
+init committed == 0
+init recovered == 0
+
+# a participant durably stores the transaction (acks the PROPOSE).
+action store(p in 0 .. P-1):
+  when stored[p] == 0
+  stored' = [stored except [p] = 1]
+
+# the leader commits once a quorum has stored the transaction, and only
+# then acknowledges the client -- the ZAB commit rule.
+action commit:
+  when committed == 0 and (count p in 0 .. P-1 : stored[p] == 1) >= Q
+  committed' = 1
+
+# a new leader recovers: it may declare the transaction committed only
+# if it finds it in a synchronization quorum (the same quorum guard),
+# which is what preserves a previously committed transaction.
+action recover:
+  when (count p in 0 .. P-1 : stored[p] == 1) >= Q
+  recovered' = 1
+
+# the planted bug: the leader acknowledges the client as soon as the
+# transaction is in its own memory, before a quorum has stored it (the
+# zab.c -DBUG early ack).  A crash of the leader then loses a committed
+# transaction, because no quorum holds it.
+action commit_bug [BUG]:
+  when committed == 0
+  committed' = 1
+
+# commit-durability: a committed transaction is held by a quorum (so it
+# survives any leader change, whose recovery quorum must intersect).  A
+# recovered transaction likewise.
+invariant durable: (committed == 0 or (count p in 0 .. P-1 : stored[p] == 1) >= Q) and (recovered == 0 or (count p in 0 .. P-1 : stored[p] == 1) >= Q)

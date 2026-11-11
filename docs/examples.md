@@ -49,6 +49,9 @@ Three consensus-family protocols also have abstract `.cml` models under
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,
   extending `consensus`; Agreement per epoch.  Reference: Machi.
+- `zab.cml` -- ZAB commit-durability: a committed transaction is held by
+  a quorum, so it survives a leader change.  Reference: ZooKeeper's
+  `Zab.tla`.
 
 Each also ships a `--define BUG` build that breaks the safety rule (a
 double vote, a revote, an overwrite), and the checker finds the shortest

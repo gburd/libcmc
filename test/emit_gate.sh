@@ -20,6 +20,8 @@ examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|PASS|
 examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|VIOLATION|--define BUG
 examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|PASS|
 examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|VIOLATION|--define BUG
+examples/spec|zab|zab|CONSTANTS P = 3  Q = 2|durable|PASS|
+examples/spec|zab|zab|CONSTANTS P = 3  Q = 2|durable|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7

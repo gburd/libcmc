@@ -5,18 +5,23 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
-- Certified abstract models for Raft leader election and Humming
-  Consensus (`examples/spec/raft.cml`, `examples/spec/hc.cml`), joining
-  the existing Paxos model.  Each is checked three ways that agree:
-  `cmc --spec`, TLC (`make check-emit-tla`), and Apalache
-  (`make check-emit-apalache`).  Raft's model is the vote-and-win core
-  (each server grants one vote per term, a candidate wins on a quorum)
-  and its property is Election Safety (at most one leader per term,
-  following Ongaro's raft.tla); the `--define BUG` revote lets two
-  candidates win.  HC's model is agreement over write-once epoch
-  register stores with a quorum (following Machi's Humming Consensus)
-  and inherits the shared `consensus` Agreement; the `--define BUG`
-  overwrite breaks write-once so two values are chosen.  The emit gates
+- Certified abstract models for Raft leader election, Humming Consensus
+  and ZAB (`examples/spec/raft.cml`, `hc.cml`, `zab.cml`), joining the
+  existing Paxos model, so the whole consensus family now has one.  Each
+  is checked three ways that agree: `cmc --spec`, TLC
+  (`make check-emit-tla`), and Apalache (`make check-emit-apalache`).
+  Raft's model is the vote-and-win core (each server grants one vote per
+  term, a candidate wins on a quorum) and its property is Election
+  Safety (at most one leader per term, following Ongaro's raft.tla); the
+  `--define BUG` revote lets two candidates win.  HC's model is
+  agreement over write-once epoch register stores with a quorum
+  (following Machi's Humming Consensus) and inherits the shared
+  `consensus` Agreement; the `--define BUG` overwrite breaks write-once
+  so two values are chosen.  ZAB's model is commit-durability (following
+  Apache ZooKeeper's Zab.tla): a committed transaction is held by a
+  quorum, so it survives a leader change whose recovery quorum must
+  intersect; the `--define BUG` early ack commits before a quorum
+  stored, so a crash loses the committed transaction.  The emit gates
   now set `CHECK_DEADLOCK FALSE` (TLC) and `--no-deadlock` (Apalache),
   since a terminal state is not a safety fault.
 
