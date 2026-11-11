@@ -160,7 +160,20 @@ n²/2¹²⁹ is printed, as TLC does.
 | `scripts/purity_teeth.sh` | the purity gate itself: each probe in `test/probe/` must be rejected |
 | `make check-msan` | uninitialised reads, which `--det` cannot see |
 | planted bugs | `#if` sites in shipped core source; each must be caught with the expected property (`test/toy_gate.sh`, `calib/hc/hc_bug_gate.sh`) |
-| calibration | the engine itself, against TLC (`calib/hc/calibrate.sh`) |
+| calibration (engine) | the search itself, against TLC: the step-function HC core vs a hand-written `HummingConsensus.tla`, row by row (`calib/hc/calibrate.sh`) |
+| calibration (bridge) | the abstract-model checker against TLC on the *same* model: `cmc --emit-tla FILE.cml` must parse in TLC and give the identical verdict as `cmc --spec`, for safety and for liveness (`test/emit_gate.sh`, `make check-emit-tla`; needs nix) |
+
+There are two calibration tracks because there are two things to pin.
+The **engine** track (`calib/hc`) proves the search loop agrees with
+TLC, and it leans on a hand-written `HummingConsensus.tla` kept beside a
+hand-written HC step-function core -- a duplicate that can drift.  The
+**bridge** track proves the abstract checker agrees with TLC on *one*
+model, with no hand-kept twin: the same `.cml` is both checked by `cmc
+--spec` and emitted to TLC by `cmc --emit-tla`.  Milestone D retires the
+engine track *in favour of* the bridge, but only once a **certified** HC
+abstract `.cml` (one that reproduces the `calib/hc` rows through the
+bridge) exists; writing that spec is open work, so `calib/hc` stays
+until then rather than be removed and leave the search uncalibrated.
 
 ## Limits
 
