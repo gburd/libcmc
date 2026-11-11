@@ -118,6 +118,14 @@ may reference only what the code emits, never its internals, so the
 refinement is exactly as honest as the state hook is complete.  Point the
 same spec and binding at a second implementation to check it too.
 
+Add `--refine-steps` to check refinement at the level of *steps*, not
+only states: each implementation transition must map to an abstract
+action step or a stutter (the abstraction unchanged).  This catches a
+step the model forbids even when every state it reaches is in range,
+which the state-level check cannot see.  It needs every spec variable to
+have a binding (matching an action step needs the whole abstract state)
+and refuses otherwise.
+
 ## The TLA+ bridge
 
 ```

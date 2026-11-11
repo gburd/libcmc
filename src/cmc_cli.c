@@ -264,6 +264,8 @@ proc_main(int argc, char **argv)
 			po.timeouts = atoi(ARG());
 		else if (!strcmp(a, "--refine"))
 			{ spec_path = ARG(); po.refine = 1; }
+		else if (!strcmp(a, "--refine-steps"))
+			{ po.refine_steps = 1; }
 		else if (!strcmp(a, "--bind"))
 			bind_path = ARG();
 		else if (!strcmp(a, "--define"))
@@ -275,6 +277,7 @@ proc_main(int argc, char **argv)
 		}
 #undef ARG
 	}
+	if (po.refine_steps && !po.refine) { fprintf(stderr, "cmc: --refine-steps needs --refine SPEC\n"); return 3; }
 	if (po.refine)
 	{
 		char err[256];

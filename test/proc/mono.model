@@ -1,0 +1,11 @@
+# test/proc/mono.model: one node, driven by timeouts, for the C2
+# action-level refinement test.  The abstract invariants come from
+# mono.cml; this file's own [invariants] is a trivial placeholder.
+[target]
+nodes = 1
+
+[environment]
+timeouts = 4            # fire enough timeouts to walk the counter to M
+
+[invariants]
+ok = "1 == 1"

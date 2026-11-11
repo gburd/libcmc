@@ -45,6 +45,19 @@ int cmc_refine_load_bind(const char *path, char *err, size_t errcap);
  * *name), -1 if all hold, -2 on an evaluation error (message in err). */
 int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap);
 
+/* Milestone C2: action-level refinement with stuttering.  cmc_refine_step
+ * checks, in addition to the invariant (so it subsumes cmc_refine_check),
+ * that the step from the previous reached implementation state to this
+ * one maps under the binding to either a stutter (the abstraction is
+ * unchanged) or a real abstract action step.  Returns -1 if fine, an
+ * invariant index (>=0, name in *name) on an invariant violation, -3 if
+ * the step matches no abstract action and is not a stutter (*name a
+ * reason), -2 on an evaluation error (message in err).  Call
+ * cmc_refine_reset() at the start of each walk/path to forget the
+ * previous state. */
+int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errcap);
+void cmc_refine_reset(void);
+
 /* Milestone D: translate the .cml spec to TLA+ on stdout (for TLC,
  * Apalache, TLAPS).  Returns 0 ok, 3 on a model error. */
 int cmc_emit_tla(const char *path, char **defs, int ndefs);

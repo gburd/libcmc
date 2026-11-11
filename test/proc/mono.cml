@@ -1,0 +1,24 @@
+# test/proc/mono.cml: a monotonic counter for the action-level
+# refinement test (Milestone C2).  The counter c may only ever step up
+# by one.  The invariant (c is in range) holds at EVERY state, so a
+# state-level (C1) refinement check passes any implementation whose
+# counter stays in range -- even one that jumps by two.  Only the
+# action-level (C2) check, which requires each implementation step to
+# match an abstract action step or stutter, catches the jump.
+
+module mono
+
+const M = 3                     # the counter ranges over 0 .. M
+
+var c : 0 .. M
+
+init c == 0
+
+# the only move: step up by exactly one
+action inc():
+  when c < M
+  c' = c + 1
+
+# holds at every reachable state (and at 0,1,2,3 regardless) -- so C1
+# alone cannot distinguish a by-one implementation from a by-two one
+invariant in_range: c >= 0 and c <= M

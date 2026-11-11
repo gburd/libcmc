@@ -21,8 +21,12 @@ typedef struct CmcProcOptions
 	/* refinement (Milestone C): if refine is set, at each reached state
 	 * the implementation's observables are mapped to the abstract model
 	 * (spec_file) by the binding (bind_file) and the abstract invariants
-	 * are checked.  The spec and binding are loaded by the caller. */
+	 * are checked.  The spec and binding are loaded by the caller.  If
+	 * refine_steps is also set, C2's action-level check runs instead: each
+	 * implementation step must map to an abstract action step or a
+	 * stutter (it still subsumes the invariant check). */
 	int			refine;
+	int			refine_steps;
 } CmcProcOptions;
 
 int			cmc_proc_main(const CmcProcOptions *po);

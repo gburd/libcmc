@@ -1,0 +1,11 @@
+# test/proc/mono.bind: binding the monotonic-counter implementation
+# (test/proc/mono.c) to the abstract model test/proc/mono.cml.  The
+# abstract counter c is byte 0 of the single node's hook.
+spec   = test/proc/mono.cml
+binary = test/proc/mono.c
+
+[fields]
+cval = 0                 # byte 0 of the node's hook is the counter
+
+[map]
+c = "node[0].cval"

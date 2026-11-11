@@ -28,6 +28,7 @@
 .Nm
 .Fl -refine Ar spec
 .Fl -bind Ar file
+.Op Fl -refine-steps
 .Fl -binary Ar path
 .Op Fl -model-file Ar file
 .Op Fl -simulate
@@ -175,6 +176,22 @@ The binding
 that maps the implementation's observables onto the abstract variables,
 for
 .Fl -refine .
+.It Fl -refine-steps
+Check refinement at the level of
+.Em steps ,
+not only states (Milestone C2): each implementation transition must map
+to an abstract action step or a stutter (the abstraction unchanged).
+This catches a step the abstract model forbids even when every state it
+reaches satisfies the invariant, which
+.Fl -refine
+alone cannot.
+Requires
+.Fl -refine ,
+and every spec variable must have a
+.Pq Bq map
+entry
+.Pq it refuses otherwise ,
+since matching an abstract action step needs the whole abstract state.
 .It Fl -crashes Ar n , Fl -drops Ar n , Fl -timeouts Ar n
 Override the file's budgets.
 .It Fl -depth Ar d

@@ -5,6 +5,30 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Action-level refinement with stuttering (Milestone C2): `cmc --refine
+  SPEC --bind B --refine-steps` checks that each implementation *step*
+  maps, under the binding, to either an abstract action step or a
+  stutter (the abstraction unchanged), not only that each reached state
+  satisfies the invariant (C1).  This catches an implementation that
+  reaches only in-range states but gets there by a transition the spec
+  forbids, which the state-level check cannot see.  It reuses the same
+  successor enumeration and canonical fingerprint the `--spec` search
+  uses and TLC calibrates, so a matched step is an exact abstract
+  successor.  It requires every spec variable to have a binding and
+  refuses otherwise, since matching an action step needs the whole
+  abstract state.  `test/proc/mono.c` (a counter the spec allows to step
+  up only by one) is the gate: C1 passes a by-two build, C2 catches it.
+
+- One model, many implementations (Milestone C gate): a second,
+  structurally different single-decree Paxos (`examples/paxos/paxos2.c`
+  -- three symmetric nodes, each both proposer and acceptor, a different
+  wire protocol and a different state-hook layout) is checked to refine
+  the *same* abstract model `examples/spec/paxos.cml`, through its own
+  binding `examples/spec/paxos2.bind` (the spec unchanged).  Both Paxos
+  binaries now refine one specification, making "one spec, many
+  implementations, all correct" a demonstrated claim.  Gated in
+  `test/proc_gate.sh`.
+
 ## 0.4.0 (2026-11-10)
 
 - Liveness with weak fairness for the abstract checker (Milestone F): a

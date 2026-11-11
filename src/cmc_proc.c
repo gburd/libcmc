@@ -1170,6 +1170,16 @@ apply(const Act *a)
 	drive_quiescent();
 }
 
+/* C2 (--refine-steps): when g_step_refine is set, run_seq performs the
+ * action-level refinement check at the initial state and after every
+ * replayed action (a genuine transition chain).  step_refine_here is
+ * defined with the other refinement helpers below; it is forward-
+ * declared here so run_seq can call it. */
+static int g_step_refine;
+static int g_step_rc = -1;
+static const char *g_step_name;
+static int step_refine_here(const char **name);
+
 /* Replay `seq` from a fresh launch.  Returns 0, or -1 if a node would not
  * start.  On return the world is at the quiescent point after the last
  * action, and acts/nact list what is enabled there. */
@@ -1191,12 +1201,14 @@ run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 	for (int i = 0; i < M.nodes; i++)
 		if (!N[i].preload_ok)
 			die(3, "node %d did not load the preload %s (set CMC_PRELOAD to its path)", i, preload_path);
+	if (g_step_refine) { cmc_refine_reset(); g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	for (int s = 0; s < seqlen; s++)
 	{
 		Act a[MAXACT]; int na = enum_actions(a);
 		if (seq[s] < 0 || seq[s] >= na)
 			die(1, "replay diverged at step %d: action %d of %d (is the target deterministic?)", s, seq[s], na);
 		apply(&a[seq[s]]);
+		if (g_step_refine) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	}
 	*nact = enum_actions(acts);
 	return 0;
@@ -1224,13 +1236,25 @@ static int  ob_node_len(void *cx, int i){ (void)cx; return (i>=0&&i<M.nodes)?N[i
 static long ob_repl_src(void *cx, int r){ (void)cx; return rep_src[r]; }
 static long ob_repl_val(void *cx, int r){ (void)cx; return rep_val[r]; }
 static int
-refine_check_state(const char **name, char *err, size_t errcap)
+refine_check_state(int steps, const char **name, char *err, size_t errcap)
 {
 	CmcObs o = {0};
 	o.nnodes = M.nodes; o.nrepl = nrep;
 	o.node_byte = ob_node_byte; o.node_len = ob_node_len;
 	o.repl_src = ob_repl_src; o.repl_val = ob_repl_val;
-	return cmc_refine_check(&o, name, err, errcap);
+	return steps ? cmc_refine_step(&o, name, err, errcap)
+	             : cmc_refine_check(&o, name, err, errcap);
+}
+
+/* C2 step check used inside run_seq's replay.  Stores any error message
+ * in a module buffer (g_step_err) so the caller need not thread it.
+ * Returns the cmc_refine_step code (-1 fine, >=0 invariant, -3 step, -2
+ * error). */
+static char g_step_err[256];
+static int
+step_refine_here(const char **name)
+{
+	return refine_check_state(1, name, g_step_err, sizeof g_step_err);
 }
 
 static int
@@ -1441,6 +1465,7 @@ cmc_proc_main(const CmcProcOptions *po)
 		{
 			Act a[MAXACT]; int na, len = 0;
 			if (run_seq(NULL, 0, a, &na)) die(3, "a node would not start");
+			if (po->refine_steps) cmc_refine_reset();
 			for (;;)
 			{
 				int which = -1; states++;
@@ -1456,13 +1481,16 @@ cmc_proc_main(const CmcProcOptions *po)
 				if (po->refine)
 				{
 					const char *inm = NULL; char rerr[256];
-					int rr = refine_check_state(&inm, rerr, sizeof rerr);
+					int rr = refine_check_state(po->refine_steps, &inm, rerr, sizeof rerr);
 					if (rr == -2) { fprintf(stderr, "cmc: refinement: %s\n", rerr); kill_all(); free(seq); return 3; }
-					if (rr >= 0)
+					if (rr != -1)
 					{
 						kill_all();
 						printf("Walk %" PRIu64 " (seed %" PRIu64 "):\n", w + 1, po->seed);
-						printf("Error: the implementation does not refine the spec: abstract invariant %s is violated.\n", inm);
+						if (rr == -3)
+							printf("Error: the implementation does not refine the spec: a step has %s.\n", inm);
+						else
+							printf("Error: the implementation does not refine the spec: abstract invariant %s is violated.\n", inm);
 						report_refine(seq, len);
 						free(seq); return 1;
 					}
@@ -1487,6 +1515,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	 * (stateless), so a world costs one replay of its whole prefix. */
 	size_t distinct = 0, cut = 0, replays = 0; int maxlen = 0;
 	const char *why = NULL;
+	g_step_refine = po->refine_steps;	/* C2 checks run inside run_seq's replay */
 	q_root();
 	while (qh < qt)
 	{
@@ -1498,13 +1527,27 @@ cmc_proc_main(const CmcProcOptions *po)
 		if (run_seq(seq, e.len, a, &na)) die(3, "a node would not start");
 		replays++;
 
+		if (g_step_refine && g_step_rc != -1)
+		{
+			/* C2: run_seq found a step along this path that does not
+			 * refine (invariant, forbidden step, or an error) */
+			if (g_step_rc == -2) { fprintf(stderr, "cmc: refinement: %s\n", g_step_err); kill_all(); free(seq); return 3; }
+			kill_all();
+			if (g_step_rc == -3)
+				printf("Error: the implementation does not refine the spec: a step has %s.\n", g_step_name);
+			else
+				printf("Error: the implementation does not refine the spec: abstract invariant %s is violated.\n", g_step_name);
+			report_refine(seq, e.len);
+			free(seq); return 1;
+		}
+
 		int which = -1; int ok = check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
-		if (ok && po->refine)
+		if (ok && po->refine && !po->refine_steps)
 		{
-			/* refinement: does this reached state refine the abstract model? */
+			/* C1: does this reached state refine the abstract model? */
 			const char *inm = NULL; char rerr[256];
-			int rr = refine_check_state(&inm, rerr, sizeof rerr);
+			int rr = refine_check_state(0, &inm, rerr, sizeof rerr);
 			if (rr == -2) { fprintf(stderr, "cmc: refinement: %s\n", rerr); kill_all(); free(seq); return 3; }
 			if (rr >= 0)
 			{

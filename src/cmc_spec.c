@@ -897,33 +897,115 @@ static int var_domain(const Var *V, Value *dom, char *err, size_t errcap){
 	return sp_eval_set(V->fdom,&env,dom,err,errcap)?0:-1;
 }
 
-int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap){
-	/* build the abstract state: each variable's Value from its binding */
+/* build the abstract state from the implementation's observables via the
+ * binding (the common core of C1 and C2).  Returns 0, or -1 with a
+ * message in err on an evaluation error. */
+static int build_abstract(const CmcObs *obs, State *out, char *err, size_t errcap){
 	State st; for(int i=0;i<S.nvar;i++) st.v[i]=vint(0);
 	for(int m=0;m<B_nmap;m++){
-		int vi=var_index(B_map[m].var); if(vi<0){ snprintf(err,errcap,"binding for unknown var %s",B_map[m].var); return -2; }
+		int vi=var_index(B_map[m].var); if(vi<0){ snprintf(err,errcap,"binding for unknown var %s",B_map[m].var); return -1; }
 		Var *V=&S.var[vi];
 		if(B_map[m].idx[0] && V->is_fun){
-			/* function var: evaluate expr for each key in the domain, with idx bound */
-			Value dom; if(var_domain(V,&dom,err,errcap)){ return -2; }
+			Value dom; if(var_domain(V,&dom,err,errcap)){ return -1; }
 			Value fn={0}; fn.tag=T_FUN;
 			for(int e=0;e<dom.n && fn.n<SP_MAPMAX;e++){
 				Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=1;
 				snprintf(env.pname[0],SP_NAME,"%s",B_map[m].idx); env.pval[0]=dom.e[e];
-				Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -2;
+				Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -1;
 				fn.k[fn.n]=dom.e[e]; fn.v[fn.n]=r.i; fn.n++;
 			}
 			st.v[vi]=fn;
 		} else {
 			Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=0;
-			Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -2;
+			Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -1;
 			st.v[vi]=r;
 		}
 	}
+	*out=st; return 0;
+}
+
+int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap){
+	/* build the abstract state: each variable's Value from its binding */
+	State st; if(build_abstract(obs,&st,err,errcap)) return -2;
 	/* check the abstract invariants on the built state */
 	int bad=sp_check(&st,err,errcap);
 	if(bad==-2) return -2;
 	if(bad>=0){ *name=S.inv[bad].name; return bad; }
+	return -1;
+}
+
+/* ---------------------------------------------------------------------
+ * C2: action-level refinement with stuttering.  C1 checks that the
+ * abstraction of every reached implementation state satisfies the
+ * abstract invariant; it cannot see a transition the spec forbids as
+ * long as both endpoints are good states.  C2 adds the step check: each
+ * implementation step s -> s' must map, under the binding, to either a
+ * STUTTER (alpha(s) == alpha(s')) or a real abstract step (some abstract
+ * action, under some parameter binding, takes alpha(s) to exactly
+ * alpha(s')).  It reuses the SAME successor enumeration (bind_params)
+ * and the SAME canonical fingerprint (state_fp) the --spec BFS uses and
+ * TLC calibrates, so a match is an exact, calibrated abstract successor,
+ * never an approximation.
+ * ------------------------------------------------------------------- */
+static State C2_prev;		/* abstraction of the previous impl state */
+static int   C2_have;		/* is C2_prev valid (i.e. not the path's first state)? */
+
+void cmc_refine_reset(void){ C2_have=0; }
+
+/* C2 matches implementation steps against abstract action steps, which
+ * needs the WHOLE abstract state -- so every spec variable must have a
+ * binding.  (C1 needs only the invariant-relevant variables.)  Returns
+ * the name of the first unbound variable, or NULL if all are bound. */
+static const char *first_unbound_var(void){
+	for(int vi=0; vi<S.nvar; vi++){
+		int bound=0;
+		for(int m=0;m<B_nmap && !bound;m++) if(var_index(B_map[m].var)==vi) bound=1;
+		if(!bound) return S.var[vi].name;
+	}
+	return NULL;
+}
+
+/* does some abstract action step take `from` to exactly `to`? */
+static int abstract_step_exists(const State *from, const State *to, char *err, size_t errcap){
+	uint64_t want=state_fp(to);
+	enum { C2_SUCC = 4096 };
+	State *succ = malloc((size_t)C2_SUCC * sizeof *succ);
+	if(!succ){ snprintf(err,errcap,"out of memory"); return -2; }
+	int found=0;
+	for(int ai=0; ai<S.nact && !found; ai++){
+		int ns=0, rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
+		bind_params(&S.act[ai],&env,0,from,succ,&ns,C2_SUCC,err,errcap,&rc);
+		if(rc<0){ free(succ); return -2; }
+		for(int k=0;k<ns;k++) if(state_fp(&succ[k])==want){ found=1; break; }
+	}
+	free(succ);
+	return found;
+}
+
+/* C2 step check at one reached implementation state.  Returns -1 if the
+ * step (and the invariant) are fine, >=0 (an invariant index, name in
+ * *name) if an invariant is violated, -3 if the step matches no abstract
+ * action and is not a stutter (*name set to a short reason), -2 on an
+ * evaluation error (message in err). */
+int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errcap){
+	if(!C2_have){
+		/* action-level matching needs every variable observable */
+		const char *u=first_unbound_var();
+		if(u){ snprintf(err,errcap,"--refine-steps needs every spec variable bound; '%s' has no [map] entry (map it, or use --refine for the state-level check)",u); return -2; }
+	}
+	State cur; if(build_abstract(obs,&cur,err,errcap)) return -2;
+	/* C2 subsumes C1: the invariant must hold at every state */
+	int bad=sp_check(&cur,err,errcap);
+	if(bad==-2) return -2;
+	if(bad>=0){ *name=S.inv[bad].name; return bad; }
+	if(C2_have){
+		if(state_fp(&C2_prev)!=state_fp(&cur)){	/* not a stutter */
+			int e=abstract_step_exists(&C2_prev,&cur,err,errcap);
+			if(e==-2) return -2;
+			if(e==0){ *name="no matching abstract action"; C2_prev=cur; C2_have=1; return -3; }
+		}
+	}
+	C2_prev=cur; C2_have=1;
 	return -1;
 }
 
