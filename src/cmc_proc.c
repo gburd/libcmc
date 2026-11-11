@@ -1523,6 +1523,12 @@ static void
 resume_world(WorldSnap *w, const uint64_t want_fp[2])
 {
 	snap_restore_globals(w);
+	/* Phase 1: fork every live node's master into (worker, next master).
+	 * Do ALL forks first, while no worker is running yet -- a fork_master
+	 * ptrace excursion (its PTRACE_CONT + waitpid) must never run while a
+	 * sibling worker is live and un-serviced, or it races/consumes that
+	 * worker's re-issued notification (fdtest.c pinned this). */
+	pid_t worker[MAXNODES];
 	for (int i = 0; i < M.nodes; i++)
 	{
 		if (!N[i].alive) continue;
@@ -1532,13 +1538,28 @@ resume_world(WorldSnap *w, const uint64_t want_fp[2])
 		while (read(N[i].fd3[0], junk, sizeof junk) > 0) ;
 		fl = fcntl(N[i].fd4[0], F_GETFL); fcntl(N[i].fd4[0], F_SETFL, fl | O_NONBLOCK);
 		while (read(N[i].fd4[0], junk, sizeof junk) > 0) ;
-		pid_t worker;
-		pid_t next = fork_master(w->master[i], w->saved[i], &worker);
+		pid_t next = fork_master(w->master[i], w->saved[i], &worker[i]);
 		if (next < 0) die(1, "--fast: could not fork the snapshot of node %d", i);
 		w->master[i] = next;		/* chain: keep a fresh master for the next action */
-		N[i].pid = worker;
-		N[i].blocked = 0;			/* the worker will re-raise its notif */
-		ptrace(PTRACE_CONT, worker, 0, 0);
+		N[i].pid = worker[i];
+		N[i].blocked = 0;
+	}
+	/* Phase 2: resume each worker and service its re-issued blocked
+	 * syscall immediately (poll + NOTIF_RECV via try_pending_for), one at
+	 * a time, before moving on -- so no worker's notification is left
+	 * un-serviced while another is resumed (fdtest.c / acctest.c do this
+	 * and the accept re-traps correctly). */
+	for (int i = 0; i < M.nodes; i++)
+	{
+		if (!N[i].alive) continue;
+		ptrace(PTRACE_CONT, worker[i], 0, 0);
+		struct pollfd pf = {N[i].listener, POLLIN, 0};
+		for (int t = 0; t < 400 && N[i].alive && !N[i].blocked; t++)
+		{
+			reap(&N[i]);
+			if (!N[i].alive || N[i].blocked) break;
+			if (poll(&pf, 1, 10) > 0) try_pending_for(&N[i]);
+		}
 	}
 	drive_quiescent();
 	if (want_fp)

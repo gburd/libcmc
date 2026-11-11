@@ -274,3 +274,33 @@ first, then CONT and service workers one at a time.  Do not interleave a
 fork_master's ptrace excursion with a live, un-serviced worker.  With
 that, --fast should reach a verdict; then gate it byte-identical vs BFS
 on every fixture before it ships (still off by default).
+
+
+## Part 4 (2026-11-10): two-phase resume fixes the hang; now a protocol-state mismatch
+
+Applied the fdtest.c fix to resume_world: Phase 1 forks ALL next-masters
+first (no worker live during a fork_master excursion); Phase 2 then
+PTRACE_CONTs each worker and services its re-issued notification
+immediately (poll + try_pending_for), one at a time.  Result on repl:
+the LIVELOCK/HANG is GONE -- resume now reaches the fingerprint
+self-check, which correctly reports "a resumed world did not match its
+snapshot".  So the engine-sequencing bug is fixed; the trajectory is
+hang -> clean self-check failure (the sound guard doing its job).
+
+The remaining mismatch: at the self-check the resumed nodes are
+alive=0 (exited, code 0) while the snapshot had them alive=1 blocked in
+accept.  So each worker, after resume, runs its protocol to COMPLETION
+(main returns 0) instead of re-blocking at the snapshot's accept.  The
+canon bytes match (0 vs 0); only aliveness differs.  So the worker's
+re-issued accept is being ANSWERED (not left deferred) and the node runs
+its whole accept->read->...->accept loop until accept returns <=0 and it
+breaks out of main.
+
+NEXT: find why Phase 2's try_pending_for answers (rather than only
+defers) the worker's re-issued accept -- likely it is draining a stale
+queued notification (a pre-snapshot read/close) or the restored N[].pend
+feeds an auto-accept.  The fix is to service EXACTLY the one re-issued
+blocked syscall per worker and stop (leave it deferred, blocked=1),
+matching the snapshot's blocked state, rather than pumping
+try_pending_for until the node advances.  The mechanic and the
+sequencing are now sound; this is the last bookkeeping step.
