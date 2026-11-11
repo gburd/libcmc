@@ -25,6 +25,9 @@ lede: >-
   declarative `.cml` specification libcmc checks on its own
   (`cmc --spec`), bridges to TLA+ (`cmc --emit-tla`), and checks the
   shipping binary against by refinement (`cmc --refine`).
+- [When libcmc fits]({{ '/fit/' | relative_url }}): where an
+  explicit-state checker of the shipping code is the right tool, and
+  where it is the wrong one.
 
 After `make install` these are on your system as `man cmc`,
 `man libcmc` and `man 7 cmc`.  The header,

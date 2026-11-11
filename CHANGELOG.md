@@ -5,6 +5,27 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- A certified abstract model for Flexible Paxos
+  (`examples/spec/fpaxos.cml`), the flagship of the Paxos-variant test
+  matrix and a direct expression of Heidi Howard's theorem: Agreement
+  holds iff every Phase 1 quorum intersects every Phase 2 quorum, for
+  which `Q1 + Q2 > A` suffices.  With `A=5, Q1=4, Q2=2` it holds; the
+  `--define BUG` uses the Phase 2 quorum size for the Phase 1 guard, so
+  the cross-phase intersection fails and two values are chosen.  The
+  model tracks the inequality faithfully: with the correct guard but
+  `Q1=3` (so `Q1 + Q2 = A`, not `> A`) Agreement also breaks.  Certified
+  against TLC and Apalache like the other specs.
+- `docs/fit.md` ("When libcmc fits"): where an explicit-state checker of
+  the shipping code is the right tool (crash-fault agreement and
+  replication at a small instance, the quorum-intersection knob, commit
+  durability, refinement of a real binary) and where it is the wrong one
+  (liveness and partial synchrony, real-time and timing, Byzantine and
+  cryptography, performance, state spaces no bounded search reaches).
+- `docs/research/03-paxos-variants-and-howard.md`: a survey of Heidi
+  Howard's consensus research and the Paxos family, with the one safety
+  invariant and the one planted-bug knob for each variant, and a fit
+  assessment for explicit-state bounded checking.
+
 ## 0.5.0 (2026-11-11)
 
 - Certified abstract models for Raft leader election, Humming Consensus

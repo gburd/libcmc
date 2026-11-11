@@ -59,6 +59,8 @@ examples/spec|hc|hc|agreement|PASS|
 examples/spec|hc|hcb|agreement|VIOLATION|--define BUG
 examples/spec|zab|zab|durable|PASS|
 examples/spec|zab|zabb|durable|VIOLATION|--define BUG
+examples/spec|fpaxos|fpaxos|agreement|PASS|
+examples/spec|fpaxos|fpaxosb|agreement|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 inv=$4 want=$5 def=$6

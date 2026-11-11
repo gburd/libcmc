@@ -62,6 +62,14 @@ expect "zab: commit-durability holds"         0 "20 distinct states found" --spe
 expect "zab: depth matches TLC (6)"           0 "complete state graph search is 6" --spec "$HERE/examples/spec/zab.cml"
 expect "zab: the early-ack bug loses a commit" 1 "durable is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
 
+# Flexible Paxos (Howard, Malkhi, Spiegelman 2016): Agreement holds iff
+# every Phase 1 quorum intersects every Phase 2 quorum, for which
+# Q1 + Q2 > A suffices.  With Q1=4, Q2=2, A=5 (sum 6 > 5) it holds; the
+# --define BUG uses the Phase 2 size for the Phase 1 guard, breaking the
+# cross-phase intersection so two values are chosen.
+expect "fpaxos: safe when Q1+Q2>A"           0 "No error has been found" --spec "$HERE/examples/spec/fpaxos.cml"
+expect "fpaxos: the shrunk-Q1 bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
+
 echo "-- symmetry reduction: interchangeable node ids collapse"
 # the token spec's node ids are fully symmetric; with symmetry declared,
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness

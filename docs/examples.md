@@ -45,6 +45,10 @@ Three consensus-family protocols also have abstract `.cml` models under
 - `paxos.cml` -- single-decree Paxos, extending the shared `consensus`
   base; Agreement (at most one value chosen).  Reference: Lamport's
   `Paxos.tla`.
+- `fpaxos.cml` -- Flexible Paxos, extending `consensus`; Agreement holds
+  iff every Phase 1 quorum intersects every Phase 2 quorum, for which
+  `Q1 + Q2 > A` suffices (Howard's theorem).  Reference: Howard, Malkhi,
+  Spiegelman, OPODIS 2016.
 - `raft.cml` -- Raft leader election; Election Safety (at most one
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,

@@ -1,0 +1,69 @@
+# examples/spec/fpaxos.cml: Flexible Paxos as an abstract model,
+# extending the shared consensus base.  It inherits Agreement (at most
+# one value chosen) and demonstrates Heidi Howard's central result.
+#
+# Reference: Heidi Howard, Dahlia Malkhi, Alexander Spiegelman,
+#   "Flexible Paxos: Quorum Intersection Revisited", OPODIS 2016,
+#   arXiv:1608.06696.
+#
+# Classical Paxos requires every quorum to be a majority so any two
+# quorums intersect.  FPaxos shows the only intersection the safety
+# argument uses is between a Phase 1 (leader-election) quorum and the
+# Phase 2 (replication) quorums of earlier leaders.  So the real
+# requirement is that every Phase 1 quorum (size Q1) intersect every
+# Phase 2 quorum (size Q2); a sufficient instance is Q1 + Q2 > A.
+# Majority is the special case Q1 = Q2 = floor(A/2)+1.
+#
+# The model: each acceptor accepts one value (Phase 2); a value is
+# chosen once a Phase 2 quorum (Q2 acceptors) holds it.  A new leader
+# proposes value v only after a Phase 1 read of Q1 acceptors that saw no
+# other value -- which is possible exactly when some Q1 acceptors avoid
+# the holders of that other value, i.e. A - (holders of w) >= Q1.  When
+# Q1 + Q2 > A this cannot happen once w is chosen (A - Q2 < Q1), so the
+# new leader always sees the chosen value and cannot propose a different
+# one -- Agreement.  The config here is A = 5, Q1 = 4, Q2 = 2, so
+# Q1 + Q2 = 6 > 5: safe, with a cheap 2-acceptor steady state.
+#
+# -DBUG: accept_bug uses the Phase 2 quorum size (Q2) where the Phase 1
+# guard needs Q1 -- the classic FPaxos mistake of shrinking the
+# replication quorum without enlarging the election quorum.  With
+# A - (holders of w) >= Q2 the new leader's read can miss a chosen
+# value, so two values are chosen.
+#
+#   cmc --spec examples/spec/fpaxos.cml
+#   cmc --spec examples/spec/fpaxos.cml --define BUG   (Q1 shrunk to Q2)
+
+module fpaxos
+extends consensus
+
+const A = 5                     # acceptors 0 .. A-1
+const Q1 = 4                    # Phase 1 (leader-election) quorum
+const Q2 = 2                    # Phase 2 (replication) quorum
+
+# accepted[a] = the value acceptor a has accepted (0 = none).  Each
+# acceptor accepts one value in this single-era model.
+var accepted : [0 .. A-1 -> 0 .. V]
+
+init accepted == [a in 0 .. A-1 -> 0]
+
+# acceptor a accepts value v (Phase 2).  It may do so only if, for every
+# OTHER value w, either w is not yet chosen (fewer than Q2 hold it) or a
+# Phase 1 read of Q1 acceptors could have missed w (A minus w's holders
+# is at least Q1, so Q1 acceptors avoid every w-holder) -- i.e. the
+# leader proposing v legitimately did not see w.  When Q1 + Q2 > A this
+# is false once w is chosen, so a different value cannot be accepted.
+action accept(a in 0 .. A-1, v in 1 .. V):
+  when accepted[a] == 0 and (all w in 1 .. V : w == v or (count c in 0 .. A-1 : accepted[c] == w) < Q2 or A - (count c in 0 .. A-1 : accepted[c] == w) >= Q1)
+  accepted' = [accepted except [a] = v]
+
+# the planted bug: the Phase 1 guard uses Q2 where it must use Q1 (the
+# election quorum was not enlarged when the replication quorum shrank),
+# so Q1 + Q2 > A no longer protects it and two values are chosen.
+action accept_bug(a in 0 .. A-1, v in 1 .. V) [BUG]:
+  when accepted[a] == 0 and (all w in 1 .. V : w == v or (count c in 0 .. A-1 : accepted[c] == w) < Q2 or A - (count c in 0 .. A-1 : accepted[c] == w) >= Q2)
+  accepted' = [accepted except [a] = v]
+
+# a value v is chosen once a Phase 2 quorum of acceptors holds it.
+action choose(v in 1 .. V):
+  when (count a in 0 .. A-1 : accepted[a] == v) >= Q2
+  chosen' = [chosen except [v] = 1]
