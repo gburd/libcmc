@@ -137,6 +137,20 @@ and proved with TLAPS.  Name the file after the module.  `make
 check-emit-tla` verifies that the generated TLA+ agrees with
 `cmc --spec` on every example.
 
+The module carries Apalache `@type` annotations (each constant and
+scalar variable is `Int`, a function variable is `Int -> Int`) and a
+`CInit` operator that binds the constants to their `.cml` values, so
+Apalache's symbolic, Z3-backed checker accepts it directly:
+
+```
+apalache-mc check --cinit=CInit --inv=in_range counter.tla
+```
+
+The annotations are `\*` comments, so TLC reads the same module
+unchanged.  `make check-emit-apalache` verifies that the generated TLA+
+type-checks in Apalache and agrees with `cmc --spec`.  Apalache is
+optional (not a build dependency); the gate fetches it once or uses
+`$APALACHE_MC`, and needs Java 21+.
 ## Symmetry
 
 ```

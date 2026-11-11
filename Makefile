@@ -46,6 +46,7 @@ MSAN_B ?= build-msan
 
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
+        check-spec-calibration check-emit-tla check-emit-apalache \
         install docs-site clean
 
 all: $(LIB) $(B)/cmc $(B)/test_cmc $(PRELOAD)
@@ -142,6 +143,14 @@ check-spec-calibration: $(B)/cmc
 # TLC accepts and that agrees with cmc --spec.  Needs nix (tlc).
 check-emit-tla: $(B)/cmc
 	test/emit_gate.sh $(B)/cmc
+
+# the TLA+ bridge against Apalache (the symbolic, Z3-backed engine):
+# cmc --emit-tla must produce a module Apalache type-checks and checks
+# with the same verdict as cmc --spec.  Apalache is optional (not in
+# nixpkgs); the gate fetches it once to $CMC_SCRATCH, or set APALACHE_MC.
+# Needs Java 21+ (uses nix jdk21 if the host java is older).
+check-emit-apalache: $(B)/cmc
+	test/apalache_gate.sh $(B)/cmc
 
 check-all: check-unit check-msan check-calibration check-hc-bugs
 

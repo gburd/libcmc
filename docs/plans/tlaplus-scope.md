@@ -194,7 +194,9 @@ Each is independently useful, independently gated, and leaves every
 existing example green.  Ordered by dependency.
 
 **Status (as of v0.4.0):** A, B, C, D, E and F are implemented and
-calibrated against single-worker TLC; G (scale) is in progress -- the
+calibrated against single-worker TLC; D's bridge also reaches Apalache
+(the symbolic, Z3-backed engine), verified by `make
+check-emit-apalache`.  G (scale) is in progress -- the
 fork-from-snapshot search is proven as a mechanic
 (`experiments/fork-snapshot/`) but not yet a sound engine mode
 (`--fast`, on the `m9-fast-wip` branch).  C landed as C1 (invariant-

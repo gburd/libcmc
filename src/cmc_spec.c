@@ -1087,13 +1087,21 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs){
 	FILE *o=stdout;
 	fprintf(o,"---- MODULE %s ----\n",S.modname);
 	fprintf(o,"\\* Generated from %s by cmc --emit-tla.  Run with TLC,\n",path);
-	fprintf(o,"\\* Apalache or TLAPS; a .cfg binds the constants.\n");
+	fprintf(o,"\\* Apalache or TLAPS; a .cfg binds the constants for TLC.  The\n");
+	fprintf(o,"\\* @type annotations and the CInit operator let Apalache check it\n");
+	fprintf(o,"\\* directly: apalache-mc check --cinit=CInit --inv=INV MODULE.tla\n");
 	fprintf(o,"EXTENDS Naturals, FiniteSets\n\n");
-	/* constants */
-	if(S.ncst){ fprintf(o,"CONSTANTS"); for(int i=0;i<S.ncst;i++) fprintf(o,"%s %s",i?",":"",S.cst[i].name); fprintf(o,"\n"); }
-	/* variables */
-	fprintf(o,"VARIABLES"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s %s",i?",":"",S.var[i].name); fprintf(o,"\n");
+	/* constants, each with an Apalache @type (all our constants are Int) */
+	if(S.ncst){ fprintf(o,"CONSTANTS\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  \\* @type: Int;\n  %s%s\n",S.cst[i].name,i+1<S.ncst?",":""); }
+	/* variables, each with an Apalache @type: a scalar var is Int, a
+	 * function var [lo..hi -> lo..hi] is Int -> Int */
+	fprintf(o,"VARIABLES\n"); for(int i=0;i<S.nvar;i++) fprintf(o,"  \\* @type: %s;\n  %s%s\n",S.var[i].is_fun?"Int -> Int":"Int",S.var[i].name,i+1<S.nvar?",":"");
+	/* vars tuple, annotated so Apalache reads <<...>> as a tuple not a Seq */
+	fprintf(o,"\\* @type: <<"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s%s",i?", ":"",S.var[i].is_fun?"Int -> Int":"Int"); fprintf(o,">>;\n");
 	fprintf(o,"vars == <<"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s%s",i?", ":"",S.var[i].name); fprintf(o,">>\n\n");
+	/* CInit binds the constants to their .cml values, so Apalache needs no
+	 * .cfg (TLC still reads the .cfg) */
+	if(S.ncst){ fprintf(o,"CInit ==\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  %s %s = %ld\n",i?"/\\":"/\\",S.cst[i].name,S.cst[i].val); fprintf(o,"\n"); }
 	/* Init */
 	fprintf(o,"Init ==\n  "); tla_expr_fixup(S.init,o); fprintf(o,"\n\n");
 	/* each action as a formula: \E params \in dom : guard /\ assignments /\ UNCHANGED rest */

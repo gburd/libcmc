@@ -5,6 +5,20 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The TLA+ bridge reaches Apalache (Milestone D): `cmc --emit-tla` now
+  writes Apalache `@type` annotations (every constant and scalar
+  variable is `Int`, a function variable is `Int -> Int`, the `vars`
+  tuple is annotated so Apalache reads it as a tuple, not a sequence)
+  and a `CInit` operator binding the constants to their `.cml` values.
+  Apalache's symbolic, Z3-backed checker then accepts the generated
+  module directly: `apalache-mc check --cinit=CInit --inv=INV
+  MODULE.tla`.  The annotations are `\*` comments, so TLC still accepts
+  the same module unchanged.  `make check-emit-apalache` verifies that
+  the generated TLA+ type-checks in Apalache and agrees with `cmc
+  --spec` (counter and Paxos hold, the planted Paxos bug violates).
+  Apalache is an optional external tool, like TLC; the gate fetches it
+  once to `$CMC_SCRATCH` or uses `$APALACHE_MC`, and needs Java 21+.
+
 - Action-level refinement with stuttering (Milestone C2): `cmc --refine
   SPEC --bind B --refine-steps` checks that each implementation *step*
   maps, under the binding, to either an abstract action step or a
