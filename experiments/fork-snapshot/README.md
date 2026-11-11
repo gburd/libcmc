@@ -207,3 +207,39 @@ re-establish the blocked state by RE-DEFERRING the re-issued accept
 post-resume syscall of each worker as the fresh boundary and rebuild
 N[].pend/cfd from what the worker actually re-issues, rather than
 trusting the snapshot's restored connection maps.
+
+
+## Sharpest diagnosis (2026-11-10, part 2)
+
+Instrumented the post-resume path precisely:
+- The initial run_seq drive reaches the accept boundary correctly (both
+  nodes block BK_ACCEPT, drive_quiescent breaks).
+- After resume, the worker's registers at PTRACE_CONT are perfect (rip on
+  the `0f 05` syscall instruction, rax = orig_rax = 43 = accept).
+- Yet the FIRST notification the worker raises post-resume is
+  `nr=0` read with `a0 = 0xffffffffffffffff` (read(-1)) -- serviced
+  immediately after CONT (acctest-style) gives the same.  So the worker
+  is already PAST accept, reading fd -1 (accept returned -1).
+- answer() is never called post-resume and the accept-defer branch never
+  runs post-resume -- so the re-issued accept was NOT deferred as
+  BK_ACCEPT and NOT answered by the checker.  It appears to have run and
+  returned -1 (as a kernel accept on the virtual, non-real fd 500 would).
+
+So: perfect registers, but the re-issued accept is not intercepted/
+deferred the way acctest.c's is -- it returns -1 and the node proceeds to
+read(-1).  acctest.c (filter traps only accept; node loops accept) does
+NOT reproduce this; repl (socket/bind/listen then accept, all intercepted
+to virtual fds) does.  The leading hypothesis: the forked worker's
+re-issued accept is reaching the KERNEL (not the seccomp USER_NOTIF
+listener) -- i.e. the COW fork does not preserve the seccomp-filter ->
+our-listener association for this process the way a fresh notif would, OR
+the fork-injection excursion perturbs the filter state.  This contradicts
+acctest.c, so the real variable is the richer syscall history / virtual
+fds.  NEXT: compare the seccomp filter/notify state of a forked worker
+that re-issues accept in the repl setup vs acctest (e.g. SECCOMP_
+IOCTL_NOTIF_ID_VALID on the id; check /proc/worker/status Seccomp field;
+confirm the worker's accept(500) is or isn't producing a USER_NOTIF).
+
+STATUS: this is a deterministic logic/sequencing bug, not host noise -- a
+quiet or EC2 host does not change it.  It remains parked off main; the
+north-star milestones (A-F, shipped in v0.4.0) do not depend on --fast.
