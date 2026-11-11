@@ -193,7 +193,7 @@ the richer, opt-in path; nothing is forced to migrate.
 Each is independently useful, independently gated, and leaves every
 existing example green.  Ordered by dependency.
 
-**Status (as of v0.4.0):** A, B, C, D, E and F are implemented and
+**Status (as of v0.5.0):** A, B, C, D, E and F are implemented and
 calibrated against single-worker TLC; D's bridge also reaches Apalache
 (the symbolic, Z3-backed engine), verified by `make
 check-emit-apalache`.  G (scale) is in progress -- the
@@ -208,7 +208,10 @@ invariant.  C's "one model, many
 implementations" gate is met: a second, structurally different Paxos
 (`examples/paxos/paxos2.c` -- three symmetric nodes, a different hook
 layout) refines the *same* `examples/spec/paxos.cml` through its own
-binding (`examples/spec/paxos2.bind`), the spec unchanged.
+binding (`examples/spec/paxos2.bind`), the spec unchanged.  The whole
+consensus family now has a certified abstract model -- `paxos.cml`,
+`raft.cml`, `hc.cml` and `zab.cml`, each agreeing across `cmc --spec`,
+TLC and Apalache.
 
 - **A -- a value model for abstract state.**  Grow the invariant language
   beyond bytes to sets, records, sequences, functions and quantifiers

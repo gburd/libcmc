@@ -5,6 +5,8 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 0.5.0 (2026-11-11)
+
 - Certified abstract models for Raft leader election, Humming Consensus
   and ZAB (`examples/spec/raft.cml`, `hc.cml`, `zab.cml`), joining the
   existing Paxos model, so the whole consensus family now has one.  Each
