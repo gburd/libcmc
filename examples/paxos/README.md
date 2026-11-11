@@ -103,3 +103,20 @@ source, built two ways, is the correct protocol and the bug; the model
 file holds only the environment to explore and the one invariant.  A
 pass covers the budgets given -- raise `--crashes` and `--drops` until
 your own planted bugs are caught.
+
+## One model, many implementations
+
+`paxos2.c` is a *different* Paxos -- three symmetric nodes, each both a
+proposer and an acceptor, with its own wire protocol and a different
+state-hook layout.  It is checked against the **same** abstract model
+`examples/spec/paxos.cml`, through its own binding
+`examples/spec/paxos2.bind` (the spec is unchanged, only the binding
+differs because the implementation observes differently):
+
+    cc -no-pie -o paxos2 examples/paxos/paxos2.c
+    cmc --model-file examples/spec/paxos2-refine.model --binary ./paxos2 \
+        --refine examples/spec/paxos.cml --bind examples/spec/paxos2.bind
+
+Both binaries refine one specification -- the sense in which they are the
+same protocol, verified against the shipping code rather than a model of
+it.
