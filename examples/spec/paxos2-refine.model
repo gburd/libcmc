@@ -1,0 +1,16 @@
+# examples/spec/paxos2-refine.model: target and environment for checking
+# that paxos2.c (the second Paxos implementation) refines
+# examples/spec/paxos.cml.  Three symmetric nodes; a timeout drives a
+# node to propose its value.  The abstract model's invariants are the
+# property; this file's own [invariants] is a trivial placeholder.
+#
+#   cmc --model-file examples/spec/paxos2-refine.model --binary ./paxos2 \
+#       --refine examples/spec/paxos.cml --bind examples/spec/paxos2.bind
+[target]
+nodes = 3
+
+[environment]
+timeouts = 2            # each node may be driven to propose
+
+[invariants]
+ok = "1 == 1"

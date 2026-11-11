@@ -1,0 +1,23 @@
+# examples/spec/paxos2.bind: the binding for the SECOND Paxos
+# implementation (examples/paxos/paxos2.c), against the SAME abstract
+# model examples/spec/paxos.cml.  Only this file differs from
+# paxos.bind -- the spec is reused unchanged.  That is the "one model,
+# many implementations" claim: both binaries are checked to refine one
+# specification.
+#
+# paxos2.c observes differently: it has 3 symmetric nodes (each a
+# proposer and acceptor), and its decided value is byte 3 of the hook
+# (not byte 7, as in paxos.c).  So `chosen[v]` is "some node's byte-3
+# equals v".
+#
+#   cmc --refine examples/spec/paxos.cml --bind examples/spec/paxos2.bind \
+#       --model-file examples/spec/paxos2-refine.model --binary ./paxos2
+
+spec   = examples/spec/paxos.cml
+binary = examples/paxos/paxos2.c
+
+[fields]
+decided = 3              # byte 3 of this implementation's hook is decided
+
+[map]
+chosen[v] = "some i in nodes : node[i].decided == v"
