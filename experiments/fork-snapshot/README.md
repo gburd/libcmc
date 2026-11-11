@@ -330,3 +330,38 @@ cleanly right after its accept notif.  Hypotheses to check next:
   (set at an earlier accept) while the node had already moved to a read.
 The two-phase sequencing fix stands (committed); this is a freeze-boundary
 question, isolated and concrete.
+
+
+## Part 6 (2026-11-10): freeze boundary is CORRECT; divergence is engine-state, not mechanic
+
+Confirmed the freeze boundary is right and identical to fdtest.c's:
+engine node at freeze = block_kind=BK_ACCEPT, orig_rax=43, rax=-512
+(ERESTARTSYS), rip-2 = 0f05 (syscall), rdi=500 (the listen fd).
+fdtest.c's frozen node is byte-identical (orig_rax=43 rax=-512), and ITS
+resumed worker re-raises accept correctly, while the engine's resumed
+worker's first notification is read(fd=-1) (accept already returned -1,
+so it was not intercepted).
+
+Ruled out: (a) stale block_kind -- the boundary is genuinely accept;
+(b) syscall-restart-skips-seccomp -- fdtest has the SAME ERESTARTSYS
+restart state and works; (c) PTRACE_SINGLESTEP-for-fresh-entry before
+CONT -- tried, no change.
+
+So with identical freeze registers and an identical fork_master/resume
+mechanic, fdtest.c re-traps accept but the ENGINE does not.  The
+remaining variable is the engine's surrounding state that fdtest.c lacks:
+the shared fd-3/fd-4 canon-pipe draining in resume_world, the restored
+checker globals (bag, N[].pend with the client connection, cfd/next_fd),
+or the two-node interaction.  The worker's accept returning -1 (not
+trapping) despite the forked worker HAVING the seccomp filter
+(Seccomp: 2, Seccomp_filters: 1) is the specific unexplained fact.
+
+STATUS: the mechanic is proven achievable (fdtest.c); the hang is fixed
+(two-phase resume, committed); the divergence is localized to engine
+state but its last cause is not yet pinned after extensive probing.
+This has consumed many sessions.  Recommendation: keep --fast as a
+documented experimental branch; do not block anything on it.  A fresh
+attack should bisect by making fdtest.c incrementally more like the
+engine (add a second node; add the canon pipes; restore a client-pending
+and see which addition breaks the accept re-trap) -- that will isolate
+the exact engine-state element responsible.
