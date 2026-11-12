@@ -26,6 +26,8 @@ examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 5  Q1 = 4  Q2 = 2|agreement|PAS
 examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 5  Q1 = 4  Q2 = 2|agreement|VIOLATION|--define BUG
 examples/spec|caspaxos|caspaxos|CONSTANTS V = 2  A = 3  Q = 2|agreement|PASS|
 examples/spec|caspaxos|caspaxos|CONSTANTS V = 2  A = 3  Q = 2|agreement|VIOLATION|--define BUG
+examples/spec|twophase|twophase|CONSTANT N = 3|consistency|PASS|
+examples/spec|twophase|twophase|CONSTANT N = 3|consistency|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7

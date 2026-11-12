@@ -77,6 +77,14 @@ expect "fpaxos: the shrunk-Q1 bug breaks agreement" 1 "agreement is violated" --
 expect "caspaxos: register agreement holds"   0 "No error has been found" --spec "$HERE/examples/spec/caspaxos.cml"
 expect "caspaxos: the stale-read bug loses an update" 1 "agreement is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
 
+# Two-phase commit (Lamport's TwoPhase.tla): the canonical non-consensus
+# example.  Consistency (atomicity) -- a committed and an aborted
+# resource manager never coexist -- holds because a resource manager
+# commits only on a unanimous prepared vote; the --define BUG commits
+# without that check.
+expect "twophase: atomicity holds"            0 "No error has been found" --spec "$HERE/examples/spec/twophase.cml"
+expect "twophase: the no-unanimity bug breaks atomicity" 1 "consistency is violated" --spec "$HERE/examples/spec/twophase.cml" --define BUG
+
 echo "-- symmetry reduction: interchangeable node ids collapse"
 # the token spec's node ids are fully symmetric; with symmetry declared,
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness

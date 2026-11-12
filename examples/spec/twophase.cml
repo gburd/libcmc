@@ -1,0 +1,65 @@
+# examples/spec/twophase.cml: the two-phase commit protocol as an
+# abstract model.  This is the canonical non-consensus distributed-
+# systems model-checking example: it demonstrates libcmc on an
+# all-or-nothing atomic-commit protocol, a different shape from the
+# quorum-based consensus family.
+#
+# Reference: Leslie Lamport's `TwoPhase.tla` (the two-phase commit
+# specification in the TLA+ course and the tlaplus/Examples repository),
+# whose safety invariant is TCConsistent.
+#
+# A transaction manager coordinates N resource managers.  Each resource
+# manager starts working; it may vote to abort (unilaterally, while
+# working) or prepare (vote to commit).  A resource manager may commit
+# only once every resource manager has prepared -- the transaction
+# manager's decision that the vote was unanimous.  The safety property,
+# Consistency, is atomicity: no two resource managers decide
+# differently, so a committed resource manager and an aborted one never
+# coexist.
+#
+# Kept small: 3 resource managers (0 .. N-1).  States are encoded as
+# 0 = working, 1 = prepared, 2 = committed, 3 = aborted.
+#
+# -DBUG: a resource manager commits without the transaction manager
+# checking that every resource manager prepared, so one can commit while
+# another has aborted -- atomicity is lost.
+#
+#   cmc --spec examples/spec/twophase.cml
+#   cmc --spec examples/spec/twophase.cml --define BUG   (commit without unanimity)
+
+module twophase
+
+const N = 3                     # resource managers 0 .. N-1
+
+# rmState[r]: 0 = working, 1 = prepared, 2 = committed, 3 = aborted
+var rmState : [0 .. N-1 -> 0 .. 3]
+
+init rmState == [r in 0 .. N-1 -> 0]
+
+# a resource manager votes to commit: working -> prepared.
+action prepare(r in 0 .. N-1):
+  when rmState[r] == 0
+  rmState' = [rmState except [r] = 1]
+
+# a resource manager votes to abort while still working: working ->
+# aborted.
+action abort(r in 0 .. N-1):
+  when rmState[r] == 0
+  rmState' = [rmState except [r] = 3]
+
+# a prepared resource manager commits, but only once EVERY resource
+# manager has prepared (or already committed) -- the transaction
+# manager's unanimous-vote decision.
+action commit(r in 0 .. N-1):
+  when rmState[r] == 1 and (all s in 0 .. N-1 : rmState[s] == 1 or rmState[s] == 2)
+  rmState' = [rmState except [r] = 2]
+
+# the planted bug: a prepared resource manager commits without the
+# unanimity check, so it can commit even though another aborted.
+action commit_bug(r in 0 .. N-1) [BUG]:
+  when rmState[r] == 1
+  rmState' = [rmState except [r] = 2]
+
+# Consistency (atomicity): a committed resource manager and an aborted
+# one never coexist -- all resource managers reach the same decision.
+invariant consistency: (count r in 0 .. N-1 : rmState[r] == 2) == 0 or (count r in 0 .. N-1 : rmState[r] == 3) == 0

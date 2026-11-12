@@ -5,6 +5,16 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- A certified abstract model for two-phase commit
+  (`examples/spec/twophase.cml`), the canonical non-consensus
+  distributed-systems example (Lamport's `TwoPhase.tla`).  Consistency
+  (atomicity) -- a committed and an aborted resource manager never
+  coexist -- holds because a resource manager commits only on a
+  unanimous prepared vote; the `--define BUG` commits without that
+  check.  Certified against TLC and Apalache.  This broadens the example
+  set beyond the quorum-based consensus family to an all-or-nothing
+  atomic-commit protocol.
+
 - A certified abstract model for CASPaxos (`examples/spec/caspaxos.cml`),
   single-decree Paxos on a register via a client change function.
   Agreement (one value per register version) holds because the client

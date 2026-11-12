@@ -38,8 +38,8 @@ real binary cross-checks the property the formal model states.
 
 ## Abstract models
 
-Three consensus-family protocols also have abstract `.cml` models under
-`examples/spec/`, checked three ways that agree -- `cmc --spec`, TLC
+Several protocols have abstract `.cml` models under `examples/spec/`,
+checked three ways that agree -- `cmc --spec`, TLC
 (`make check-emit-tla`) and Apalache (`make check-emit-apalache`):
 
 - `paxos.cml` -- single-decree Paxos, extending the shared `consensus`
@@ -59,6 +59,9 @@ Three consensus-family protocols also have abstract `.cml` models under
 - `zab.cml` -- ZAB commit-durability: a committed transaction is held by
   a quorum, so it survives a leader change.  Reference: ZooKeeper's
   `Zab.tla`.
+- `twophase.cml` -- two-phase commit, the canonical non-consensus
+  example; Consistency (atomicity): a committed and an aborted resource
+  manager never coexist.  Reference: Lamport's `TwoPhase.tla`.
 
 Each also ships a `--define BUG` build that breaks the safety rule (a
 double vote, a revote, an overwrite), and the checker finds the shortest
