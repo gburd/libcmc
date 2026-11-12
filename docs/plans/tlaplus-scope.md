@@ -193,7 +193,7 @@ the richer, opt-in path; nothing is forced to migrate.
 Each is independently useful, independently gated, and leaves every
 existing example green.  Ordered by dependency.
 
-**Status (as of v0.5.0):** A, B, C, D, E and F are implemented and
+**Status (as of v1.0.0):** A, B, C, D, E and F are implemented and
 calibrated against single-worker TLC; D's bridge also reaches Apalache
 (the symbolic, Z3-backed engine), verified by `make
 check-emit-apalache`.  G (scale) is in progress -- the

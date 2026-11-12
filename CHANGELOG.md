@@ -5,6 +5,23 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 1.0.0 (2026-11-12)
+
+The first stable release.  The public interface in `include/cmc.h`, the
+command line, the model file and the abstract `.cml` language are now
+stable under semantic versioning.  The engine checks the program you
+ship, with the TLA+-scope milestones A through F in place (a value
+model, the abstract `.cml` language with modules, the binding and
+refinement checker with action-level refinement, the TLA+ bridge to TLC
+and Apalache, symmetry reduction and weak-fairness liveness), and a
+library of certified abstract models spanning the consensus family and
+beyond.  Milestone G (scale) continues past 1.0 as a performance track:
+the fork-from-snapshot search is parked on a branch and the default
+breadth-first engine is the sound path.
+
+Since 0.5.0:
+
+
 - A certified abstract model for two-phase commit
   (`examples/spec/twophase.cml`), the canonical non-consensus
   distributed-systems example (Lamport's `TwoPhase.tla`).  Consistency
