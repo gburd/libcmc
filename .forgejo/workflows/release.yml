@@ -1,5 +1,12 @@
 name: Release
 
+# NB: this workflow does not run -- Codeberg Actions are disabled for
+# this repository.  The Codeberg release is published instead by
+# `make codeberg-release VER=X.Y.Z` (scripts/codeberg-release.sh), run
+# after the GitHub release for the tag has published; see RELEASING.md.
+# This file is kept as the specification of what that step does, and in
+# case Actions are enabled later.
+#
 # Pushing a tag vX.Y.Z publishes a Codeberg release.  The tag must be v
 # followed by CMC_VERSION in include/cmc.h, and CHANGELOG.md must have a
 # section for it.  The source tarball and man pages are `git archive`s of

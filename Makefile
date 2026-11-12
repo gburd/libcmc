@@ -48,6 +48,7 @@ MSAN_B ?= build-msan
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
         check-examples \
+        codeberg-release \
         install docs-site clean
 
 all: $(LIB) $(B)/cmc $(B)/test_cmc $(PRELOAD)
@@ -180,6 +181,15 @@ install: $(LIB) $(B)/cmc $(PRELOAD)
 docs-site:
 	sh docs/gen_man_pages.sh
 	cd docs && bundle install --quiet && bundle exec jekyll build --destination _site
+
+# Publish the Codeberg release for a tag.  Codeberg Actions are disabled,
+# so the forgejo release workflow does not run; this creates the release
+# through the API and attaches the GitHub-built tarballs.  Run it after
+# the GitHub release for the tag has published.  Idempotent.
+#   make codeberg-release VER=1.0.0
+codeberg-release:
+	@test -n "$(VER)" || { echo 'usage: make codeberg-release VER=X.Y.Z'; exit 1; }
+	sh scripts/codeberg-release.sh $(VER)
 
 clean:
 	rm -f $(B)/*.o $(B)/*.a $(B)/*.so $(B)/cmc $(B)/test_cmc $(B)/quickstart $(B)/quickstart-bug \

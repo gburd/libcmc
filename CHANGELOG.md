@@ -5,6 +5,14 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The Codeberg release is published by `make codeberg-release VER=X.Y.Z`
+  (`scripts/codeberg-release.sh`), run after the GitHub release for the
+  tag publishes.  Codeberg Actions are disabled, so the forgejo release
+  workflow does not run; the script creates the Codeberg release through
+  the API and attaches the same tarballs the GitHub workflow built, so
+  both forges carry identical artifacts.  It is idempotent.  The release
+  procedure is written up in `RELEASING.md`.
+
 - A certified abstract model for Fast Paxos
   (`examples/spec/fastpaxos.cml`).  A fast round lets clients send
   values directly to acceptors and so may collide; its distinctive
