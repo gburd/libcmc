@@ -164,16 +164,32 @@ n²/2¹²⁹ is printed, as TLC does.
 | calibration (bridge) | the abstract-model checker against TLC on the *same* model: `cmc --emit-tla FILE.cml` must parse in TLC and give the identical verdict as `cmc --spec`, for safety and for liveness (`test/emit_gate.sh`, `make check-emit-tla`; needs nix) |
 
 There are two calibration tracks because there are two things to pin.
-The **engine** track (`calib/hc`) proves the search loop agrees with
-TLC, and it leans on a hand-written `HummingConsensus.tla` kept beside a
-hand-written HC step-function core -- a duplicate that can drift.  The
-**bridge** track proves the abstract checker agrees with TLC on *one*
-model, with no hand-kept twin: the same `.cml` is both checked by `cmc
---spec` and emitted to TLC by `cmc --emit-tla`.  Milestone D retires the
-engine track *in favour of* the bridge, but only once a **certified** HC
-abstract `.cml` (one that reproduces the `calib/hc` rows through the
-bridge) exists; writing that spec is open work, so `calib/hc` stays
-until then rather than be removed and leave the search uncalibrated.
+The **engine** track (`calib/hc`) proves the in-process step-function
+search (`cmc --model`, `src/cmc.c`, the documented `libcmc(3)` path)
+agrees with TLC.  It leans on a hand-written `HummingConsensus.tla` kept
+beside a hand-written HC core -- a duplicate that can drift -- but it
+calibrates a rich model: several HC variants (paper and code, CP and AP
+mode) against many named properties (`S1_Agreement`,
+`S2r_NoStaleRead`, `S3_NoLostAck`, `S3a_NoLostAckActive`,
+`W_AckAfterReconfig`), with exact distinct-state counts into the tens of
+millions.  The **bridge** track proves the abstract checker (`cmc
+--spec`) agrees with TLC on *one* model, with no hand-kept twin: the
+same `.cml` is both checked by `cmc --spec` and emitted to TLC by `cmc
+--emit-tla` (and to Apalache by the same bridge).
+
+Milestone D envisaged retiring the engine track in favour of the bridge.
+That has not happened, and the plan was over-optimistic about it.
+`examples/spec/hc.cml` is a *certified* HC abstract model, but it is a
+minimal single-property model (write-once Agreement at three
+participants, 41 states); it does **not** reproduce the `calib/hc` rows,
+which pin many properties and variants at up to tens of millions of
+states.  A full-fidelity HC `.cml` that reproduced those rows through
+the bridge would be a large undertaking.  More to the point, the
+in-process engine is a shipped, documented path in its own right, not a
+scaffold to be discarded, so its real-protocol calibration has standing
+value.  `calib/hc` therefore stays: retiring it would delete the only
+proof that the in-process search agrees with TLC on a real consensus
+protocol, and `hc.cml` does not replace it.
 
 ## Limits
 

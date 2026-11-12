@@ -70,6 +70,13 @@ expect "zab: the early-ack bug loses a commit" 1 "durable is violated" --spec "$
 expect "fpaxos: safe when Q1+Q2>A"           0 "No error has been found" --spec "$HERE/examples/spec/fpaxos.cml"
 expect "fpaxos: the shrunk-Q1 bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
 
+# CASPaxos (Rystsov 2018): single-decree Paxos on a register via a
+# client change function; Agreement (one value per register version)
+# holds because a client reads from a quorum before committing.  The
+# --define BUG stale read overwrites an acceptor, so two values commit.
+expect "caspaxos: register agreement holds"   0 "No error has been found" --spec "$HERE/examples/spec/caspaxos.cml"
+expect "caspaxos: the stale-read bug loses an update" 1 "agreement is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
+
 echo "-- symmetry reduction: interchangeable node ids collapse"
 # the token spec's node ids are fully symmetric; with symmetry declared,
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness

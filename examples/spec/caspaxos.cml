@@ -1,0 +1,62 @@
+# examples/spec/caspaxos.cml: CASPaxos as an abstract model, extending
+# the shared consensus base.  CASPaxos is single-decree Paxos applied to
+# a register: a client reads the register from a quorum, applies a
+# change function, and writes the new value to a quorum.  Repeated, it is
+# a replicated state machine with no log.  It inherits Agreement: the
+# register's value at any version is unique (no two clients commit
+# different values for the same version).
+#
+# Reference: Denis Rystsov, "CASPaxos: Replicated State Machines without
+#   logs", 2018, arXiv:1802.07000.
+#
+# The safety hinges on the SAME quorum intersection as Paxos, but framed
+# as a register compare-and-swap: a client may commit a new register
+# value only after reading the current value from a QUORUM, so its read
+# intersects the quorum of any prior commit and it sees the latest
+# value.  Because two quorums of A acceptors overlap, a client cannot
+# miss a committed value and overwrite it with a stale-based update.
+#
+# Kept small: 3 acceptors (0 .. A-1), a quorum of 2, values 1 .. V.  The
+# single contested register version is modelled: each acceptor stores at
+# most one committed value for it.
+#
+# -DBUG: a client commits a value after reading from fewer than a quorum
+# (a stale read), so it can miss a prior commit and two different values
+# are committed for the same version -- a lost update.
+#
+#   cmc --spec examples/spec/caspaxos.cml
+#   cmc --spec examples/spec/caspaxos.cml --define BUG   (stale read)
+
+module caspaxos
+extends consensus
+
+const A = 3                     # acceptors 0 .. A-1
+const Q = 2                     # a quorum majority of A
+
+# store[a] = the value acceptor a holds for the contested register
+# version (0 = none yet).
+var store : [0 .. A-1 -> 0 .. V]
+
+init store == [a in 0 .. A-1 -> 0]
+
+# a client commits value v at an acceptor a, but only if v is safe: no
+# DIFFERENT value w is already present at a quorum of acceptors (which a
+# quorum read would have seen).  Because the client's read quorum
+# intersects any prior commit's write quorum, a committed value is
+# always observed, so only one value is ever committed.
+action commit(a in 0 .. A-1, v in 1 .. V):
+  when store[a] == 0 and (all w in 1 .. V : w == v or (count c in 0 .. A-1 : store[c] == w) < Q)
+  store' = [store except [a] = v]
+
+# the planted bug: the client reads from fewer than a quorum, so a
+# committed value can be missed AND an acceptor's value overwritten on
+# the stale basis.  Dropping both guards lets two different values each
+# reach a quorum -- a lost update.
+action commit_bug(a in 0 .. A-1, v in 1 .. V) [BUG]:
+  when store[a] != v
+  store' = [store except [a] = v]
+
+# a value v is chosen (committed for this version) once a quorum holds it.
+action choose(v in 1 .. V):
+  when (count a in 0 .. A-1 : store[a] == v) >= Q
+  chosen' = [chosen except [v] = 1]

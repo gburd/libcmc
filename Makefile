@@ -47,6 +47,7 @@ MSAN_B ?= build-msan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
+        check-examples \
         install docs-site clean
 
 all: $(LIB) $(B)/cmc $(B)/test_cmc $(PRELOAD)
@@ -95,15 +96,24 @@ check-purity: $(PURE)
 check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 	CMC_BUILD=$(B) $(B)/test_cmc
 	test/toy_gate.sh $(B)/cmc
-	CC=$(CC) test/proc_gate.sh $(B)
-	test/spec_gate.sh $(B)
 
 # man pages lint clean and cover the API and every option; the guide's
 # model builds and behaves as the guide says (test/docs_gate.sh)
 check-docs: $(LIB)
 	CC=$(CC) test/docs_gate.sh $(B)
 
-check: check-unit check-calibration-fast
+check: check-unit check-examples check-calibration-fast
+
+# every shipped example runs and gives its expected verdict: the C
+# process-mode examples (examples/*/) built and checked by proc_gate,
+# and the abstract .cml models (examples/spec/) by spec_gate.  This is a
+# named gate so a release cannot ship an example that no longer runs;
+# the release workflow depends on `make check`, which depends on this.
+# (Both scripts also run under check-unit; naming the dependency here
+# makes "the examples ran" an explicit release gate, not a side effect.)
+check-examples: $(B)/test_cmc $(B)/cmc $(PRELOAD)
+	CC=$(CC) test/proc_gate.sh $(B)
+	test/spec_gate.sh $(B)
 
 # MemorySanitizer (docs/research/02 M2): the engine tests and the toy gate
 # under clang -fsanitize=memory, plus the uninitialised-read probe, which

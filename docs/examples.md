@@ -53,6 +53,9 @@ Three consensus-family protocols also have abstract `.cml` models under
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,
   extending `consensus`; Agreement per epoch.  Reference: Machi.
+- `caspaxos.cml` -- CASPaxos, single-decree Paxos on a register via a
+  client change function, extending `consensus`; Agreement per register
+  version, from the client's quorum read.  Reference: Rystsov, 2018.
 - `zab.cml` -- ZAB commit-durability: a committed transaction is held by
   a quorum, so it survives a leader change.  Reference: ZooKeeper's
   `Zab.tla`.

@@ -5,6 +5,28 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- A certified abstract model for CASPaxos (`examples/spec/caspaxos.cml`),
+  single-decree Paxos on a register via a client change function.
+  Agreement (one value per register version) holds because the client
+  reads from a quorum before committing, so its read intersects any
+  prior commit; the `--define BUG` stale read overwrites an acceptor and
+  two values commit for one version (a lost update).  Certified against
+  TLC and Apalache.
+- Running every shipped example is now an explicit release gate: the
+  `check-examples` target builds and checks every process-mode example
+  (`examples/*/`) and every abstract model (`examples/spec/*.cml`), and
+  `make check` (which the release workflow runs on the unpacked tarball)
+  depends on it.  Previously the example gates ran inside `check-unit`
+  as a side effect; naming the dependency makes a release unable to ship
+  an example that no longer runs.
+- `calib/hc` is kept, not retired.  Milestone D envisaged retiring the
+  hand-kept `HummingConsensus.tla` once a certified HC `.cml` reproduced
+  its rows through the bridge; `examples/spec/hc.cml` is certified but a
+  minimal single-property model that does not reproduce those rows (many
+  properties and variants at up to tens of millions of states), and the
+  in-process engine it calibrates is a documented, shipped path.  The
+  design notes and plan are corrected to say so.
+
 - A certified abstract model for Flexible Paxos
   (`examples/spec/fpaxos.cml`), the flagship of the Paxos-variant test
   matrix and a direct expression of Heidi Howard's theorem: Agreement

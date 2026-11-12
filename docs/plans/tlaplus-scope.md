@@ -279,13 +279,23 @@ TLC and Apalache.
 
 ## What this does to `calib/hc`
 
-`calib/hc` is today's evidence that the engine agrees with TLC: a
+`calib/hc` is today's evidence that the in-process step-function engine
+(`cmc --model`, the documented `libcmc(3)` path) agrees with TLC: a
 hand-written HC core and a hand-written `HummingConsensus.tla`, compared
-row by row.  It stays until **Milestone D** gives the mechanical TLA+
-bridge, at which point calibration becomes "libcmc and TLC agree on the
-*same* abstract model", with no hand-kept duplicate to drift.  Removing
-`calib/hc` before then would delete the only proof that the search is
-correct, so it is retired *by* D, not before.
+row by row across many properties and variants, at up to tens of
+millions of states.  Milestone D was expected to let calibration move
+to "libcmc and TLC agree on the *same* abstract model", retiring the
+hand-kept twin.
+
+In practice it does not retire `calib/hc`, and the plan was
+over-optimistic here.  `examples/spec/hc.cml` is a certified HC abstract
+model, but a minimal single-property one; it does not reproduce the
+`calib/hc` rows.  And the in-process engine is a shipped, documented
+path, not a scaffold to discard.  So the bridge gives a second, no-
+duplicate calibration track for the abstract checker (the real win of
+D), while `calib/hc` stays as the only real-protocol calibration of the
+in-process search.  Removing it would leave that search uncalibrated;
+`hc.cml` does not replace it.
 
 ## Risks and honesty
 
