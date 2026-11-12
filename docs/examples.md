@@ -49,6 +49,10 @@ checked three ways that agree -- `cmc --spec`, TLC
   iff every Phase 1 quorum intersects every Phase 2 quorum, for which
   `Q1 + Q2 > A` suffices (Howard's theorem).  Reference: Howard, Malkhi,
   Spiegelman, OPODIS 2016.
+- `fastpaxos.cml` -- Fast Paxos, extending `consensus`; a fast round may
+  collide, so its quorum must exceed `3A/4` for a classic recovery round
+  to resolve the collision (two rounds modelled).  Reference: Lamport,
+  Fast Paxos, 2006.
 - `raft.cml` -- Raft leader election; Election Safety (at most one
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,

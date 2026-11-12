@@ -5,6 +5,19 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- A certified abstract model for Fast Paxos
+  (`examples/spec/fastpaxos.cml`).  A fast round lets clients send
+  values directly to acceptors and so may collide; its distinctive
+  safety result is that the fast quorum must exceed `3A/4` for a classic
+  recovery round to resolve a collision.  The model has two rounds (a
+  fast round, then a classic recovery) and tracks the bound faithfully:
+  with `A=5, F=4` (> 3.75) it holds, and with the correct recovery rule
+  but `F=3` (<= 3A/4) Agreement breaks, as Lamport's analysis says.  The
+  `--define BUG` lets recovery use a classic-majority threshold where a
+  fast quorum is needed.  Certified against TLC and Apalache; the
+  Apalache gate's bound is raised to length 10 so the seven-step Fast
+  Paxos counterexample is reachable.
+
 ## 1.0.0 (2026-11-12)
 
 The first stable release.  The public interface in `include/cmc.h`, the

@@ -65,6 +65,8 @@ examples/spec|caspaxos|caspaxos|agreement|PASS|
 examples/spec|caspaxos|caspaxosb|agreement|VIOLATION|--define BUG
 examples/spec|twophase|twophase|consistency|PASS|
 examples/spec|twophase|twophaseb|consistency|VIOLATION|--define BUG
+examples/spec|fastpaxos|fastpaxos|agreement|PASS|
+examples/spec|fastpaxos|fastpaxosb|agreement|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 inv=$4 want=$5 def=$6
@@ -73,7 +75,7 @@ check() {
 	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
 	# module name must match the filename for the tools
 	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
-	( cd "$d" && RUN "$MC" check --no-deadlock --cinit=CInit "--inv=$inv" --length=6 "$mod.tla" > out.txt 2>&1 )
+	( cd "$d" && RUN "$MC" check --no-deadlock --cinit=CInit "--inv=$inv" --length=10 "$mod.tla" > out.txt 2>&1 )
 	if grep -qiE 'Annotation required|type input error|Typing input error' "$d/out.txt"; then
 		echo "FAIL $cml [$want]: Apalache rejected the generated types"; grep -iE 'error|annotation' "$d/out.txt" | head -3 | sed 's/^/     /'; echo x>"$OUT/fail"; return
 	fi

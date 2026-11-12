@@ -77,6 +77,14 @@ expect "fpaxos: the shrunk-Q1 bug breaks agreement" 1 "agreement is violated" --
 expect "caspaxos: register agreement holds"   0 "No error has been found" --spec "$HERE/examples/spec/caspaxos.cml"
 expect "caspaxos: the stale-read bug loses an update" 1 "agreement is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
 
+# Fast Paxos (Lamport 2006): a fast round may collide, so its quorum F
+# must exceed 3A/4 for a classic recovery round to resolve the collision
+# unambiguously.  With A=5, F=4 (> 3.75) it holds; the --define BUG lets
+# recovery use a classic majority threshold where a fast quorum is
+# needed, so a collided round chooses two values.
+expect "fastpaxos: safe when F>3A/4"         0 "No error has been found" --spec "$HERE/examples/spec/fastpaxos.cml"
+expect "fastpaxos: the small-fast-quorum bug collides" 1 "agreement is violated" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
+
 # Two-phase commit (Lamport's TwoPhase.tla): the canonical non-consensus
 # example.  Consistency (atomicity) -- a committed and an aborted
 # resource manager never coexist -- holds because a resource manager

@@ -1,0 +1,87 @@
+# examples/spec/fastpaxos.cml: Fast Paxos as an abstract model,
+# extending the shared consensus base.  Fast Paxos lets clients send
+# values directly to acceptors in a "fast round", saving a message
+# delay, at the cost that a fast round may COLLIDE (acceptors accept
+# different values).  Its distinctive safety result is the fast-quorum
+# size bound: a fast round is safe only if the fast quorum F exceeds
+# 3N/4, so that a recovery coordinator reading a classic quorum can
+# always resolve a collision unambiguously.
+#
+# Reference: Leslie Lamport, "Fast Paxos", Distributed Computing 19(2),
+#   2006.  The bound F > 3N/4 comes from requiring every classic quorum
+#   to intersect every pair of fast quorums (the triple intersection
+#   that resolves a collision across rounds).
+#
+# The model has two rounds.  Round 0 is fast: each acceptor accepts one
+# value directly (a collision is allowed).  A value is "fast-chosen" if
+# a fast quorum of F acceptors accepted it.  Round 1 is a classic
+# recovery: a coordinator reads a classic quorum (majority) of the
+# fast-round state and re-proposes.  The recovery rule must carry
+# forward any value that could have been fast-chosen: it proposes value
+# v if v appears often enough in its read quorum that v might hold a
+# fast quorum (the read quorum cannot rule it out).  A value is chosen
+# if it is fast-chosen OR the recovery commits it.
+#
+# Safety (Agreement, inherited) requires that recovery never commits a
+# value different from one that was fast-chosen.  With F > 3N/4 the read
+# quorum always intersects a fast quorum in a majority of that fast
+# quorum, so a fast-chosen value is unambiguous and recovery preserves
+# it.  Here A = 5: a classic majority is 3, and 3N/4 = 3.75, so a
+# correct fast quorum is F = 4.
+#
+# -DBUG: the fast quorum is shrunk to a plain majority (F = 3 <= 3N/4),
+# so a collided fast round (value 1 on three acceptors, value 2 on two)
+# lets recovery commit value 2 while value 1 was fast-chosen by its
+# three -- two values chosen.
+#
+#   cmc --spec examples/spec/fastpaxos.cml
+#   cmc --spec examples/spec/fastpaxos.cml --define BUG   (fast quorum shrunk)
+
+module fastpaxos
+extends consensus
+
+const A = 5                     # acceptors 0 .. A-1
+const QC = 3                    # classic quorum (majority of A)
+const F = 4                     # fast quorum, > 3A/4 for safety
+
+# acc[a] = the value acceptor a accepted in the fast round (0 = none).
+var acc : [0 .. A-1 -> 0 .. V]
+# committed = the value the recovery round committed (0 = none yet).
+var committed : 0 .. V
+
+init acc == [a in 0 .. A-1 -> 0]
+init committed == 0
+
+# fast round: an acceptor accepts a value directly from a client.
+action fast(a in 0 .. A-1, v in 1 .. V):
+  when acc[a] == 0
+  acc' = [acc except [a] = v]
+
+# a value is chosen if a fast quorum accepted it in the fast round.
+action choose_fast(v in 1 .. V):
+  when (count a in 0 .. A-1 : acc[a] == v) >= F
+  chosen' = [chosen except [v] = 1]
+
+# recovery round: a coordinator reads a classic quorum and commits a
+# value v only if v COULD still be fast-chosen as far as its read can
+# tell -- that is, v's acceptances plus the acceptors it did not read
+# could reach a fast quorum: (count acc==v) + (A - QC) >= F.  With a
+# correct fast quorum F > 3A/4 this holds for at most one value once the
+# round is settled, so recovery cannot pick a value different from a
+# fast-chosen one.  Committing is recorded both in `committed` and in
+# `chosen` (a committed value is chosen).
+action recover(v in 1 .. V):
+  when committed == 0 and (count a in 0 .. A-1 : acc[a] == v) + (A - QC) >= F
+  committed' = v
+  chosen' = [chosen except [v] = 1]
+
+# the planted bug: recovery treats the fast round as if a classic
+# majority (QC) sufficed to choose, rather than a fast quorum (F).  With
+# the smaller threshold a collided fast round lets recovery commit a
+# value different from the one a fast quorum actually holds -- two values
+# chosen.  (This is the "used a plain majority for the fast round"
+# mistake the F > 3A/4 bound exists to prevent.)
+action recover_bug(v in 1 .. V) [BUG]:
+  when committed == 0 and (count a in 0 .. A-1 : acc[a] == v) + (A - QC) >= QC
+  committed' = v
+  chosen' = [chosen except [v] = 1]
