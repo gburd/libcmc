@@ -28,10 +28,10 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
-for f in repl elect lease durlog quorum; do
+for f in repl elect lease durlog quorum pollloop; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 # the consensus examples are real, tested fixtures too
@@ -188,6 +188,18 @@ echo "-- the invariant language: arithmetic and counting (quorums)"
 expect "quorum: a committed value has a majority"      0 "No error has been found" $(run quorum quorum)
 expect "quorum: a sub-quorum commit is caught"         1 "quorum_commit is violated" $(run quorum quorum-bug)
 expect "quorum: --simulate finds it"                   1 "quorum_commit is violated" $(run quorum quorum-bug) --simulate --seed 1 --walks 2000
+
+echo "-- async I/O: poll/fcntl/eventfd event loop"
+# the poll-driven event loop (poll/ppoll, fcntl O_NONBLOCK, non-blocking
+# accept/read).  The search drives the loop as it drives a deferred recv:
+# it wakes the poll, services the accept, wakes the poll again, then
+# delivers the request -- poll readiness never auto-delivers (M5).  The
+# correct build stores the byte it read; the -DBUG build stores a fixed
+# wrong byte, so once a request is received the stored byte is not what
+# the client sent, which the invariant catches.
+expect "pollloop: correct event loop holds"            0 "No error has been found" $(run pollloop pollloop)
+expect "pollloop: a wrong stored byte is caught"       1 "stored_ok is violated" $(run pollloop pollloop-bug)
+expect "pollloop: the counterexample names the wake"   1 "wake n1 listener" $(run pollloop pollloop-bug)
 # arithmetic evaluates with the usual precedence
 printf '[target]\nnodes = 2\n[invariants]\nt = "2 + 3 * 4 == 14 and 10 mod 3 == 1 and (1 + 1) * 2 == 4"\n' > "$OUT/q.model"
 expect "arithmetic: precedence and mod"                 0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/repl"

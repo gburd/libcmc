@@ -1,20 +1,27 @@
 /*
- * test/proc/pollloop.c: a minimal event-loop node, the red test for
+ * test/proc/pollloop.c: a minimal event-loop node, the example for
  * async-I/O support (docs/plans/async-io.md).  It is written the way an
  * event-loop runtime works: a listening socket set non-blocking, a
  * poll() over it, and a non-blocking accept/read driven by poll
- * readiness -- none of which libcmc models yet, so today the checker
- * dies in drive_quiescent with "made no checked syscall ... (blocked in
- * a call the checker does not model)".
+ * readiness.  Before libcmc modelled poll/fcntl the checker died in
+ * drive_quiescent ("blocked in a call the checker does not model"); now
+ * it drives the poll loop through the search like any deferred recv.
  *
  * Two nodes.  Node 1 is a server: it listens, sets the listener
  * non-blocking, and loops in poll() waiting for a connection, then a
  * request; it stores the one request byte it receives.  Node 0 is a
- * client: it connects and sends one byte.  The invariant (once the
- * model file is written) is that node 1's stored byte equals what node
- * 0 sent.
+ * client: it connects and sends one byte ('x' = 120).  The invariant
+ * (pollloop.model) is that once node 1 has received a byte, the byte it
+ * stored is the one node 0 sent.
  *
- * Canonical state fd 3, node 1: [count=1][stored request byte].
+ * Canonical state fd 3, node 1: [recvd][stored request byte].  recvd is
+ * 0 until a read delivers a byte, so the invariant can tell "nothing
+ * received yet" from "received and stored".
+ *
+ * -DBUG: the server stores a fixed wrong byte (0) instead of the byte it
+ * read, so once it has received a request the stored byte is not what
+ * the client sent.  The invariant catches it; cmc prints the shortest
+ * schedule.
  *
  *   cc -no-pie -o pollloop test/proc/pollloop.c
  *   cmc --model-file test/proc/pollloop.model --binary ./pollloop
@@ -31,11 +38,12 @@
 #define BASE 20000
 
 static unsigned char st;		/* the stored request byte */
+static unsigned char recvd;		/* 1 once a read has delivered a byte */
 
 static void
 emit(void)
 {
-	unsigned char rec[2] = {1, st};
+	unsigned char rec[3] = {2, recvd, st};
 
 	(void) !write(3, rec, sizeof rec);
 }
@@ -80,6 +88,7 @@ main(int argc, char **argv)
 
 	/* server: non-blocking listener, poll loop */
 	st = 0;
+	recvd = 0;
 	emit();
 	int ls = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in a = addr(BASE + 1);
@@ -113,7 +122,12 @@ main(int argc, char **argv)
 
 		if (n > 0)
 		{
+#ifdef BUG
+			st = 0;				/* stores a fixed wrong byte, not buf[0] */
+#else
 			st = buf[0];
+#endif
+			recvd = 1;
 			emit();
 			break;
 		}

@@ -1,13 +1,19 @@
-# test/proc/pollloop.model: the red test for async-I/O support.  Node 0
-# connects to node 1 and sends one byte; node 1 stores it via a
-# non-blocking poll loop.  Until libcmc models poll/fcntl, running this
-# dies in drive_quiescent (node blocked in an unmodelled call).
+# test/proc/pollloop.model: the async-I/O example.  Node 0 connects to
+# node 1 and sends one byte ('x' = 120); node 1 stores it via a
+# non-blocking poll loop (poll/fcntl/accept/read on virtual fds).  The
+# search drives the loop: it wakes the poll on the listener, services the
+# accept, wakes the poll on the connection, then delivers the request
+# byte, exactly as it drives a deferred recv -- poll readiness never
+# auto-delivers.
 [target]
 nodes = 2
 
 [invariants]
-# node 1 stores the byte node 0 sent ('x' = 120), once received
-stored_ok = "node[1].req == 0 or node[1].req == 120"
+# once node 1 has received a request byte (recvd == 1), the byte it
+# stored is the one node 0 sent ('x' = 120).  The -DBUG build stores a
+# fixed 0 instead, so recvd == 1 with req != 120, which this catches.
+stored_ok = "node[1].recvd == 0 or node[1].req == 120"
 
 [fields]
-req = 0
+recvd = 0
+req = 1
