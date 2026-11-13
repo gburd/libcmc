@@ -5,6 +5,13 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 1.1.0 (2026-11-13)
+
+Async-I/O support for event-loop runtimes, so a program that waits in
+`poll` with non-blocking sockets and `eventfd` wakeups (rather than
+blocking sockets) can be model-checked as it ships.  Plus the Fast Paxos
+certified model and the automated Codeberg release from 1.0.0's tail.
+
 - Async-I/O support for event-loop runtimes: the process front end
   intercepts `poll`/`ppoll`, `fcntl(F_GETFL/F_SETFL)` for the
   `O_NONBLOCK` flag, and `eventfd2`.  A `poll` with nothing locally

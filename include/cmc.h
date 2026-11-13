@@ -35,7 +35,7 @@
 
 /* The release (semantic versioning).  The release workflows require the
  * tag to be v followed by exactly this string. */
-#define CMC_VERSION		"1.0.0"
+#define CMC_VERSION		"1.1.0"
 
 #define CMC_MAX_NODES	8
 #define CMC_MSG_MAX		32		/* bytes per message body / persist record */
