@@ -5,6 +5,22 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- Async-I/O support for event-loop runtimes: the process front end
+  intercepts `poll`/`ppoll`, `fcntl(F_GETFL/F_SETFL)` for the
+  `O_NONBLOCK` flag, and `eventfd2`.  A `poll` with nothing locally
+  ready (only a requested `POLLOUT` or a non-zero eventfd answer at
+  once) is a quiescence point: the node defers, and a new WAKE action
+  marks one polled fd ready so the node accepts or reads it and defers
+  again, which the existing ACCEPT/DELIVER/TIMEOUT actions service.
+  Poll readiness is a search decision, never automatic, so the M5
+  no-auto-delivery property holds for event loops as it does for
+  blocking recv.  A non-blocking read with nothing deliverable returns
+  EAGAIN; an `eventfd` is a counter a write bumps and a read drains.
+  The world fingerprint carries each connection's `O_NONBLOCK` flag, a
+  polling node's fd set, and the eventfd counters.  A new example,
+  `test/proc/pollloop.c`, checks a poll-driven server and is caught by
+  `-DBUG` when it stores the wrong byte (gated in `proc_gate`).
+
 - The Codeberg release is published by `make codeberg-release VER=X.Y.Z`
   (`scripts/codeberg-release.sh`), run after the GitHub release for the
   tag publishes.  Codeberg Actions are disabled, so the forgejo release

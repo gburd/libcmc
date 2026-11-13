@@ -1,6 +1,14 @@
 # Plan: async-I/O support in libcmc for event-loop runtimes (libxtc)
 
-Status: in progress.  Target release: v1.1.0.
+Status: in progress.  Target release: v1.1.0.  The libcmc side is
+done: `poll`/`ppoll`, `fcntl(F_GETFL/F_SETFL)` for `O_NONBLOCK`, and
+`eventfd2` are intercepted with complete virtual-fd semantics; a `BK_POLL`
+quiescence point and a WAKE search action drive the poll loop without
+auto-delivering (M5); the fingerprint carries the poll set, the nonblock
+flags and the eventfd counters; and `test/proc/pollloop.c` is gated in
+`proc_gate` with a `-DBUG` the checker catches.  `epoll` (item 5) is
+deferred -- libxtc's poll backend makes it unnecessary for v1.1.0.  The
+libxtc side and the build glue remain.
 
 ## The problem
 

@@ -81,6 +81,8 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MSGLEN 64				/* bytes per write; a longer write is an error */
 #define MAXREP 64				/* client replies recorded */
 #define MAXCONN 16				/* connections per node */
+#define MAXPOLL 16				/* pollfd entries read in one poll() */
+#define MAXEFD 8				/* eventfds per node */
 #define LULL_MS 10000			/* a running node silent this long is an error */
 #define SNAP 64					/* canonical state bytes per node */
 /* The durable canonical-emit stream.  fd 3 is the volatile stream; the
@@ -538,13 +540,15 @@ typedef struct {
 	/* association list: which peer each connection fd talks to.
 	 * peer -1 = the synthetic client, >=0 = a node id. */
 	int cfd[MAXCONN]; int cpeer[MAXCONN]; int cnonblock[MAXCONN]; int nc;
-	int ls_nonblock;				/* the listener fd is O_NONBLOCK */
-	/* eventfd virtual channels: efd[k] has counter efdval[k] */
-	int efd[MAXCONN]; uint64_t efdval[MAXCONN]; int nefd;
+	int ls_nonblock;			/* O_NONBLOCK on the listener socket */
 	int pend[MAXCONN]; int npend;	/* connectors queued at this node's listener */
+	int efd[MAXEFD]; uint64_t efdval[MAXEFD]; int efdnb[MAXEFD]; int nefd;
 	int blocked; int block_kind; uint64_t block_id; uint64_t block_bufaddr; int block_want; int block_peer;
-	/* for BK_POLL: the fds the node is waiting on, and where to write revents */
-	int pollfd_n; int pollfds[MAXCONN]; uint64_t block_pollarr;
+	/* BK_POLL: the fds the node is parked in poll() on, their requested
+	 * events, and the address of the caller's pollfd array to write
+	 * revents back into when the search makes one ready */
+	int pollfd_n; int pollfds[MAXPOLL]; short pollevents[MAXPOLL]; uint64_t block_pollarr;
+	int poll_woke_fd;			/* -1, or the channel fd a poll wake marked ready: its next read delivers (not EAGAIN) */
 	int next_fd;
 	int timer_fd;				/* -1, or an fd whose first recv is a fired timeout's 'T' */
 	const char *binary; int id;
@@ -557,8 +561,9 @@ typedef struct {
 } Node;
 
 static Node N[MAXNODES];
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 3 };	/* what a blocked node waits in */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4 };	/* what a blocked node waits in (3 marks a running node in the fingerprint) */
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
+#define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
 
 static void kill_all(void);
 
@@ -576,7 +581,7 @@ die(int code, const char *fmt, ...)
 }
 
 /* record / look up which peer a connection fd talks to */
-static void cfd_set(Node *nd, int fd, int peer){ if(nd->nc>=MAXCONN) die(1,"node %d has more than %d connections",nd->id,MAXCONN); nd->cfd[nd->nc]=fd; nd->cpeer[nd->nc]=peer; nd->nc++; }
+static void cfd_set(Node *nd, int fd, int peer){ if(nd->nc>=MAXCONN) die(1,"node %d has more than %d connections",nd->id,MAXCONN); nd->cfd[nd->nc]=fd; nd->cpeer[nd->nc]=peer; nd->cnonblock[nd->nc]=0; nd->nc++; }
 static int  cfd_peer(Node *nd, int fd){ for(int i=0;i<nd->nc;i++) if(nd->cfd[i]==fd) return nd->cpeer[i]; return -2; }
 
 /* message bag: a pending message src->dst */
@@ -682,6 +687,7 @@ launch(Node *nd)
 	if (nd->listener < 0) return -1;
 	nd->pid = pid; nd->alive = 1; nd->blocked = 0; nd->block_kind = 0; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->preload_ok = 0; nd->timer_fd = -1;
+	nd->ls_nonblock = 0; nd->nefd = 0; nd->pollfd_n = 0; nd->block_pollarr = 0; nd->poll_woke_fd = -1;
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
 	return 0;
 }
@@ -741,6 +747,28 @@ chan_head(int src, int dst)
  * Returns 1 if it did something, 0 if nd had no pending notification.
  * A recv on an empty channel is DEFERRED (nd->blocked set, not answered).
  */
+/* an eventfd's slot index on this node, or -1.  eventfds are virtual
+ * channels: a write adds to the counter, a read drains it, and a
+ * non-zero counter is poll-ready, so an event loop's self-wakeup path
+ * is visible to the search rather than passed through to the kernel. */
+static int
+efd_slot(Node *nd, int fd)
+{
+	for (int i = 0; i < nd->nefd; i++)
+		if (nd->efd[i] == fd) return i;
+	return -1;
+}
+
+/* the connection-fd slot index, or -1 (cfd_peer returns the peer, not a
+ * slot; the nonblock flag needs the slot) */
+static int
+cfd_slot(Node *nd, int fd)
+{
+	for (int i = 0; i < nd->nc; i++)
+		if (nd->cfd[i] == fd) return i;
+	return -1;
+}
+
 static struct seccomp_notif *g_req;
 static struct seccomp_notif_resp *g_resp;
 
@@ -823,6 +851,16 @@ try_pending_for(Node *nd)
 		{
 			int fd = (int) a[0];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, fd 3, libs) */
+			int ews = efd_slot(nd, fd);
+			if (ews >= 0)
+			{
+				/* an 8-byte add to the counter; a non-zero counter makes
+				 * the eventfd poll-ready (checked locally in poll) */
+				uint64_t add = 0; int len = (int) a[2];
+				if (len != 8) die(1, "node %d writes %d bytes to an eventfd (must be 8)", nd->id, len);
+				cr_read(nd->pid, a[1], &add, 8);
+				nd->efdval[ews] += add; g_resp->val = 8; break;
+			}
 			int peer = cfd_peer(nd, fd);
 			if (peer == -2) die(1, "node %d writes fd %d, which is no connection", nd->id, fd);
 			int len = (int) a[2];
@@ -845,6 +883,21 @@ try_pending_for(Node *nd)
 		{
 			int fd = (int) a[0];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* loader/lib reads */
+			int ers = efd_slot(nd, fd);
+			if (ers >= 0)
+			{
+				/* read drains the counter to 0 and returns its value as 8
+				 * bytes; an empty non-blocking eventfd returns EAGAIN */
+				int want = (int) a[2];
+				if (nd->efdval[ers] == 0)
+				{
+					if (nd->efdnb[ers]) { g_resp->error = -EAGAIN; g_resp->val = 0; break; }
+					die(1, "node %d blocks reading an empty eventfd (no model)", nd->id);
+				}
+				if (want < 8) die(1, "node %d reads %d bytes from an eventfd (must be 8)", nd->id, want);
+				uint64_t v = nd->efdval[ers]; nd->efdval[ers] = 0;
+				cr_write(nd->pid, a[1], &v, 8); g_resp->val = 8; break;
+			}
 			int peer = cfd_peer(nd, fd);
 			if (peer == -2) die(1, "node %d reads fd %d, which is no connection", nd->id, fd);
 			if (fd == nd->timer_fd)
@@ -854,16 +907,91 @@ try_pending_for(Node *nd)
 				 * (empty, timer-peer) channel */
 				static const unsigned char t = 'T';
 				int want = (int) a[2]; int k = want < 1 ? want : 1;
-				nd->timer_fd = -1;
+				nd->timer_fd = -1; nd->poll_woke_fd = -1;
 				if (k > 0) cr_write(nd->pid, a[1], &t, (size_t) k);
 				g_resp->val = k; break;
 			}
-			/* Always DEFER a channel recv: whether it is satisfied by a
-			 * message or by a timeout is an environment choice the search
-			 * makes, so delivery must never be automatic (M5).  The node
-			 * blocks in the kernel until the search delivers to it. */
+			/* A non-blocking channel read with nothing deliverable returns
+			 * EAGAIN immediately: the search has not just woken this fd, so
+			 * no message is ready.  This is sound only because the loop's
+			 * next poll() defers (BK_POLL), handing control back to the
+			 * search; EAGAIN never lets a node bypass delivery. */
+			int cs = cfd_slot(nd, fd);
+			if (cs >= 0 && nd->cnonblock[cs] && fd != nd->poll_woke_fd)
+			{ g_resp->error = -EAGAIN; g_resp->val = 0; break; }
+			nd->poll_woke_fd = -1;	/* the wake is spent; this read defers */
+			/* Always DEFER a blocking channel recv: whether it is satisfied
+			 * by a message or by a timeout is an environment choice the
+			 * search makes, so delivery must never be automatic (M5).  The
+			 * node blocks in the kernel until the search delivers to it. */
 			nd->blocked = 1; nd->block_kind = BK_RECV; nd->block_id = g_req->id; nd->block_bufaddr = a[1];
 			nd->block_want = (int) a[2]; nd->block_peer = peer;
+			return 1;				/* do NOT answer */
+		}
+		case SYS_fcntl:
+		{
+			/* F_GETFL / F_SETFL for the O_NONBLOCK flag on a virtual fd;
+			 * any other fcntl on one of our fds has no complete model, so
+			 * it is an error, never a silent pass (a half-modelled fcntl
+			 * could hide an interleaving). */
+			int fd = (int) a[0]; int cmd = (int) a[1];
+			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
+			/* route the flag to the connection, the eventfd, or (the
+			 * fallback) the one listener socket a server sets nonblock */
+			int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
+			int *flagp = cs >= 0 ? &nd->cnonblock[cs] : es >= 0 ? &nd->efdnb[es] : &nd->ls_nonblock;
+			if (cmd == F_GETFL) g_resp->val = *flagp ? O_NONBLOCK : 0;
+			else if (cmd == F_SETFL) { *flagp = (a[2] & O_NONBLOCK) ? 1 : 0; g_resp->val = 0; }
+			else die(1, "node %d: fcntl cmd %d on virtual fd %d has no model", nd->id, cmd, fd);
+			break;
+		}
+		case SYS_eventfd2:
+		{
+			/* a virtual eventfd: next_fd with a counter seeded from the
+			 * initval (a[0]); EFD_SEMAPHORE (a[1] & 1) is not modelled
+			 * (shortcut: read drains to 0, not decrement-by-one; upgrade
+			 * when a target uses semaphore mode) */
+			if (nd->nefd >= MAXEFD) die(1, "node %d opens more than %d eventfds", nd->id, MAXEFD);
+			int fd = nd->next_fd++;
+			nd->efd[nd->nefd] = fd; nd->efdval[nd->nefd] = a[0]; nd->efdnb[nd->nefd] = 0; nd->nefd++;
+			g_resp->val = fd; break;
+		}
+		case SYS_poll: case SYS_ppoll:
+		{
+			/* readiness query.  Local readiness (an eventfd counter, or a
+			 * requested POLLOUT) is answered here; a channel or listener
+			 * fd's readiness is a search decision, like a deferred recv,
+			 * so if nothing is locally ready the node DEFERS as BK_POLL
+			 * and the search wakes it (deliver/accept/timeout). */
+			uint64_t arr = a[0]; int nfds = (int) a[1];
+			if (nfds < 0 || nfds > MAXPOLL) die(1, "node %d polls %d fds; the limit is %d", nd->id, nfds, MAXPOLL);
+			struct pollfd pfs[MAXPOLL];
+			cr_read(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]);
+			/* poll's timeout is a[2] (ms); ppoll's is a struct timespec*
+			 * at a[2] (NULL = block forever) */
+			int zero_timeout = (nr == SYS_poll) ? (a[2] == 0) : 0;
+			int ready = 0;
+			for (int i = 0; i < nfds; i++)
+			{
+				pfs[i].revents = 0;
+				int fd = pfs[i].fd;
+				if (fd < 0) continue;
+				int es = efd_slot(nd, fd);
+				if ((pfs[i].events & POLLOUT)) { pfs[i].revents |= POLLOUT; ready++; continue; }
+				if (es >= 0 && nd->efdval[es] > 0 && (pfs[i].events & POLLIN))
+				{ pfs[i].revents |= POLLIN; ready++; }
+			}
+			if (ready > 0 || zero_timeout)
+			{
+				cr_write(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]);
+				g_resp->val = ready; break;
+			}
+			/* nothing locally ready and the call blocks: a quiescence
+			 * point.  Record the polled fds so the search can mark one
+			 * ready and answer the poll. */
+			nd->blocked = 1; nd->block_kind = BK_POLL; nd->block_id = g_req->id;
+			nd->block_pollarr = arr; nd->pollfd_n = nfds;
+			for (int i = 0; i < nfds; i++) { nd->pollfds[i] = pfs[i].fd; nd->pollevents[i] = pfs[i].events; }
 			return 1;				/* do NOT answer */
 		}
 		default: g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
@@ -1032,11 +1160,35 @@ world_fp(uint64_t fp[2])
 		PUT(N[i].canon_len);
 		for (int k = 0; k < N[i].canon_len; k++) PUT(N[i].canon[k]);
 		/* live connections in the order they were opened (cfd is kept in
-		 * that order), by peer: which connection goes where is node
-		 * state.  shortcut: absolute fd numbers are left out, on the
-		 * assumption that a target does not branch on an fd's value */
+		 * that order), by peer, with each one's O_NONBLOCK flag: which
+		 * connection goes where, and whether a read on it would return
+		 * EAGAIN, is node state.  shortcut: absolute fd numbers are left
+		 * out, on the assumption that a target does not branch on a
+		 * virtual fd's value, only on its peer and its flags */
 		PUT(N[i].alive ? N[i].nc : 0);
-		for (int k = 0; N[i].alive && k < N[i].nc; k++) PUT(N[i].cpeer[k] + 2);
+		for (int k = 0; N[i].alive && k < N[i].nc; k++) { PUT(N[i].cpeer[k] + 2); PUT(N[i].cnonblock[k]); }
+		/* eventfds and their counters: a non-zero counter is poll-ready,
+		 * so two states with different counters are different */
+		PUT(N[i].alive ? N[i].nefd : 0);
+		for (int k = 0; N[i].alive && k < N[i].nefd; k++)
+			for (int b = 0; b < 8; b++) PUT(N[i].efdval[k] >> (8 * b));
+		PUT(N[i].ls_nonblock);
+		/* a BK_POLL node's polled set, as the semantic class of each fd
+		 * (peer connection, listener, or eventfd), so two differently
+		 * polling states are distinct without hashing raw fd numbers */
+		if (N[i].alive && N[i].blocked && N[i].block_kind == BK_POLL)
+		{
+			PUT(N[i].pollfd_n);
+			for (int k = 0; k < N[i].pollfd_n; k++)
+			{
+				int fd = N[i].pollfds[k];
+				int cs = cfd_slot(&N[i], fd), es = efd_slot(&N[i], fd);
+				PUT((short) N[i].pollevents[k]);
+				if (cs >= 0) { PUT(1); PUT(N[i].cpeer[cs] + 2); }
+				else if (es >= 0) { PUT(2); PUT(es); }
+				else PUT(3);		/* the listener fd */
+			}
+		}
 	}
 	/* channel by channel, each in the order it is delivered */
 	for (int s = -1; s < M.nodes; s++)
@@ -1081,7 +1233,7 @@ reset_world(void)
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE };
 typedef struct { int kind, node, peer; } Act;
 
 /* Enumerate the actions enabled now:
@@ -1091,7 +1243,12 @@ typedef struct { int kind, node, peer; } Act;
  *     returns 0;
  *   - TIMEOUT (budgeted): the recv is satisfied by the timer instead;
  *   - CRASH (budgeted): a live node dies, keeping only its durable state;
- *   - DROP (budgeted): the network loses the head of a channel.
+ *   - DROP (budgeted): the network loses the head of a channel;
+ *   - WAKE: a node parked in poll() is told one polled fd is ready
+ *     (POLLIN).  WAKE never consumes a message: the node then
+ *     accept()s or read()s that fd and defers again (BK_ACCEPT/BK_RECV),
+ *     which the existing ACCEPT/DELIVER/TIMEOUT actions service, so poll
+ *     readiness stays a search decision like a deferred recv (M5).
  * Every environment action is bounded so the search stays finite. */
 static int
 enum_actions(Act *out)
@@ -1117,6 +1274,35 @@ enum_actions(Act *out)
 			if (bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER);
 			continue;
 		}
+		if (nd->block_kind == BK_POLL)
+		{
+			/* offer a wake for each polled fd the search can make ready:
+			 * a polled channel with a pending message (deliver it after),
+			 * a polled listener with a connection waiting (accept after),
+			 * an eventfd with a non-zero counter.  A budgeted timeout can
+			 * wake a polled channel too (the fired-timer 'T' delivery). */
+			int saw_chan = 0;
+			for (int k = 0; k < nd->pollfd_n; k++)
+			{
+				int fd = nd->pollfds[k];
+				int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
+				if (cs >= 0)
+				{
+					int peer = nd->cpeer[cs];
+					saw_chan = 1;
+					if (chan_head(peer, d) >= 0) ADD(A_WAKE, d, peer);
+					else if (peer >= 0 && !N[peer].alive) ADD(A_WAKE, d, peer);
+				}
+				else if (es >= 0)
+				{
+					if (nd->efdval[es] > 0) ADD(A_WAKE, d, POLL_LISTENER - 1 - es);
+				}
+				else if (nd->npend > 0)
+					ADD(A_WAKE, d, POLL_LISTENER);
+			}
+			if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER);
+			continue;
+		}
 		int p = nd->block_peer;
 		if (chan_head(p, d) >= 0) ADD(A_DELIVER, d, p);
 		else if (p >= 0 && !N[p].alive) ADD(A_EOF, d, p);	/* peer gone, channel drained */
@@ -1131,6 +1317,36 @@ enum_actions(Act *out)
 				if (chan_head(s, d) >= 0) ADD(A_DROP, d, s);
 #undef ADD
 	return c;
+}
+
+/* Wake a node parked in poll(): write POLLIN into one polled fd's revents
+ * and answer the poll with count 1, consuming no message.  target names
+ * the fd: a peer id (a channel), POLL_LISTENER (the listener), or
+ * POLL_LISTENER-1-slot (an eventfd slot).  The node then reads/accepts
+ * that fd and defers again, which the search services. */
+static void
+poll_wake(Node *nd, int target)
+{
+	struct pollfd pfs[MAXPOLL];
+	int hit = -1;
+	for (int k = 0; k < nd->pollfd_n; k++)
+	{
+		int fd = nd->pollfds[k];
+		int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
+		int match = (target == TIMER_PEER) ? (fd == nd->timer_fd)
+			: (target >= -1) ? (cs >= 0 && nd->cpeer[cs] == target)
+			: (target == POLL_LISTENER) ? (cs < 0 && es < 0)
+			: (es >= 0 && es == (POLL_LISTENER - 1 - target));
+		pfs[k].fd = fd; pfs[k].events = nd->pollevents[k];
+		pfs[k].revents = (match && hit < 0) ? (short) (nd->pollevents[k] & POLLIN) : 0;
+		if (match && hit < 0) hit = k;
+	}
+	if (hit < 0) die(1, "poll wake on node %d found no polled fd for target %d", nd->id, target);
+	cr_write(nd->pid, nd->block_pollarr, pfs, (size_t) nd->pollfd_n * sizeof pfs[0]);
+	/* a woken channel's next read must deliver, not return EAGAIN; a timer
+	 * wake is serviced by the timer-'T' read path, not a message */
+	nd->poll_woke_fd = (target >= -1) ? nd->pollfds[hit] : -1;
+	answer(nd, 1);
 }
 
 static void
@@ -1166,10 +1382,22 @@ apply(const Act *a)
 				nd->timer_fd = fd;
 				answer(nd, fd);
 			}
+			else if (nd->block_kind == BK_POLL)
+			{
+				/* a fired timer wakes the poll on the first polled channel
+				 * fd; that fd's next read returns the timer's 'T' */
+				for (int k = 0; k < nd->pollfd_n; k++)
+				{
+					int cs = cfd_slot(nd, nd->pollfds[k]);
+					if (cs >= 0) { nd->timer_fd = nd->pollfds[k]; break; }
+				}
+				poll_wake(nd, TIMER_PEER);
+			}
 			else
 				deliver(nd, &t, 1);
 			break;
 		}
+		case A_WAKE: poll_wake(nd, a->peer); break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
 		case A_DROP: bud.drops--; bag[chan_head(a->peer, a->node)].used = 0; break;
 	}
@@ -1292,9 +1520,11 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
+	else if (a->kind == A_WAKE && a->peer == POLL_LISTENER) snprintf(b, n, "wake n%d listener", a->node);
+	else if (a->kind == A_WAKE && a->peer < POLL_LISTENER) snprintf(b, n, "wake n%d eventfd%d", a->node, POLL_LISTENER - 1 - a->peer);
 	else if (a->peer < 0) snprintf(b, n, "%s client->n%d", k[a->kind], a->node);
 	else snprintf(b, n, "%s n%d->n%d", k[a->kind], a->peer, a->node);
 	return b;
