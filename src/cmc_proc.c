@@ -537,9 +537,14 @@ typedef struct {
 	pid_t pid; int listener; int alive;
 	/* association list: which peer each connection fd talks to.
 	 * peer -1 = the synthetic client, >=0 = a node id. */
-	int cfd[MAXCONN]; int cpeer[MAXCONN]; int nc;
+	int cfd[MAXCONN]; int cpeer[MAXCONN]; int cnonblock[MAXCONN]; int nc;
+	int ls_nonblock;				/* the listener fd is O_NONBLOCK */
+	/* eventfd virtual channels: efd[k] has counter efdval[k] */
+	int efd[MAXCONN]; uint64_t efdval[MAXCONN]; int nefd;
 	int pend[MAXCONN]; int npend;	/* connectors queued at this node's listener */
 	int blocked; int block_kind; uint64_t block_id; uint64_t block_bufaddr; int block_want; int block_peer;
+	/* for BK_POLL: the fds the node is waiting on, and where to write revents */
+	int pollfd_n; int pollfds[MAXCONN]; uint64_t block_pollarr;
 	int next_fd;
 	int timer_fd;				/* -1, or an fd whose first recv is a fired timeout's 'T' */
 	const char *binary; int id;
@@ -552,7 +557,7 @@ typedef struct {
 } Node;
 
 static Node N[MAXNODES];
-enum { BK_RECV = 1, BK_ACCEPT = 2 };	/* what a blocked node waits in */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 3 };	/* what a blocked node waits in */
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 
 static void kill_all(void);
@@ -634,6 +639,7 @@ install_filter(void)
 		OWN(SYS_read), OWN(SYS_write), OWN(SYS_recvfrom), OWN(SYS_sendto),
 		OWN(SYS_clock_gettime), OWN(SYS_gettimeofday), OWN(SYS_getrandom),
 		OWN(SYS_close),
+		OWN(SYS_poll), OWN(SYS_ppoll), OWN(SYS_fcntl), OWN(SYS_eventfd2),
 #undef OWN
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
