@@ -1,0 +1,13 @@
+# test/proc/pollloop.model: the red test for async-I/O support.  Node 0
+# connects to node 1 and sends one byte; node 1 stores it via a
+# non-blocking poll loop.  Until libcmc models poll/fcntl, running this
+# dies in drive_quiescent (node blocked in an unmodelled call).
+[target]
+nodes = 2
+
+[invariants]
+# node 1 stores the byte node 0 sent ('x' = 120), once received
+stored_ok = "node[1].req == 0 or node[1].req == 120"
+
+[fields]
+req = 0
