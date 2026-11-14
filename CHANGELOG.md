@@ -5,6 +5,29 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+Per-thread scheduling in the process front end (`cmc --model-file`,
+Tier 3 of the davros evaluation): a node may now run more than one
+thread.  The checker intercepts `clone`/`clone3` and `futex`, keeps a
+deferred slot per thread (keyed by the kernel thread id), and treats a
+thread parked in `futex` (a mutex, a condition variable, or a
+`pthread_join`) as blocked.  The world is a search state only once every
+thread of every node is blocked or has exited, so a loop thread in
+`poll`/`accept` and a worker thread that waits on a condition variable
+are both driven by the search rather than tripping the LULL timeout or
+racing unmodelled.  A `FUTEX_WAKE` wakes waiters only when the program
+issues it, as part of the waking thread's step; woken threads run one at
+a time so the kernel's atomic futex and mutex handoffs are never torn.
+The fingerprint carries each thread's blocked state as a canonical
+multiset keyed by role, not by the raw (arbitrary) kernel tid, so two
+runs are deduplicated identically.  A single-threaded node behaves
+exactly as before.  A `FUTEX_WAKE` that would wake a strict subset of
+several waiters on one word (a lock contended by a thread pool) is an
+error rather than a silently chosen schedule; PI and requeue futex
+operations are likewise refused.  Example: `test/proc/twothread.c` (the
+handoff holds; `-DBUG` drops the data across it and the checker prints
+the two-action counterexample) and `test/proc/twothread_join.c` (the
+exit and join path).
+
 ## 1.2.0 (2026-11-14)
 
 Event-loop runtime support hardened from the davros evaluation: the

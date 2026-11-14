@@ -1,0 +1,16 @@
+# A model file for test/proc/twothread.c: a two-threaded server node,
+# checked as it ships.  Node 0 is a client, node 1 the server; the server's
+# main thread owns the socket and a worker thread stores the result.
+
+[target]
+nodes = 2
+
+[fields]
+recvd = 0
+stored = 1
+
+[invariants]
+# once the server (node 1) has stored a byte, it must be the byte the
+# client sent (120 = 'x').  recvd distinguishes "nothing processed yet"
+# from "processed": the data must survive the thread handoff.
+handoff = "node[1].recvd == 0 or node[1].stored == 120"

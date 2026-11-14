@@ -1,0 +1,14 @@
+# A model file for test/proc/twothread_join.c: the worker does one job and
+# exits, the main thread joins it.  Node 0 is a client, node 1 the server.
+
+[target]
+nodes = 2
+
+[fields]
+recvd = 0
+stored = 1
+
+[invariants]
+# once the server (node 1) has stored a byte, it must be the byte the
+# client sent (120 = 'x'): the data survives the handoff and the join.
+handoff = "node[1].recvd == 0 or node[1].stored == 120"

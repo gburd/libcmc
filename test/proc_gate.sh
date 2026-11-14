@@ -42,6 +42,10 @@ $CC -O1 -no-pie -w -o "$B/proc/mono" "$HERE/test/proc/mono.c" || { echo "proc_ga
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/mono-bug" "$HERE/test/proc/mono.c" || { echo "proc_gate: mono.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/noprogress" "$HERE/test/proc/noprogress.c" || { echo "proc_gate: noprogress.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DNEGFD -o "$B/proc/noprogress-stuck" "$HERE/test/proc/noprogress.c" || { echo "proc_gate: noprogress.c -DNEGFD does not build"; fail=1; }
+# the two-threaded fixture needs pthreads (clone/clone3 + futex)
+$CC -O1 -no-pie -w -o "$B/proc/twothread" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/twothread-bug" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/twothread_join" "$HERE/test/proc/twothread_join.c" -lpthread || { echo "proc_gate: twothread_join.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -219,6 +223,30 @@ expect "pollloop: the counterexample names the wake"   1 "wake n1 listener" $(ru
 # untracked fd, never serves, and must be reported INCOMPLETE (exit 2).
 expect "noprogress: a progressing loop holds"           0 "No error has been found" $(run noprogress noprogress)
 expect "noprogress: a stuck loop is not a vacuous pass"  2 "made no progress" $(run noprogress noprogress-stuck)
+
+echo "-- threads: per-thread scheduling, futex handoff"
+# per-thread scheduling (Tier 3 ask 8): a server node whose main thread
+# owns the socket and whose worker thread stores the result, handing the
+# job over a mutex + condition variable (clone/clone3 + futex underneath).
+# The search drives both threads: it accepts, delivers the request byte to
+# the main thread, which signals the worker (a FUTEX_WAKE), and the worker
+# runs -- serially, one thread at a time -- to store it.  A snapshot is
+# taken only once every thread is parked (main in recv, worker in futex),
+# the per-thread quiescence rule.  The correct build stores the byte it
+# was handed; the -DBUG build drops it across the handoff, which the
+# invariant catches.  Before threads were modelled the worker's futex hit
+# LULL_MS (or worse, a racy unmodelled pass).
+expect "twothread: the handoff holds"                   0 "No error has been found" $(run twothread twothread)
+expect "twothread: a dropped handoff is caught"         1 "handoff is violated" $(run twothread twothread-bug)
+expect "twothread: the counterexample is the 2-action handoff" 1 "deliver n0->n1" $(run twothread twothread-bug)
+# the data genuinely crosses the handoff: a reachability check the racy
+# pre-thread engine could only satisfy by luck is now search-driven.
+printf '[target]\nnodes = 2\n[fields]\nrecvd = 0\nstored = 1\n[invariants]\nprocessed = "eventually node[1].stored == 120"\n' > "$OUT/tt-reach.model"
+expect "twothread: the worker reaches the stored value"  0 "No error has been found" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread"
+# a worker that exits after one job, joined by the main thread: exercises
+# the thread-exit slot-free and the pthread_join futex on the worker's
+# clear-tid word (woken by the checker's SYS_exit CLONE_CHILD_CLEARTID).
+expect "twothread_join: exit + join holds"              0 "No error has been found" $(run twothread_join twothread_join)
 # arithmetic evaluates with the usual precedence
 printf '[target]\nnodes = 2\n[invariants]\nt = "2 + 3 * 4 == 14 and 10 mod 3 == 1 and (1 + 1) * 2 == 4"\n' > "$OUT/q.model"
 expect "arithmetic: precedence and mod"                 0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/repl"

@@ -69,10 +69,13 @@ and a connection goes to the node whose port was dialled.
 .Pp
 A node that calls
 .Fn accept ,
-reads a connection with nothing the search has chosen to deliver, or
+reads a connection with nothing the search has chosen to deliver,
 calls
 .Fn poll
-with no fd locally ready, stays blocked in the kernel.
+with no fd locally ready, or waits in a
+.Fn futex
+(a thread blocked on a mutex or condition variable), stays blocked in
+the kernel.
 A
 .Fn poll
 over an
@@ -83,7 +86,27 @@ and a non-zero
 .Fn eventfd
 answer at once, but a connection or listener is ready only when the
 search says so, exactly as a deferred read is.
-When every node is blocked or has exited the world is
+.Pp
+A node may run more than one thread.
+The checker intercepts
+.Fn clone
+and
+.Fn clone3
+(so it knows a new thread exists before it blocks) and
+.Fn futex ,
+and keeps a deferred slot per thread, keyed by the thread's kernel id.
+A thread parked in
+.Fn futex
+(waiting on a mutex, a condition variable, or a
+.Fn pthread_join )
+counts as blocked, since it cannot run until another thread wakes it.
+A
+.Dv FUTEX_WAKE
+wakes the waiters only when the program issues it, as part of the waking
+thread's step; the checker invents no wakes.
+Woken threads run one at a time, each to its next system call, so the
+kernel's atomic futex and mutex handoffs are never torn.
+When every thread of every node is blocked or has exited the world is
 .Em quiescent :
 the checker reads each node's state, checks the invariants, and the
 enabled actions are the next steps:

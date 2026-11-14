@@ -44,6 +44,21 @@ target's memory with `process_vm_readv`/`process_vm_writev`, and writes
 back the result the target sees.  `ptrace` (`PTRACE_SEIZE`) is used to
 read registers and, for the snapshot search, to freeze and fork a node.
 
+A node may run more than one thread.  A thread's notifications arrive on
+the same listener (a cloned thread shares the filter), tagged with the
+thread's kernel id, so the checker keeps a deferred slot per thread
+rather than one per node.  It intercepts `clone`/`clone3` (to know a
+thread exists before it blocks) and `futex`: a thread parked in `futex`
+(a mutex, a condition variable, or a `pthread_join` on another thread's
+exit) is blocked, exactly like one parked in `recv` or `poll`.  The
+world is a search state only when every thread of every node is blocked
+or has exited.  A `FUTEX_WAKE` wakes waiters only when the program
+issues one, as a step of the waking thread; the checker invents no
+wakes, and runs woken threads one at a time to their next syscall so the
+kernel's atomic futex and mutex handoffs are never torn by concurrent
+execution.  A single-threaded node reduces to exactly one slot, the
+pre-thread behaviour.
+
 The seccomp *filter* is classic BPF -- the bytecode `seccomp(2)` has
 always taken -- but there is no eBPF program, no `bpf(2)`, no kernel
 probe.  Observation tools built on eBPF uprobes/kprobes can watch
