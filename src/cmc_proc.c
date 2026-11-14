@@ -96,7 +96,9 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 /* actions enabled at one point: per node, per thread at most MAXPOLL
  * wakes or MAXNODES + 1 accepts plus a delivery/EOF and a timeout; then
  * one crash per node and one drop per channel.  With up to MAXTHREAD
- * threads the per-thread term dominates, so the bound scales by it. */
+ * threads the per-thread term dominates, so the bound scales by it.
+ * One restart per node also fits the trailing MAXNODES * (MAXNODES + 1)
+ * term alongside the per-node crashes. */
 #define MAXACT (MAXNODES * MAXTHREAD * (MAXPOLL + MAXNODES + 4) + MAXNODES * (MAXNODES + 1))
 #define MAXINV 8
 #define MAXFIELD 16				/* named byte offsets in [fields] */
@@ -111,7 +113,7 @@ static struct
 	char		binary[4096];	/* [target] binary, resolved against the file's directory */
 	int			nodes;
 	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
-	int			timeouts, crashes, drops;
+	int			timeouts, crashes, drops, restarts;
 	int			max_write;		/* largest single write a node may make (<= MSGLEN) */
 	char		args[512];		/* extra argv after the node id, space-separated (e.g. flags) */
 	long		depth;			/* -1 = unbounded */
@@ -209,6 +211,8 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.crashes = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "drops"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.drops = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "restarts"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.restarts = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
 		{ if (int_value(path, ln, k, v, 0, 1000000, &x)) goto bad; M.depth = x; }
 		else if (!strcmp(sect, "fields"))
@@ -586,6 +590,7 @@ typedef struct {
 	int fd4[2];					/* durable canonical-emit pipe (survives a crash) */
 	unsigned char canon[SNAP]; int canon_len;
 	unsigned char durable[SNAP]; int durable_len;
+	int durable_read_off;		/* bytes of the framed durable record a startup read has consumed */
 	int crashed;				/* killed by a CRASH action: volatile lost, durable kept */
 	int preload_ok;				/* the preload announced itself in this node */
 } Node;
@@ -679,7 +684,7 @@ static int is_reset(int a, int b){ return a >= 0 && b >= 0 && a < MAXNODES && b 
 static unsigned char rep_src[MAXREP], rep_val[MAXREP]; static int nrep;
 
 /* environment budgets left on this path; part of the fingerprint */
-typedef struct { int timeouts, crashes, drops; } Budget;
+typedef struct { int timeouts, crashes, drops, restarts; } Budget;
 static Budget bud;
 
 /* M5b: the logical clock the checker owns.  It starts at a base and
@@ -792,7 +797,7 @@ launch(Node *nd)
 	 * one node's RECV while another node's running thread needs service */
 	{ int fl = fcntl(nd->listener, F_GETFL); fcntl(nd->listener, F_SETFL, fl | O_NONBLOCK); }
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
-	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->preload_ok = 0; nd->timer_fd = -1;
+	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0;
 	nd->nth = 0; nd->th_pending = 0; nd->npending_ctid = 0; memset(nd->th, 0, sizeof nd->th);
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
@@ -1017,6 +1022,26 @@ try_pending_for(Node *nd)
 		case SYS_read: case SYS_recvfrom:
 		{
 			int fd = (int) a[0];
+			if (fd == DURABLE_FD)
+			{
+				/* A read of the durable descriptor serves the node's surviving
+				 * durable record back to it, framed as it was written
+				 * ([count][count bytes]): on a fresh launch the record is
+				 * empty so the first read returns EOF, and on a RESTART it
+				 * returns what the node had made durable before the crash, so
+				 * a server that reads its own log on startup recovers.  A
+				 * second read returns EOF.  The bytes come from nd->durable
+				 * (engine-owned), so this read is a pure function of the world
+				 * and replays identically. */
+				unsigned char framed[1 + SNAP]; int flen = 0;
+				if (nd->durable_len > 0) { framed[0] = (unsigned char) nd->durable_len; memcpy(framed + 1, nd->durable, (size_t) nd->durable_len); flen = 1 + nd->durable_len; }
+				int want = (int) a[2];
+				int avail = flen - nd->durable_read_off;
+				int k = avail < want ? avail : want; if (k < 0) k = 0;
+				if (k > 0) cr_write(nd->pid, a[1], framed + nd->durable_read_off, (size_t) k);
+				nd->durable_read_off += k;
+				g_resp->val = k; break;
+			}
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* loader/lib reads */
 			int ers = efd_slot(nd, fd);
 			if (ers >= 0)
@@ -1339,6 +1364,36 @@ crash_node(Node *nd)
 	nd->nth = 0; nd->th_pending = 0; nd->npending_ctid = 0; memset(nd->th, 0, sizeof nd->th);
 	/* volatile is gone; the node's observable state is what was durable */
 	memcpy(nd->canon, nd->durable, nd->durable_len); nd->canon_len = nd->durable_len;
+	/* close the parent's fds for the dead process (the final drain is done,
+	 * the durable bytes are in nd->durable); a RESTART opens fresh ones, so
+	 * leaving these open would leak one listener and two pipe ends per
+	 * crash across a long search */
+	if (nd->listener > 0) close(nd->listener);
+	if (nd->fd3[0] > 0) close(nd->fd3[0]);
+	if (nd->fd4[0] > 0) close(nd->fd4[0]);
+	nd->listener = nd->fd3[0] = nd->fd4[0] = -1;
+}
+
+/* RESTART a crashed node (Tier 3 ask 6): relaunch it as a fresh process
+ * whose surviving durable record it can read back from descriptor 193.
+ * crash_node kept the durable bytes (nd->durable); launch() would zero
+ * them, so relaunch saves and restores them, and resets the read offset
+ * so the new process's first read of fd 193 returns the surviving record
+ * (a server that reads its own log recovers).  The relaunched process is
+ * a fresh single-main-thread program: launch() already clears the thread
+ * table, the connections and the per-node fds, and it is driven to
+ * quiescence by the caller exactly as a fresh launch is.  Returns 0, or
+ * -1 if the process would not start. */
+static int
+relaunch(Node *nd)
+{
+	if (nd->alive || !nd->crashed) return -1;
+	unsigned char saved[SNAP]; int savedlen = nd->durable_len;
+	memcpy(saved, nd->durable, (size_t) savedlen);
+	if (launch(nd)) return -1;
+	memcpy(nd->durable, saved, (size_t) savedlen); nd->durable_len = savedlen;
+	nd->durable_read_off = 0;
+	return 0;
 }
 
 /* run all nodes to quiescence: every live node has every thread parked
@@ -1596,7 +1651,7 @@ world_fp(uint64_t fp[2])
 		}
 	PUT(nrep);
 	for (int i = 0; i < nrep; i++) { PUT(rep_src[i]); PUT(rep_val[i]); }
-	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops);
+	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts);
 	for (int k = 0; k < 8; k++) PUT(logical_ns >> (8 * k));
 #undef PUT
 	fp128(w, n, fp);
@@ -1609,12 +1664,13 @@ reset_world(void)
 	memset(conn_reset, 0, sizeof conn_reset);
 	nrep = 0; logical_ns = CLK_BASE;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
+	bud.restarts = M.restarts;
 }
 
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART };
 typedef struct { int kind, node, peer, thr; } Act;
 
 /* Enumerate the actions enabled now:
@@ -1625,6 +1681,8 @@ typedef struct { int kind, node, peer, thr; } Act;
  *   - TIMEOUT (budgeted): the recv is satisfied by the timer instead;
  *   - CRASH (budgeted): a live node dies, keeping only its durable state;
  *   - DROP (budgeted): the network loses the head of a channel;
+ *   - RESTART (budgeted): a crashed node is relaunched as a fresh process
+ *     that can read its surviving durable record back on startup;
  *   - WAKE: a thread parked in poll() is told one polled fd is ready
  *     (POLLIN).  WAKE never consumes a message: the thread then
  *     accept()s or read()s that fd and defers again (BK_ACCEPT/BK_RECV),
@@ -1724,6 +1782,9 @@ enum_actions(Act *out)
 				 * EOF, so there is nothing to reset twice. */
 				if (!conn_reset[s][d] && (chan_head(s, d) >= 0 || chan_head(d, s) >= 0))
 					ADD(A_DROP, d, s, -1);
+	if (bud.restarts > 0)
+		for (int d = 0; d < M.nodes; d++)
+			if (!N[d].alive && N[d].crashed) ADD(A_RESTART, d, -1, -1);
 #undef ADD
 	return c;
 }
@@ -1796,6 +1857,64 @@ reset_conn(int a, int b)
 	}
 }
 
+/* Break the connections a peer still holds to a node that is restarting.
+ * The crashed node's TCP connections are gone; the new process starts
+ * with none, so a peer that was connected sees EOF on its stale fd and
+ * must re-dial to reach the new process.  For each peer: discard both
+ * channels' messages, answer a thread parked recv'ing on the node with
+ * EOF, and drop the stale connection from the peer's table (as the
+ * peer's close of a reset socket would).  A re-dial already queued at a
+ * peer (a pend) is kept, so the restarted process accepts the
+ * reconnection.
+ *
+ * A peer parked in poll() on a connection to the restarting node is the
+ * one case the pair-keyed reset model cannot represent faithfully
+ * alongside a fresh re-dial on the same pair, so rather than guess (and
+ * risk hiding a bug) the checker errors -- an honest boundary, like the
+ * futex-subset case.  The request/reply recovery ask 6 targets does not
+ * reach it. */
+static void
+break_peer_links(int node)
+{
+	for (int i = 0; i < MAXMSG; i++)
+		if (bag[i].used && (bag[i].src == node || bag[i].dst == node))
+			bag[i].used = 0;
+	for (int p = 0; p < M.nodes; p++)
+	{
+		Node *nd = &N[p];
+		if (p == node || !nd->alive) continue;
+		for (int ti = 0; ti < nd->nth; ti++)
+		{
+			Thread *th = &nd->th[ti];
+			if (!th->inuse || !th->block_kind) continue;
+			if (th->block_kind == BK_RECV && th->block_peer == node)
+				deliver(nd, th, NULL, 0);		/* EOF on the broken connection */
+			else if (th->block_kind == BK_POLL)
+				for (int k = 0; k < th->pollfd_n; k++)
+				{
+					int cs = cfd_slot(nd, th->pollfds[k]);
+					if (cs >= 0 && nd->cpeer[cs] == node)
+						die(1, "node %d polls a connection to node %d as it restarts; the reset model does not represent a surviving poll across a restart", p, node);
+				}
+		}
+		/* drop the peer's stale connections to the restarting node (the
+		 * broken socket; a new one is a fresh re-dial) */
+		for (int k = 0; k < nd->nc; )
+			if (nd->cpeer[k] == node)
+			{
+				nd->nc--;
+				for (int j = k; j < nd->nc; j++) { nd->cfd[j] = nd->cfd[j + 1]; nd->cpeer[j] = nd->cpeer[j + 1]; nd->cnonblock[j] = nd->cnonblock[j + 1]; nd->ccloexec[j] = nd->ccloexec[j + 1]; }
+			}
+			else k++;
+		/* drop the dead process's outbound dials still queued at this peer's
+		 * listener; a re-dial from the new process is a fresh connect that
+		 * arrives after the relaunch */
+		for (int k = 0; k < nd->npend; )
+			if (nd->pend[k] == node) nd->pend[k] = nd->pend[--nd->npend];
+			else k++;
+	}
+}
+
 static void
 apply(const Act *a)
 {
@@ -1848,6 +1967,11 @@ apply(const Act *a)
 		case A_WAKE: poll_wake(nd, th, a->peer); break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
 		case A_DROP: bud.drops--; reset_conn(a->node, a->peer); break;
+		case A_RESTART:
+			bud.restarts--;
+			break_peer_links(a->node);	/* the old process's connections are gone */
+			if (relaunch(nd)) die(3, "node %d would not restart", a->node);
+			break;
 	}
 	drive_quiescent();
 }
@@ -1968,8 +2092,9 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
 	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);
 	else if (a->kind == A_WAKE && a->peer == POLL_LISTENER) snprintf(b, n, "wake n%d listener", a->node);
@@ -2131,8 +2256,8 @@ cmc_proc_main(const CmcProcOptions *po)
 
 	printf("cmc: model file %s, binary %s, %d node%s, %s\n", po->model_file, M.binary, M.nodes,
 		   M.nodes == 1 ? "" : "s", po->simulate ? "random simulation" : "breadth-first search");
-	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d",
-		   M.client_write, M.timeouts, M.crashes, M.drops);
+	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d, restarts %d",
+		   M.client_write, M.timeouts, M.crashes, M.drops, M.restarts);
 	if (depth >= 0) printf(", depth %ld", depth);
 	printf("\n");
 	fflush(stdout);

@@ -338,8 +338,14 @@ rest and the volatile state; a peer reading a connection to the crashed
 node gets EOF once that channel drains.
 The actor engine then restarts the node; with
 .Fl -model-file
-a crash is final, the process does not come back (a restart action is
-not yet modelled there).
+a crash is final unless the model's
+.Ic restarts
+budget lets a
+.Sy RESTART
+action relaunch the node as a fresh process that reads its surviving
+durable record back on startup
+.Pq see Xr cmc 7 .
+With no restart budget a crash does not come back.
 Default 0.
 .It Fl -net-cap Ar n
 Messages in flight at once.

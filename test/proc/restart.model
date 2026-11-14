@@ -1,0 +1,16 @@
+# test/proc/restart.c: crash and recover a server node.  A value the
+# client acked (made durable) must still be present after the server
+# crashes and RESTARTS.  The checker owns crashes (M6) and now restarts
+# (Tier 3 ask 6): it may crash the server at a quiescent point and then
+# relaunch it, handing the surviving fd-193 (durable) record back to the
+# new process so a server that reads its own log recovers.
+[target]
+nodes = 2
+[environment]
+client_write = 7     # the client sends WRITE(7) to node 0
+crashes = 1          # the checker may crash the server
+restarts = 1         # the checker may relaunch a crashed node
+[invariants]
+# every acked value is durable on some node that is still around (the
+# server recovered it from its fd-193 log after the restart).
+no_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1]"

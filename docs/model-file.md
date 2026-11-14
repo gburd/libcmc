@@ -39,6 +39,7 @@ client_write = 5           # a client writes this value (0-255) to node 0
 timeouts = 1               # reads the environment may time out
 crashes  = 1               # node crashes
 drops    = 1               # messages the network may lose
+restarts = 1               # a crashed node may be relaunched
 depth    = 40              # bound the search to this many actions
 
 [invariants]
@@ -89,6 +90,17 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   both directions, is discarded, and both ends read EOF from then on
   (as they would on `ECONNRESET`).  This models a network partition or a
   reset peer, the failures a TCP program must survive.
+- `restarts`: a crashed node is relaunched as a fresh process.  The
+  surviving durable record (what it last reported on descriptor 193) is
+  handed back to it: the new process's first read of descriptor 193
+  returns that record, framed as it was written, so a server that reads
+  its own log on startup recovers; a fresh process that has never
+  crashed reads EOF there.  The restarted process starts with no
+  connections and re-dials and re-listens as its code does; a peer that
+  still held a connection to the crashed process sees EOF on it.  A
+  restart is offered only for a node that has crashed, and only while
+  the budget is left.  With no restart budget a crash is final (the node
+  does not come back), exactly as before this key existed.
 - `depth`: a search that reaches this many actions stops and is
   reported as incomplete (exit 2), never as a pass.  `--depth`
   overrides it.  Absent: unbounded.

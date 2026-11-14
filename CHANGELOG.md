@@ -28,6 +28,24 @@ handoff holds; `-DBUG` drops the data across it and the checker prints
 the two-action counterexample) and `test/proc/twothread_join.c` (the
 exit and join path).
 
+Relaunch a crashed node in the process front end (Tier 3 of the davros
+evaluation): a new `[environment] restarts = N` budget (default 0)
+enables a RESTART action that relaunches a crashed node as a fresh
+process.  A crash still keeps only the durable encoding (descriptor
+193); a RESTART hands that surviving record back to the new process, so
+its first read of descriptor 193 returns what it had made durable before
+the crash (a process that never crashed reads EOF there) and a server
+that reads its own log on startup recovers.  The relaunched process
+starts with no connections and re-dials and re-listens as its code does;
+a peer that still held a connection to the crashed process reads EOF on
+it.  The relaunch is a pure function of the surviving durable record, so
+stateless replay stays deterministic, and a restarted node is driven to
+quiescence like any launch.  With no restart budget a crash stays final,
+exactly as before.  Example: `test/proc/restart.c` (crash-and-recover
+holds; `-DBUG` forgets to recover and the checker prints the
+`crash` then `restart` counterexample; without the budget the crash is
+final and the bug is not explorable).
+
 ## 1.2.0 (2026-11-14)
 
 Event-loop runtime support hardened from the davros evaluation: the

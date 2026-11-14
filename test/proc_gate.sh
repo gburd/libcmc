@@ -34,6 +34,9 @@ done
 for f in repl elect lease durlog quorum pollloop; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
+# restart (Tier 3 ask 6): crash-and-recover, so it needs both builds
+$CC -O1 -no-pie -w -o "$B/proc/restart" "$T/restart.c" || { echo "proc_gate: restart.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/restart-bug" "$T/restart.c" || { echo "proc_gate: restart.c -DBUG does not build"; fail=1; }
 # the consensus examples are real, tested fixtures too
 $CC -O1 -no-pie -w -o "$B/proc/paxos" "$HERE/examples/paxos/paxos.c" || { echo "proc_gate: paxos.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/paxos2" "$HERE/examples/paxos/paxos2.c" || { echo "proc_gate: paxos2.c does not build"; fail=1; }
@@ -247,6 +250,29 @@ expect "twothread: the worker reaches the stored value"  0 "No error has been fo
 # the thread-exit slot-free and the pthread_join futex on the worker's
 # clear-tid word (woken by the checker's SYS_exit CLONE_CHILD_CLEARTID).
 expect "twothread_join: exit + join holds"              0 "No error has been found" $(run twothread_join twothread_join)
+
+echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
+# A server (node 1) stores a client's value durably (fd 193) and loops
+# serving; the client (node 0) acks the synthetic client only once the
+# server has made it durable.  The checker crashes the server at a
+# quiescent point where it holds the committed value, then RESTARTS it:
+# a restarted process is fresh and reads its surviving fd-193 record back
+# on startup, so a server that recovers from its own log keeps the
+# committed value.  no_lost_ack: an acked value is present on some node
+# after the restart.
+#
+# Correct: the server reads fd 193 and re-emits the recovered value, so it
+# is back after the restart.  -DBUG: the server does not recover, so after
+# the restart the committed value is on neither node -- caught.
+expect "restart: crash-and-recover holds"               0 "No error has been found" $(run restart restart)
+expect "restart: a lost recovery is caught"             1 "no_lost_ack is violated" $(run restart restart-bug)
+expect "restart: the counterexample names the restart" 1 "restart n1" $(run restart restart-bug)
+# Without a restart budget the crash is final (the node never comes back),
+# so the recovery bug is not explorable: the -DBUG build passes vacuously.
+# This is the teeth -- it pins that RESTART is what makes recovery
+# checkable, and that a model with restarts = 0 behaves exactly as before.
+printf '[target]\nnodes = 2\n[environment]\nclient_write = 7\ncrashes = 1\nrestarts = 0\n[invariants]\nno_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1]"\n' > "$OUT/restart0.model"
+expect "restart: restarts = 0 keeps the crash final"     0 "No error has been found" --model-file "$OUT/restart0.model" --binary "$B/proc/restart-bug"
 # arithmetic evaluates with the usual precedence
 printf '[target]\nnodes = 2\n[invariants]\nt = "2 + 3 * 4 == 14 and 10 mod 3 == 1 and (1 + 1) * 2 == 4"\n' > "$OUT/q.model"
 expect "arithmetic: precedence and mod"                 0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/repl"

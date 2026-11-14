@@ -136,6 +136,16 @@ detects that it has waited long enough -- an election timeout.
 Crash budget is left: a live node dies.
 .It DROP
 Drop budget is left: the oldest message on a connection is lost.
+.It RESTART
+Restart budget is left and a node has crashed: it is relaunched as a
+fresh process.
+The surviving durable record is handed back to it, so its first read of
+descriptor 193 returns what it had made durable before the crash
+.Pq a fresh process that never crashed reads EOF there ,
+and a server that reads its own log on startup recovers.
+The new process starts with no connections and re-dials and re-listens
+as its code does; a peer that still held a connection to the crashed
+process reads EOF on it.
 .It WAKE
 A node parked in
 .Fn poll
@@ -150,7 +160,9 @@ A node's state is what it reports.
 After each change it writes a canonical encoding of its logical state,
 a length byte then the bytes, to file descriptor 3; what it has made
 durable it writes the same way to descriptor 193.
-A crash keeps only the durable encoding.
+A crash keeps only the durable encoding, and a RESTART hands that
+encoding back to the relaunched process on descriptor 193 so it can
+recover.
 The encoding must be canonical (the same logical state, the same bytes)
 and complete (everything the node's future depends on, its position in
 its own code included); anything left out lets the checker merge two
