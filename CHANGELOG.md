@@ -46,6 +46,29 @@ holds; `-DBUG` forgets to recover and the checker prints the
 `crash` then `restart` counterexample; without the budget the crash is
 final and the bug is not explorable).
 
+Model `epoll` in the process front end (Tier 3 of the davros
+evaluation, ask 9): the checker intercepts
+`epoll_create1`/`epoll_create`/`epoll_ctl`/`epoll_wait`/`epoll_pwait` with
+complete virtual-fd semantics.  An epoll instance holds a persistent
+interest list built by `epoll_ctl` (`ADD`/`MOD` capture the requested
+events and the opaque `epoll_event.data`; `DEL` removes; an unknown op is
+an error); `epoll_wait` answers local readiness (an eventfd counter, a
+requested `EPOLLOUT`) at once and otherwise defers as the same `BK_POLL`
+quiescence point `poll` uses, so the search drives the loop and epoll
+readiness never auto-delivers (M5).  When the search makes a watched fd
+ready, `epoll_wait` returns the `epoll_event.data` the loop registered
+for that fd verbatim (a `struct epoll_event`, not a `pollfd`), because
+that data is how an event loop routes to the fd's handler; the data is
+opaque (an ASLR pointer in a real loop) and stays out of the fingerprint,
+while the interest list itself goes in, canonicalised by each fd's
+semantic role.  This matters because libxtc's default Linux backend is
+epoll, so without the model the checked binary ran the loop on real
+kernel fds and the pass was a fiction.  Level-triggered only; `EPOLLET`
+(edge-triggered) is not modelled.  Example: `test/proc/epollloop.c`, the
+epoll twin of `pollloop` (the correct loop holds; `-DBUG` stores the
+wrong byte and the checker prints the counterexample naming the epoll
+wake).
+
 ## 1.2.0 (2026-11-14)
 
 Event-loop runtime support hardened from the davros evaluation: the

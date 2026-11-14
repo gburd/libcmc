@@ -7,7 +7,8 @@ quiescence point and a WAKE search action drive the poll loop without
 auto-delivering (M5); the fingerprint carries the poll set, the nonblock
 flags and the eventfd counters; and `test/proc/pollloop.c` is gated in
 `proc_gate` with a `-DBUG` the checker catches.  `epoll` (item 5) is
-deferred -- libxtc's poll backend makes it unnecessary for v1.1.0.  The
+modelled as of v1.2.x (davros eval ask 9), the epoll twin of the poll
+path, with `test/proc/epollloop.c` gated alongside `pollloop`.  The
 libxtc side and the build glue remain.
 
 ## The problem
@@ -88,11 +89,17 @@ piecemeal.
    counter and clears it (or decrements, per `EFD_SEMAPHORE`).  This
    makes the loop's self-wakeup path visible rather than passed through.
 
-5. **(Optional) `epoll_create1`/`epoll_ctl`/`epoll_wait`.**  An epoll set
-   is a registered fd list; `epoll_wait` answers readiness from the same
-   bookkeeping as `poll`, deferring as `BK_POLL` when nothing is ready.
-   Decide during implementation whether libxtc's poll backend makes this
-   unnecessary for v1.1.0; if so, defer it.
+5. **`epoll_create1`/`epoll_create`/`epoll_ctl`/`epoll_wait`/`epoll_pwait`.**
+   An epoll instance is a PERSISTENT registered fd list built by
+   `epoll_ctl` (unlike `poll`, whose set is passed afresh each call);
+   `epoll_wait` answers readiness from the same bookkeeping as `poll`,
+   deferring as `BK_POLL` when nothing is ready.  Done in v1.2.x (davros
+   eval ask 9): libxtc's default Linux backend is epoll, so the checked
+   binary is the shipped binary only with this modelled.  `epoll_wait`
+   returns the `epoll_event.data` the loop registered verbatim (the
+   handler key), so a wake writes a `struct epoll_event`, not a `pollfd`;
+   the data is opaque and stays out of the fingerprint.  Example
+   `test/proc/epollloop.c`, gated like `pollloop`.
 
 6. **Filter + dispatch.**  Add the new numbers to the `OWN(...)` list in
    the seccomp filter (~630) and a case to `try_pending_for` for each,

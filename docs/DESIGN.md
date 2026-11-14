@@ -50,7 +50,8 @@ thread's kernel id, so the checker keeps a deferred slot per thread
 rather than one per node.  It intercepts `clone`/`clone3` (to know a
 thread exists before it blocks) and `futex`: a thread parked in `futex`
 (a mutex, a condition variable, or a `pthread_join` on another thread's
-exit) is blocked, exactly like one parked in `recv` or `poll`.  The
+exit) is blocked, exactly like one parked in `recv`, `poll` or
+`epoll_wait`.  The
 world is a search state only when every thread of every node is blocked
 or has exited.  A `FUTEX_WAKE` wakes waiters only when the program
 issues one, as a step of the waking thread; the checker invents no

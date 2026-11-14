@@ -59,6 +59,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
@@ -84,8 +85,9 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MSGLEN_DEFAULT 64		/* the default per-write limit; a model raises it with [target] max_write */
 #define MAXREP 64				/* client replies recorded */
 #define MAXCONN 16				/* connections per node */
-#define MAXPOLL 16				/* pollfd entries read in one poll() */
+#define MAXPOLL 16				/* pollfd entries read in one poll() / epoll interest list */
 #define MAXEFD 8				/* eventfds per node */
+#define MAXEPOLL 4				/* epoll instances per node */
 #define LULL_MS 10000			/* a running node silent this long is an error */
 #define SNAP 64					/* canonical state bytes per node */
 /* The durable canonical-emit stream.  fd 3 is the volatile stream; the
@@ -550,6 +552,21 @@ check_invariant(const char *expr)
 /* per-node process + the inter-node network                           */
 /* =================================================================== */
 #define MAXTHREAD 8				/* threads tracked per node (tid slots) */
+#define MAXEPITEM 16			/* fds in one epoll instance's interest list */
+
+/* An epoll instance (epoll_create1).  Unlike poll(), whose fd set is
+ * passed afresh on every call, an epoll instance holds a PERSISTENT
+ * interest list built by epoll_ctl: each entry is a watched fd, the
+ * events requested for it, and the opaque user data the loop stored
+ * (epoll_event.data).  epoll_wait returns that data verbatim for a ready
+ * fd -- it is how an event loop finds the handler for the fd -- so the
+ * checker stores it and writes it back unchanged; it is never a search
+ * distinction (an ASLR pointer must not leak into the fingerprint). */
+typedef struct {
+	int epfd;					/* the virtual fd epoll_create1 returned */
+	int nit;					/* entries in the interest list */
+	int fd[MAXEPITEM]; short events[MAXEPITEM]; uint64_t data[MAXEPITEM];
+} Epoll;
 
 /* A per-thread deferred slot.  A node is one process with up to MAXTHREAD
  * threads; each thread has its own blocking point, keyed by its kernel
@@ -566,6 +583,13 @@ typedef struct {
 	 * events, and the address of the caller's pollfd array to write
 	 * revents back into when the search makes one ready */
 	int pollfd_n; int pollfds[MAXPOLL]; short pollevents[MAXPOLL]; uint64_t block_pollarr;
+	/* BK_POLL via epoll_wait: epoll_fd is the epoll instance's epfd (-1 if
+	 * this park is an ordinary poll()).  When set, a wake writes a
+	 * `struct epoll_event` (with the fd's registered data) back to
+	 * block_pollarr, not a pollfd array, and answers with the ready count
+	 * capped at poll_maxevents.  polldata[k] is the user data the loop
+	 * registered for pollfds[k] (epoll_event.data), returned verbatim. */
+	int epoll_fd; int poll_maxevents; uint64_t polldata[MAXPOLL];
 	int poll_woke_fd;			/* -1, or the channel fd a poll wake marked ready: its next read delivers (not EAGAIN) */
 	uint64_t futex_addr;		/* BK_FUTEX: the futex word this thread waits on */
 	int woken;					/* a FUTEX_WAKE marked this BK_FUTEX thread runnable; it is released (its futex answered) only once every other thread of the node is parked, so threads run one at a time and the kernel's atomic futex semantics are never torn by concurrent execution */
@@ -580,6 +604,7 @@ typedef struct {
 	int listener_fd;			/* the fd passed to listen(), or -1; the server's accept fd */
 	int pend[MAXCONN]; int npend;	/* connectors queued at this node's listener */
 	int efd[MAXEFD]; uint64_t efdval[MAXEFD]; int efdnb[MAXEFD]; int nefd;
+	Epoll ep[MAXEPOLL]; int nep;	/* epoll instances: a persistent interest list per epfd */
 	Thread th[MAXTHREAD]; int nth;	/* per-thread deferred slots, keyed by tid */
 	int th_pending;				/* threads cloned but not yet seen (a birth in flight): the node is not quiescent while any is outstanding */
 	uint64_t pending_ctid[MAXTHREAD]; int npending_ctid;	/* CLONE_CHILD_CLEARTID words of births in flight, FIFO; handed to each newborn's slot on first sight */
@@ -615,7 +640,7 @@ th_for(Node *nd, pid_t tid)
 	if (slot < 0) { if (nd->nth >= MAXTHREAD) return NULL; slot = nd->nth++; }
 	Thread *t = &nd->th[slot];
 	memset(t, 0, sizeof *t);
-	t->inuse = 1; t->tid = tid; t->poll_woke_fd = -1;
+	t->inuse = 1; t->tid = tid; t->poll_woke_fd = -1; t->epoll_fd = -1;
 	if (nd->th_pending > 0)
 	{
 		/* this tid is a newborn whose clone we saw: take its clear-tid
@@ -734,6 +759,8 @@ install_filter(void)
 		OWN(SYS_clock_gettime), OWN(SYS_gettimeofday), OWN(SYS_getrandom),
 		OWN(SYS_close),
 		OWN(SYS_poll), OWN(SYS_ppoll), OWN(SYS_fcntl), OWN(SYS_eventfd2),
+		OWN(SYS_epoll_create1), OWN(SYS_epoll_create), OWN(SYS_epoll_ctl),
+		OWN(SYS_epoll_wait), OWN(SYS_epoll_pwait),
 		OWN(SYS_clone), OWN(SYS_clone3), OWN(SYS_futex), OWN(SYS_exit),
 #undef OWN
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
@@ -798,7 +825,7 @@ launch(Node *nd)
 	{ int fl = fcntl(nd->listener, F_GETFL); fcntl(nd->listener, F_SETFL, fl | O_NONBLOCK); }
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
-	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0;
+	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
 	nd->nth = 0; nd->th_pending = 0; nd->npending_ctid = 0; memset(nd->th, 0, sizeof nd->th);
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
 	return 0;
@@ -879,6 +906,15 @@ cfd_slot(Node *nd, int fd)
 {
 	for (int i = 0; i < nd->nc; i++)
 		if (nd->cfd[i] == fd) return i;
+	return -1;
+}
+
+/* the epoll-instance slot index for an epfd on this node, or -1 */
+static int
+ep_slot(Node *nd, int epfd)
+{
+	for (int i = 0; i < nd->nep; i++)
+		if (nd->ep[i].epfd == epfd) return i;
 	return -1;
 }
 
@@ -1126,6 +1162,105 @@ try_pending_for(Node *nd)
 			nd->efd[nd->nefd] = fd; nd->efdval[nd->nefd] = a[0]; nd->efdnb[nd->nefd] = 0; nd->nefd++;
 			g_resp->val = fd; break;
 		}
+		case SYS_epoll_create1: case SYS_epoll_create:
+		{
+			/* a virtual epoll instance: next_fd with an empty interest list.
+			 * epoll_create's size hint (a[0]) is ignored, as the kernel
+			 * ignores it; epoll_create1's flags (EPOLL_CLOEXEC) are inert in
+			 * the model, as FD_CLOEXEC is (a node never execs). */
+			if (nd->nep >= MAXEPOLL) die(1, "node %d opens more than %d epoll instances", nd->id, MAXEPOLL);
+			int fd = nd->next_fd++;
+			Epoll *e = &nd->ep[nd->nep++];
+			e->epfd = fd; e->nit = 0;
+			g_resp->val = fd; break;
+		}
+		case SYS_epoll_ctl:
+		{
+			/* maintain an instance's persistent interest list.  ADD/MOD read
+			 * the caller's struct epoll_event to capture the requested events
+			 * and the opaque user data (epoll_event.data, 8 bytes) epoll_wait
+			 * must return verbatim; DEL drops the fd.  An unknown op has no
+			 * model, so it is an error, never a silent pass. */
+			int epfd = (int) a[0]; int op = (int) a[1]; int fd = (int) a[2];
+			int eps = ep_slot(nd, epfd);
+			if (eps < 0) die(1, "node %d: epoll_ctl on fd %d, which is no epoll instance", nd->id, epfd);
+			Epoll *e = &nd->ep[eps];
+			/* struct epoll_event is packed on x86-64: 4-byte events then an
+			 * 8-byte data union, 12 bytes with no padding */
+			struct __attribute__((packed)) { uint32_t events; uint64_t data; } ev;
+			int at = -1;
+			for (int i = 0; i < e->nit; i++) if (e->fd[i] == fd) { at = i; break; }
+			if (op == EPOLL_CTL_ADD)
+			{
+				if (at >= 0) { g_resp->error = -EEXIST; g_resp->val = 0; break; }
+				if (e->nit >= MAXEPITEM) die(1, "node %d: epoll instance watches more than %d fds", nd->id, MAXEPITEM);
+				cr_read(nd->pid, a[3], &ev, sizeof ev);
+				e->fd[e->nit] = fd; e->events[e->nit] = (short) ev.events; e->data[e->nit] = ev.data; e->nit++;
+				g_resp->val = 0; break;
+			}
+			if (op == EPOLL_CTL_MOD)
+			{
+				if (at < 0) { g_resp->error = -ENOENT; g_resp->val = 0; break; }
+				cr_read(nd->pid, a[3], &ev, sizeof ev);
+				e->events[at] = (short) ev.events; e->data[at] = ev.data;
+				g_resp->val = 0; break;
+			}
+			if (op == EPOLL_CTL_DEL)
+			{
+				if (at < 0) { g_resp->error = -ENOENT; g_resp->val = 0; break; }
+				e->nit--;
+				for (int j = at; j < e->nit; j++) { e->fd[j] = e->fd[j + 1]; e->events[j] = e->events[j + 1]; e->data[j] = e->data[j + 1]; }
+				g_resp->val = 0; break;
+			}
+			die(1, "node %d: epoll_ctl op %d has no model (only ADD/MOD/DEL)", nd->id, op);
+			break;
+		}
+		case SYS_epoll_wait: case SYS_epoll_pwait:
+		{
+			/* epoll's poll(): a readiness query over the instance's PERSISTENT
+			 * interest list.  Local readiness (an eventfd counter, or a
+			 * requested EPOLLOUT) is answered here by writing ready
+			 * struct epoll_event entries back (with the stored user data); a
+			 * channel or listener fd's readiness is a search decision, so if
+			 * nothing is locally ready and the call blocks the node DEFERS as
+			 * BK_POLL and the search wakes it (deliver/accept/timeout),
+			 * exactly as for poll().  The interest list is copied into the
+			 * thread's poll slot so poll_wake and enum_actions handle it with
+			 * one code path. */
+			int epfd = (int) a[0]; uint64_t arr = a[1]; int maxevents = (int) a[2];
+			int eps = ep_slot(nd, epfd);
+			if (eps < 0) die(1, "node %d: epoll_wait on fd %d, which is no epoll instance", nd->id, epfd);
+			if (maxevents <= 0) die(1, "node %d: epoll_wait maxevents is %d (must be > 0)", nd->id, maxevents);
+			Epoll *e = &nd->ep[eps];
+			if (e->nit > MAXPOLL) die(1, "node %d: epoll instance watches %d fds; the limit is %d", nd->id, e->nit, MAXPOLL);
+			/* epoll_wait's timeout is a[3] (ms); epoll_pwait's too (a[4] is the
+			 * sigmask).  A 0 timeout returns at once with whatever is ready. */
+			int zero_timeout = (a[3] == 0);
+			struct __attribute__((packed)) { uint32_t events; uint64_t data; } out[MAXPOLL];
+			int ready = 0;
+			for (int i = 0; i < e->nit && ready < maxevents; i++)
+			{
+				int fd = e->fd[i]; int es = efd_slot(nd, fd);
+				if (e->events[i] & EPOLLOUT)
+				{ out[ready].events = EPOLLOUT; out[ready].data = e->data[i]; ready++; continue; }
+				if (es >= 0 && nd->efdval[es] > 0 && (e->events[i] & EPOLLIN))
+				{ out[ready].events = EPOLLIN; out[ready].data = e->data[i]; ready++; }
+			}
+			if (ready > 0 || zero_timeout)
+			{
+				if (ready > 0) cr_write(nd->pid, arr, out, (size_t) ready * sizeof out[0]);
+				g_resp->val = ready; break;
+			}
+			/* nothing locally ready and the call blocks: a quiescence point,
+			 * recorded in the poll slot, but flagged as an epoll_wait so the
+			 * wake writes a struct epoll_event (with the stored data) back. */
+			th->block_kind = BK_POLL; th->block_id = g_req->id;
+			th->block_pollarr = arr; th->pollfd_n = e->nit;
+			th->epoll_fd = epfd; th->poll_maxevents = maxevents;
+			for (int i = 0; i < e->nit; i++)
+			{ th->pollfds[i] = e->fd[i]; th->pollevents[i] = e->events[i]; th->polldata[i] = e->data[i]; }
+			return 1;				/* do NOT answer */
+		}
 		case SYS_poll: case SYS_ppoll:
 		{
 			/* readiness query.  Local readiness (an eventfd counter, or a
@@ -1160,7 +1295,7 @@ try_pending_for(Node *nd)
 			 * point.  Record the polled fds so the search can mark one
 			 * ready and answer the poll. */
 			th->block_kind = BK_POLL; th->block_id = g_req->id;
-			th->block_pollarr = arr; th->pollfd_n = nfds;
+			th->block_pollarr = arr; th->pollfd_n = nfds; th->epoll_fd = -1;
 			for (int i = 0; i < nfds; i++) { th->pollfds[i] = pfs[i].fd; th->pollevents[i] = pfs[i].events; }
 			return 1;				/* do NOT answer */
 		}
@@ -1553,7 +1688,10 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 		{
 			/* the polled set as semantic classes, as the single-slot code
 			 * did: (events, class, which) per fd, so two differently
-			 * polling threads stay distinct without raw fd numbers */
+			 * polling threads stay distinct without raw fd numbers.  A leading
+			 * flag marks an epoll_wait park apart from a poll() one, so the
+			 * two parking modes never merge in the fingerprint. */
+			r[p++] = (unsigned char) (th->epoll_fd >= 0 ? 1 : 0);
 			r[p++] = (unsigned char) th->pollfd_n;
 			for (int k = 0; k < th->pollfd_n && p + 3 <= THREC; k++)
 			{
@@ -1618,6 +1756,31 @@ world_fp(uint64_t fp[2])
 		for (int k = 0; N[i].alive && k < N[i].nefd; k++)
 			for (int b = 0; b < 8; b++) PUT(N[i].efdval[k] >> (8 * b));
 		PUT(N[i].ls_nonblock);
+		/* epoll instances: each one's interest list, canonicalised to
+		 * (requested events, fd's semantic class, which peer/eventfd), the
+		 * same way a polled set is.  The watched fd's identity is its role,
+		 * never a raw fd number, and the user data is deliberately left out:
+		 * it is opaque (an ASLR pointer in a real loop), only ever written
+		 * back to the node, never a search distinction, so fingerprinting it
+		 * would wrongly split identical futures.  Which fds an instance
+		 * watches IS the future (it decides what epoll_wait can report), so
+		 * it goes in. */
+		PUT(N[i].alive ? N[i].nep : 0);
+		for (int e = 0; N[i].alive && e < N[i].nep; e++)
+		{
+			const Epoll *ep = &N[i].ep[e];
+			PUT(ep->nit);
+			for (int k = 0; k < ep->nit; k++)
+			{
+				int fd = ep->fd[k];
+				int cs = cfd_slot(&N[i], fd), es = efd_slot(&N[i], fd);
+				PUT(ep->events[k]);
+				if (cs >= 0) { PUT(1); PUT(N[i].cpeer[cs] + 2); }
+				else if (es >= 0) { PUT(2); PUT(es); }
+				else if (fd == N[i].listener_fd) { PUT(3); PUT(0); }
+				else { PUT(4); PUT(0); }
+			}
+		}
 	}
 	/* channel by channel, each in the order it is delivered */
 	for (int s = -1; s < M.nodes; s++)
@@ -1789,15 +1952,19 @@ enum_actions(Act *out)
 	return c;
 }
 
-/* Wake a thread parked in poll(): write POLLIN into one polled fd's
- * revents and answer the poll with count 1, consuming no message.  target
- * names the fd: a peer id (a channel), POLL_LISTENER (the listener), or
- * POLL_LISTENER-1-slot (an eventfd slot).  The thread then reads/accepts
- * that fd and defers again, which the search services. */
+/* Wake a thread parked in poll() or epoll_wait(): mark one watched fd
+ * ready (POLLIN/EPOLLIN) and answer the call with count 1, consuming no
+ * message.  target names the fd: a peer id (a channel), POLL_LISTENER
+ * (the listener), or POLL_LISTENER-1-slot (an eventfd slot).  The thread
+ * then reads/accepts that fd and defers again, which the search
+ * services.  A poll() park has its pollfd array updated in place; an
+ * epoll_wait park (epoll_fd >= 0) instead gets a single struct
+ * epoll_event written back, carrying the user data the loop registered
+ * for the ready fd -- that data is how the loop routes to the fd's
+ * handler, so it is returned verbatim. */
 static void
 poll_wake(Node *nd, Thread *th, int target)
 {
-	struct pollfd pfs[MAXPOLL];
 	int hit = -1;
 	for (int k = 0; k < th->pollfd_n; k++)
 	{
@@ -1807,12 +1974,28 @@ poll_wake(Node *nd, Thread *th, int target)
 			: (target >= -1) ? (cs >= 0 && nd->cpeer[cs] == target)
 			: (target == POLL_LISTENER) ? (fd == nd->listener_fd)
 			: (es >= 0 && es == (POLL_LISTENER - 1 - target));
-		pfs[k].fd = fd; pfs[k].events = th->pollevents[k];
-		pfs[k].revents = (match && hit < 0) ? (short) (th->pollevents[k] & POLLIN) : 0;
 		if (match && hit < 0) hit = k;
 	}
 	if (hit < 0) die(1, "poll wake on node %d found no polled fd for target %d", nd->id, target);
-	cr_write(nd->pid, th->block_pollarr, pfs, (size_t) th->pollfd_n * sizeof pfs[0]);
+	if (th->epoll_fd >= 0)
+	{
+		/* return one ready struct epoll_event (packed on x86-64) carrying
+		 * the fd's stored user data */
+		struct __attribute__((packed)) { uint32_t events; uint64_t data; } ev;
+		ev.events = (th->pollevents[hit] & POLLIN) ? EPOLLIN : 0;
+		ev.data = th->polldata[hit];
+		cr_write(nd->pid, th->block_pollarr, &ev, sizeof ev);
+	}
+	else
+	{
+		struct pollfd pfs[MAXPOLL];
+		for (int k = 0; k < th->pollfd_n; k++)
+		{
+			pfs[k].fd = th->pollfds[k]; pfs[k].events = th->pollevents[k];
+			pfs[k].revents = (k == hit) ? (short) (th->pollevents[k] & POLLIN) : 0;
+		}
+		cr_write(nd->pid, th->block_pollarr, pfs, (size_t) th->pollfd_n * sizeof pfs[0]);
+	}
 	/* a woken channel's next read must deliver, not return EAGAIN; a timer
 	 * wake is serviced by the timer-'T' read path, not a message */
 	th->poll_woke_fd = (target >= -1) ? th->pollfds[hit] : -1;

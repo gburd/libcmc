@@ -47,6 +47,9 @@ The checker answers every
 .Fn close ,
 .Fn poll
 .Pf ( Fn ppoll ) ,
+.Fn epoll_wait
+.Pf ( Fn epoll_create1 ,
+.Fn epoll_ctl ) ,
 .Fn fcntl
 and
 .Fn eventfd
@@ -86,6 +89,17 @@ and a non-zero
 .Fn eventfd
 answer at once, but a connection or listener is ready only when the
 search says so, exactly as a deferred read is.
+.Fn epoll_wait
+is the same readiness query over an epoll instance's persistent interest
+list (built by
+.Fn epoll_ctl ) ,
+and returns the
+.Vt epoll_event
+data the loop registered for a ready fd so it can route to the fd's
+handler.
+The model is level-triggered;
+.Dv EPOLLET
+is not modelled.
 .Pp
 A node may run more than one thread.
 The checker intercepts
@@ -149,11 +163,13 @@ process reads EOF on it.
 .It WAKE
 A node parked in
 .Fn poll
-is told one polled fd is ready.
+or
+.Fn epoll_wait
+is told one watched fd is ready.
 It takes no message: the node then
 .Fn accept Ns s
 or reads that fd and blocks again, which ACCEPT, DELIVER or TIMEOUT
-services, so poll readiness stays a search decision.
+services, so readiness stays a search decision.
 .El
 .Pp
 A node's state is what it reports.
@@ -180,10 +196,13 @@ The world is every node's state, liveness and what it is blocked in,
 its open connections with each one's
 .Dv O_NONBLOCK
 flag, the polled fd set of a node parked in
-.Fn poll ,
+.Fn poll
+or
+.Fn epoll_wait ,
 every
 .Fn eventfd
-counter, every connection's messages in order, the connections waiting
+counter, every epoll instance's interest list, every connection's
+messages in order, the connections waiting
 to be accepted, the ghost log of client replies, the budgets left and
 the logical clock.
 Its 128-bit fingerprint dedups states.

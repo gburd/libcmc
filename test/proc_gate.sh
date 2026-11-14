@@ -34,6 +34,10 @@ done
 for f in repl elect lease durlog quorum pollloop; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
+# epoll backend (davros eval ask 9): an event loop built on epoll, with a
+# correct and a -DBUG build, the epoll twin of pollloop
+$CC -O1 -no-pie -w -o "$B/proc/epollloop" "$T/epollloop.c" || { echo "proc_gate: epollloop.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/epollloop-bug" "$T/epollloop.c" || { echo "proc_gate: epollloop.c -DBUG does not build"; fail=1; }
 # restart (Tier 3 ask 6): crash-and-recover, so it needs both builds
 $CC -O1 -no-pie -w -o "$B/proc/restart" "$T/restart.c" || { echo "proc_gate: restart.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/restart-bug" "$T/restart.c" || { echo "proc_gate: restart.c -DBUG does not build"; fail=1; }
@@ -220,6 +224,18 @@ echo "-- async I/O: poll/fcntl/eventfd event loop"
 expect "pollloop: correct event loop holds"            0 "No error has been found" $(run pollloop pollloop)
 expect "pollloop: a wrong stored byte is caught"       1 "stored_ok is violated" $(run pollloop pollloop-bug)
 expect "pollloop: the counterexample names the wake"   1 "wake n1 listener" $(run pollloop pollloop-bug)
+# epoll backend (davros eval ask 9): the epoll twin of pollloop.  libxtc's
+# default Linux backend is epoll, so the shipped binary parks in
+# epoll_wait over a persistent interest list, not poll().  The search
+# drives it the same way (wake the listener, accept, wake the connection,
+# deliver), and epoll_wait returns the epoll_event.data the loop
+# registered so the server routes the ready fd.  Readiness is a search
+# decision (M5), never automatic.  The correct build stores the byte it
+# read; the -DBUG build stores a fixed wrong byte, which the invariant
+# catches, naming the epoll wake in the trace.
+expect "epollloop: correct epoll loop holds"           0 "No error has been found" $(run epollloop epollloop)
+expect "epollloop: a wrong stored byte is caught"      1 "stored_ok is violated" $(run epollloop epollloop-bug)
+expect "epollloop: the counterexample names the wake"  1 "wake n1 listener" $(run epollloop epollloop-bug)
 # no-progress detection (davros eval ask 4): a safety-only model must not
 # pass a program that never advances past its initial state.  The correct
 # build progresses and holds; the -DNEGFD build only ever polls an

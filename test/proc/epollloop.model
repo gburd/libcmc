@@ -1,0 +1,20 @@
+# test/proc/epollloop.model: the epoll backend example (davros eval ask
+# 9).  Node 0 connects to node 1 and sends one byte ('x' = 120); node 1
+# stores it via an epoll event loop (epoll_create1/epoll_ctl/epoll_wait
+# on virtual fds).  The search drives the loop: it wakes epoll_wait on
+# the listener, services the accept, wakes epoll_wait on the connection,
+# then delivers the request byte, exactly as it drives the poll loop --
+# epoll readiness never auto-delivers (M5).  epoll_wait returns the
+# epoll_event.data the loop registered, so the server finds the ready fd.
+[target]
+nodes = 2
+
+[invariants]
+# once node 1 has received a request byte (recvd == 1), the byte it
+# stored is the one node 0 sent ('x' = 120).  The -DBUG build stores a
+# fixed 0 instead, so recvd == 1 with req != 120, which this catches.
+stored_ok = "node[1].recvd == 0 or node[1].req == 120"
+
+[fields]
+recvd = 0
+req = 1
