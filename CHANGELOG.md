@@ -5,6 +5,33 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+Process front end (`cmc --model-file`):
+
+- A drop models a connection reset, not a lost byte.  TCP never loses a
+  byte from a live stream, so losing one message from the middle of a
+  channel was a counterexample the network cannot produce.  A drop now
+  discards every queued message on the connection in both directions and
+  both ends read EOF (as after `ECONNRESET`); a write into a reset
+  connection reaches no one.  The reset set is part of the fingerprint.
+  `test/proc/reset.model` is the regression guard: with the old silent
+  loss it reported a spurious violation, with the reset it holds.
+- `time()` and the aligned allocators (`posix_memalign`, `aligned_alloc`,
+  `memalign`) go through the preload.  A target that seeded from
+  `time(NULL)` read the real wall clock, and an aligned buffer came from
+  glibc's ASLR'd heap, either of which broke replay determinism.  `time()`
+  now reads the logical clock and the aligned allocators carve from the
+  fixed-address arena.  `CMC_ARENA_MB` sets the arena size in MiB
+  (default 64) for a larger target.
+- The checker sets `CMC_STATE_FD` (the volatile fd, 3) and
+  `CMC_DURABLE_FD` (the durable fd, 193) for every node, so a program
+  that keeps its state hook in the build it ships can guard every emit on
+  `CMC_STATE_FD` and never write a stray descriptor outside a check.
+- `test/proc/guarded.c` exercises the guarded hook and the preload's
+  determinism; it is gated in `proc_gate`.
+- cmc(1), cmc(7) and the model-file guide describe the process front
+  end's drop (a reset), crash (final, no restart yet) and determinism
+  contract accurately.
+
 ## 1.1.0 (2026-11-13)
 
 Async-I/O support for event-loop runtimes, so a program that waits in

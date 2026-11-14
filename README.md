@@ -86,13 +86,19 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 0.2.0, 2026-11-09: `cmc --model-file` checks the shipped binary,
-with single-decree Paxos and Raft leader election as worked examples.
-Single-threaded.  Process mode replays every state from a fresh launch,
-about 300 replays a second: single-decree Paxos with five processes,
-one crash and one drop is 30,075 states in about four minutes.  Its
-history and measurements are in `experiments/process-mode/DESIGN.md`
-and `docs/measurements/`.
+Release 1.1.0.  `cmc --model-file` checks the shipped binary as it runs,
+under seccomp, with the network, timeouts, crashes and connection resets
+as search decisions.  Blocking sockets and the readiness vocabulary an
+event loop uses (`poll`/`ppoll`, `fcntl` for `O_NONBLOCK`, `eventfd`) are
+all modelled; single-decree Paxos, Raft leader election and a replicated
+log, HummingConsensus and ZAB ship as worked examples.  Single-threaded.
+Process mode replays every state from a fresh launch, so the rate scales
+with how much the program does per launch: the small fixtures run several
+hundred replays a second (HummingConsensus with three processes, three
+timeouts and one drop is 11,545 distinct states in about 50 seconds, 555
+replays a second, on the CI box).  The abstract engine (`cmc --model`,
+`.cml` specs checked against TLC and Apalache) is faster.  History and
+measurements are in `docs/measurements/`.
 
 ## CI
 
