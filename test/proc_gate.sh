@@ -28,7 +28,7 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 for f in repl elect lease durlog quorum pollloop; do
@@ -136,6 +136,11 @@ printf '[target]\nnodes = 2\n[environment]\ntimeouts = 1\n[invariants]\nwrong_cl
 expect "clocks teeth: gettimeofday is the logical clock" 1 "wrong_clock is violated" --model-file "$OUT/clk-wrong.model" --binary "$B/proc/clocks"
 printf '[target]\nnodes = 2\n[environment]\ntimeouts = 1\n[invariants]\nwrong_random = "node[0][1] != 0"\n' > "$OUT/rnd-wrong.model"
 expect "clocks teeth: getrandom is engine-zeroed"      1 "wrong_random is violated" --model-file "$OUT/rnd-wrong.model" --binary "$B/proc/clocks"
+# ask 11/12: a binary that keeps its state hook but guards it on
+# CMC_STATE_FD, and allocates with time()/posix_memalign through the
+# preload, checks and holds -- the state fd is set per node and the
+# preload keeps time() and the aligned allocators deterministic.
+expect "guarded hook + time()/posix_memalign are deterministic" 0 "No error has been found" $(run guarded guarded)
 expect "a depth bound is INCOMPLETE"       2 "depth bound" $(run durlog durlog-bug) --depth 2
 expect "a state bound is INCOMPLETE"       2 "max states" $(runx "$HERE/examples/paxos/paxos.model" paxos) --max-states 10
 expect "an over-long write is an error"    1 "limit is 64" $(run bigmsg bigmsg)

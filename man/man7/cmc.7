@@ -132,6 +132,14 @@ The encoding must be canonical (the same logical state, the same bytes)
 and complete (everything the node's future depends on, its position in
 its own code included); anything left out lets the checker merge two
 states that differ, and miss a bug.
+The checker sets
+.Ev CMC_STATE_FD
+(the volatile fd, 3) and
+.Ev CMC_DURABLE_FD
+(the durable fd, 193) for every node, so a program that keeps the hook
+in its production build emits only when
+.Ev CMC_STATE_FD
+is set and never writes a stray descriptor 3 outside a check.
 .Pp
 The world is every node's state, liveness and what it is blocked in,
 its open connections with each one's

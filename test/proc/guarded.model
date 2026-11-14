@@ -1,0 +1,13 @@
+# test/proc/guarded.c: the state hook is guarded on CMC_STATE_FD (ask 12)
+# and the binary exercises the preload's time()/posix_memalign overrides
+# (ask 11), so the same shippable binary is checkable and deterministic.
+#
+#   cc -O1 -no-pie -o guarded test/proc/guarded.c
+#   cmc --model-file test/proc/guarded.model --binary ./guarded
+[target]
+nodes = 2
+[environment]
+client_write = 7     # the client sends WRITE(7) to node 0
+[invariants]
+# once the client is acked a value, the backup (node 1) holds it
+agree_on_ack = "all r in replies : r.val in node[1]"

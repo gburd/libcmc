@@ -681,6 +681,16 @@ launch(Node *nd)
 		setenv("LD_PRELOAD", preload_path, 1);
 		dup2(nd->fd3[1], 3); close(nd->fd3[0]); close(nd->fd3[1]);
 		dup2(nd->fd4[1], DURABLE_FD); close(nd->fd4[0]); close(nd->fd4[1]);
+		/* Tell the node it runs under the checker, and on which fd to emit
+		 * its canonical state.  A program that keeps the state hook in its
+		 * production build guards every emit on getenv("CMC_STATE_FD"), so
+		 * it never writes to a random fd 3 (or fd 193) outside a check.
+		 * The value is the volatile fd; the durable fd is CMC_DURABLE_FD. */
+		{
+			char fdbuf[8];
+			snprintf(fdbuf, sizeof fdbuf, "%d", 3); setenv("CMC_STATE_FD", fdbuf, 1);
+			snprintf(fdbuf, sizeof fdbuf, "%d", DURABLE_FD); setenv("CMC_DURABLE_FD", fdbuf, 1);
+		}
 		int lf = install_filter(); if (lf < 0) _exit(2);
 		char cb[CMSG_SPACE(sizeof(int))] = {0}; char d = 'L';
 		struct iovec iov = {&d, 1}; struct msghdr mh = {0};

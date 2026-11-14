@@ -114,6 +114,41 @@ report(int fd, const unsigned char *state, unsigned char n)
 }
 ```
 
+### Guarding the hook in a production build
+
+Descriptors 3 and 193 are the checker's; in production they are whatever
+the program happens to have open there.  A build that keeps the hook so
+the same binary can be checked must therefore emit **only under the
+checker**.  The checker sets `CMC_STATE_FD` for every node (its value is
+the volatile fd, 3; the durable fd is in `CMC_DURABLE_FD`, 193), so the
+hook guards on it:
+
+```c
+const char *sf = getenv("CMC_STATE_FD");
+if (sf)
+    report(atoi(sf), state, n);          /* volatile, fd 3 */
+const char *df = getenv("CMC_DURABLE_FD");
+if (df)
+    report(atoi(df), durable, dn);       /* durable, fd 193 */
+```
+
+Outside a check `CMC_STATE_FD` is unset and the hook writes nothing, so
+the binary is safe to ship.  A fixture built only for checking may skip
+the guard and write fd 3 directly.
+
+### Determinism: the preload
+
+Every node runs under `cmc-preload.so`, which makes its run a pure
+function of the actions the checker chose.  `malloc` and the aligned
+allocators (`posix_memalign`, `aligned_alloc`, `memalign`) carve from a
+fixed-address arena, so an allocation lands at the same address every
+run; `clock_gettime`, `gettimeofday` and `time` read the logical clock
+(it advances only when a timeout fires); `getrandom` returns a fixed
+pattern.  A target that reads the wall clock or an ASLR'd heap address
+would break replay; routed through the preload, it does not.  The arena
+is 64 MiB by default; set `CMC_ARENA_MB` to the size in MiB a larger
+target needs.
+
 The encoding must be **canonical**, the same logical state always
 producing the same bytes (sort sets, leave out addresses), and
 **complete**: every byte the node's future depends on, its position in

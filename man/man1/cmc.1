@@ -393,6 +393,20 @@ A program of your own that calls
 .Fn cmc_main
 must set it.
 A node it did not load into is an error.
+.It Ev CMC_ARENA_MB
+The size, in MiB, of the preload's deterministic arena.
+Default 64; raise it for a target that allocates more.
+A value out of range falls back to the default.
+.It Ev CMC_STATE_FD , Ev CMC_DURABLE_FD
+Set by the checker for each node to the volatile
+.Pq 3
+and durable
+.Pq 193
+state-hook descriptors.
+A program that keeps its state hook in the build it ships guards every
+emit on
+.Ev CMC_STATE_FD
+so it writes nothing outside a check.
 .El
 .Sh FILES
 .Bl -tag -width Ds
