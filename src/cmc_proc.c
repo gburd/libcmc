@@ -79,6 +79,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MAXNODES 8
 #define MAXMSG 128				/* messages in flight, total */
 #define MSGLEN 4096			/* hard cap on a message body / write; [target] max_write bounds a model within it */
+#define MSGLEN_DEFAULT 64		/* the default per-write limit; a model raises it with [target] max_write */
 #define MAXREP 64				/* client replies recorded */
 #define MAXCONN 16				/* connections per node */
 #define MAXPOLL 16				/* pollfd entries read in one poll() */
@@ -150,7 +151,7 @@ load_model(const char *path)
 
 	if (!f) { fprintf(stderr, "cmc: cannot open model file %s: %s\n", path, strerror(errno)); return -1; }
 	memset(&M, 0, sizeof M);
-	M.nodes = 1; M.client_write = -1; M.depth = -1; M.max_write = MSGLEN;
+	M.nodes = 1; M.client_write = -1; M.depth = -1; M.max_write = MSGLEN_DEFAULT;
 	while (fgets(line, sizeof line, f))
 	{
 		ln++;
