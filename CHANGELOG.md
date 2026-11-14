@@ -5,8 +5,36 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 1.2.0 (2026-11-14)
+
+Event-loop runtime support hardened from the davros evaluation: the
+process front end now models the socket setup, non-blocking accept and
+TCP reset semantics a real event loop needs, and no longer passes a
+program that never advances past its initial state.
+
 Process front end (`cmc --model-file`):
 
+- Event-loop socket setup is modelled: `fcntl` now handles `F_GETFD` and
+  `F_SETFD` (the `FD_CLOEXEC` flag, stored and returned, inert in the
+  model) instead of failing, so a runtime that sets close-on-exec on
+  every socket gets past `fcntl`.
+- `accept` on an `O_NONBLOCK` listener with nothing queued returns
+  `EAGAIN`, so an event loop that drains the backlog (accept until
+  `EAGAIN`) makes progress instead of parking on the second accept.
+- `listen` records the listener fd; the poll wake matches the listener
+  by that fd and ignores negative fds, instead of treating any polled fd
+  that is neither a connection nor an eventfd as the listener (which
+  wrongly woke a kernel self-pipe or an unused `fd -1` slot).
+- A no-progress self-loop is reported, not passed vacuously: if the
+  search is exhaustive and every invariant holds but no action ever
+  changed the world (every step was a stutter), the program never
+  advanced past its initial state, so `cmc` reports INCOMPLETE (exit 2)
+  and advises pairing the safety invariant with an `eventually` property,
+  rather than a clean pass.  `test/proc/noprogress.c` is the guard.
+- `[target] max_write` raises the per-write limit (default 64) up to a
+  4 KiB cap, for real payloads larger than a tiny control message.
+- `[target] args = ...` passes extra argv after the node id, so a target
+  that takes flags runs under `--model-file` without a wrapper.
 - A drop models a connection reset, not a lost byte.  TCP never loses a
   byte from a live stream, so losing one message from the middle of a
   channel was a counterexample the network cannot produce.  A drop now
