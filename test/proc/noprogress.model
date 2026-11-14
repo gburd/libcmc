@@ -1,0 +1,14 @@
+# test/proc/noprogress.model: a SAFETY-ONLY model for the no-progress
+# reproducer.  The invariant holds whether or not the program advances,
+# so the only thing that distinguishes a working loop from a stuck one
+# is whether the search sees any progress.  The correct build advances
+# and passes; the -DNEGFD build never progresses and cmc reports
+# INCOMPLETE (no progress) rather than a vacuous pass.
+[target]
+nodes = 2
+
+[invariants]
+stored_ok = "node[1].req == 0 or node[1].req == 120"
+
+[fields]
+req = 0
