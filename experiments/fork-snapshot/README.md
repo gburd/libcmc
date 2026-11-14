@@ -365,3 +365,150 @@ attack should bisect by making fdtest.c incrementally more like the
 engine (add a second node; add the canon pipes; restore a client-pending
 and see which addition breaks the accept re-trap) -- that will isolate
 the exact engine-state element responsible.
+
+
+## Part 7 (2026-11-16): the accept-escape ISOLATED to `read` (syscall 0) in the filter
+
+A fresh attack ran the README's recommended bisection: start from
+fdtest.c (which re-traps accept correctly after fork-resume) and make it
+incrementally more engine-like until the accept re-trap breaks.  The
+break was isolated to a single element, and it is not any of the ones the
+prior parts guessed (second node, canon pipes, restored client-pending).
+
+**The isolated cause: the seccomp USER_NOTIF filter intercepting `read`
+(x86-64 syscall number 0) breaks the fork-resumed `accept` re-trap.**
+With `read` in the filter, a fork-injected worker resumed to re-issue its
+blocked `accept` does NOT re-trap to the listener: the accept returns an
+error and the node proceeds to `read(fd=-1)` -- exactly the engine's
+`--fast` divergence.  Remove `read` from the filter (or replace it with
+any other syscall) and the same mechanic re-traps accept correctly.
+
+### The bisection (every run `timeout 30`, `pkill -9` after; quiet EC2 box,
+### Linux 7.0.0-1014-aws x86-64, ptrace_scope=1)
+
+The node is always the same: intercepted socket -> bind -> listen ->
+accept (socket answered 500, accept deferred), frozen at the accept,
+fork-injected and resumed exactly as the engine does.  Only the filter
+and the resume path vary.
+
+| probe | filter USER_NOTIF set | fork? | resume path | resumed worker raises |
+|-------|-----------------------|-------|-------------|-----------------------|
+| fdtest.c | socket,bind,listen,accept,accept4 | yes | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+| b5 | same 5 (no read) | yes | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+| b9 | +close (6, no read) | yes | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+| b11 | +write (nr 1) | yes | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+| b12 | +recvfrom (nr 45) | yes | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+| b4 | +read (nr 0) | yes | rewind rip-2 + CONT | nr=0 read(-1) (**FAIL**) |
+| b13 | +read, placed FIRST | yes | rewind rip-2 + CONT | nr=0 read(-1) (**FAIL**) |
+| b7 | +read (nr 0) | **no** | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+| b8 STRAT 0-3 | +read | yes | rewind / exact-restart / singlestep / PTRACE_SYSCALL | all nr=0 read(-1) (**FAIL**) |
+| b16 WITHREAD=1 | full engine set (26 incl read) | yes | rewind rip-2 + CONT | nr=0 read(-1) (**FAIL**) |
+| b16 WITHREAD=0 | full engine set MINUS read | yes | rewind rip-2 + CONT | **nr=43 accept (PASS)** |
+
+Reading the table:
+
+- **Presence of `read` in the filter is the single discriminator.**  Every
+  passing row lacks `read`; every failing row has it.  Adding any other
+  syscall (close, write, recvfrom) does not break it, so it is not "one
+  more intercepted syscall" or filter size.  Position is irrelevant
+  (b13: read first in the filter fails identically).
+- **It needs BOTH `read` in the filter AND the fork injection.**  b7 keeps
+  `read` in the filter but skips the fork (just INTERRUPT, rewind, CONT);
+  the accept re-traps.  So neither element alone breaks it.
+- **No register-restore or resume strategy avoids it** (b8): rewinding to
+  the syscall instruction, restoring the exact frozen registers and
+  letting the kernel's own restart re-issue accept, single-stepping once
+  first, or PTRACE_SYSCALL to the entry stop -- all four leave the accept
+  returning an error.  This confirms Part 6's "singlestep tried, no
+  change" and extends it: the problem is structural, not register tuning.
+- **It holds at engine scale** (b16): with the full 26-syscall engine
+  filter the accept fails with `read` present and passes with it removed.
+
+### The mechanism, as far as it is pinned
+
+b15 (PTRACE_SYSCALL to the resumed worker's syscall-entry stop) shows
+`orig_rax=43` -- the kernel's restart IS re-issuing accept, not read.  But
+the accept does not trap to the USER_NOTIF listener: it stops at a normal
+ptrace syscall-entry (not a notification), runs, returns -1, and the node
+moves to `read(-1)`.  So the re-issued accept's seccomp USER_NOTIF action
+is bypassed/failed for the forked worker.
+
+`seccomp_unotify(2)` documents the matching kernel behaviour: when the
+supervisor is gone (the listener no longer services the notification),
+"the kernel causes the target process's system call to fail with the
+error ENOSYS".  A single-stepped accept in b6/b10 returns exactly -38
+(ENOSYS), confirming that error path (though single-step itself disables
+the notify, so that observation is only corroborating, not the CONT-path
+mechanism).
+
+Why `read` (syscall 0) specifically triggers this listener-invalid state
+for a COW-forked worker, when no other intercepted syscall does, is a
+Linux-kernel-internal question this effort did NOT settle.  It would need
+reading the x86-64 syscall-restart path and the seccomp-notify
+per-filter listener bookkeeping to see how a forked task's restarted
+accept resolves the notification when filter index 0 is `read`.  Pinning
+that is the next step for anyone who wants to fix (rather than document)
+`--fast`.
+
+### Reproducing
+
+The committed probes map to the table rows (short labels above are the
+session names):
+
+| table row | committed source | expect |
+|-----------|------------------|--------|
+| fdtest.c | `fdtest.c` | PASS (accept) |
+| b5 | `bisect_noread_fork.c` | PASS |
+| b9 | `bisect_close_fork.c` | PASS |
+| b11 | `bisect_write_fork.c` | PASS |
+| b4 | `bisect_read_fork.c` | FAIL (read(-1)) |
+| b13 | `bisect_read_first.c` | FAIL |
+| b7 | `bisect_read_nofork.c` | PASS |
+| b16 | `bisect_engine_filter.c` (arg 1/0) | FAIL / PASS |
+
+```
+# the two decisive cases
+cc -O2 -o rf bisect_read_fork.c   && timeout 30 ./rf     # -> nr=0 read(-1)  FAIL
+cc -O2 -o nf bisect_noread_fork.c && timeout 30 ./nf     # -> nr=43 accept   PASS
+
+# engine-scale filter with read toggled (1 = include read, 0 = exclude)
+cc -O2 -o ef bisect_engine_filter.c
+timeout 30 ./ef 1        # full engine filter WITH read    -> nr=0 read(-1)  FAIL
+timeout 30 ./ef 0        # full engine filter WITHOUT read  -> nr=43 accept   PASS
+```
+
+Run every probe under `timeout 30` with `pkill -9 -f <prog>` after: the
+fork/ptrace handshake hangs without a timeout on a loaded host.
+
+### Verdict: keep `--fast` experimental; do NOT ship it
+
+Two independent reasons, either sufficient:
+
+1. **The cause is isolated but not fixed, and the fix is unknown.**  We
+   know the exact trigger (`read` in the USER_NOTIF filter + fork
+   injection) and that no resume-register strategy avoids it.  A real fix
+   needs either a kernel-level understanding of the syscall-0 restart
+   path or a redesign that does not fork-inject a task blocked in a
+   notification whose filter intercepts `read`.  The engine MUST intercept
+   `read` (it mediates every connection byte), so "just drop read from the
+   filter" is not available.  This is a bounded research step, not a
+   bounded engineering step.
+
+2. **The current engine has moved past `--fast`'s single-threaded
+   assumption.**  `m9-fast-wip`'s `--fast` snapshots one `pid` per node
+   with one saved register set (`WorldSnap.saved[MAXNODES]`).  `origin/main`
+   (baa91a6) now models a node as up to `MAXTHREAD` threads, each with its
+   own kernel tid, blocking point, and futex-wake serialisation
+   (`Thread th[MAXTHREAD]`, `BK_FUTEX`, `release_one_woken`), plus a
+   persistent per-epfd epoll interest list and `clone`/`clone3` birth
+   tracking.  A correct snapshot must now freeze and fork EVERY thread of
+   every node at a consistent point and restore the checker's per-thread
+   slots, `th_pending` births-in-flight, and the woken-futex release order
+   -- byte-identically.  Porting `--fast` onto that is a major re-port, not
+   a rebase, and it inherits the unsolved `read`-escape on top.
+
+The sound BFS replay stays the default and the oracle.  Nothing in the
+north-star milestones depends on `--fast`; only scale (G) and liveness (F)
+would benefit, and both can wait for a sound snapshot engine or a
+different acceleration (e.g. replay-prefix caching) that does not need
+fork-injection.

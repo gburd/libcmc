@@ -1,3 +1,12 @@
 probe
 refork
 chain
+bisect_close_fork
+bisect_engine_filter
+bisect_noread_fork
+bisect_read_first
+bisect_read_fork
+bisect_read_nofork
+bisect_write_fork
+fdtest
+acctest
