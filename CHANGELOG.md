@@ -5,6 +5,15 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 1.3.0 (2026-11-14)
+
+Tier 3 of the davros evaluation: the process front end now models the
+runtime machinery a production event-loop server actually uses, so it
+can be checked as it ships.  A node may run multiple threads
+(`clone`/`futex`, with a search-driven schedule); a crashed node can be
+relaunched (a budgeted RESTART with durable recovery); and `epoll` (not
+just `poll`) is modelled, which is libxtc's default Linux backend.
+
 Per-thread scheduling in the process front end (`cmc --model-file`,
 Tier 3 of the davros evaluation): a node may now run more than one
 thread.  The checker intercepts `clone`/`clone3` and `futex`, keeps a
