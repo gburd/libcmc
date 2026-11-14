@@ -1612,11 +1612,11 @@ report_refine(const int *seq, int len)
 
 /* the BFS frontier: action sequences, appended in one growing pool */
 static int *qpool; static size_t qcap, qused;
-typedef struct { size_t off; int len; } QEnt;
+typedef struct { size_t off; int len; uint64_t pfp0, pfp1; } QEnt;
 static QEnt *Q; static size_t Qcap, qh, qt;
 
 static void
-q_push(const int *seq, int len, int next)
+q_push(const int *seq, int len, int next, uint64_t pfp0, uint64_t pfp1)
 {
 	if (qt == Qcap) { Qcap = Qcap ? 2 * Qcap : 4096; Q = realloc(Q, Qcap * sizeof *Q); if (!Q) die(1, "out of memory for the frontier"); }
 	if (qused + (size_t) len + 1 > qcap)
@@ -1624,7 +1624,7 @@ q_push(const int *seq, int len, int next)
 		while (qused + (size_t) len + 1 > qcap) qcap = qcap ? 2 * qcap : 65536;
 		qpool = realloc(qpool, qcap * sizeof *qpool); if (!qpool) die(1, "out of memory for the frontier");
 	}
-	Q[qt].off = qused; Q[qt].len = len + 1; qt++;
+	Q[qt].off = qused; Q[qt].len = len + 1; Q[qt].pfp0 = pfp0; Q[qt].pfp1 = pfp1; qt++;
 	if (len) memcpy(qpool + qused, seq, (size_t) len * sizeof *seq);
 	qpool[qused + (size_t) len] = next;
 	qused += (size_t) len + 1;
@@ -1672,7 +1672,7 @@ q_root(void)
 {
 	Q = malloc(4096 * sizeof *Q); Qcap = 4096;
 	if (!Q) die(1, "out of memory for the frontier");
-	Q[0].off = 0; Q[0].len = 0; qt = 1;
+	Q[0].off = 0; Q[0].len = 0; Q[0].pfp0 = 0; Q[0].pfp1 = 0; qt = 1;
 }
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double) t.tv_sec + t.tv_nsec / 1e9; }
@@ -1775,6 +1775,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	 * expanded once.  Each frontier entry is replayed from a fresh launch
 	 * (stateless), so a world costs one replay of its whole prefix. */
 	size_t distinct = 0, cut = 0, replays = 0; int maxlen = 0;
+	size_t progressed = 0, stutter_leaves = 0;	/* no-progress (self-loop) detection */
 	const char *why = NULL;
 	g_step_refine = po->refine_steps;	/* C2 checks run inside run_seq's replay */
 	q_root();
@@ -1820,12 +1821,23 @@ cmc_proc_main(const CmcProcOptions *po)
 		uint64_t fp[2]; world_fp(fp);
 		int isnew = mark(fp[0], fp[1]);
 		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; }
+		/* did this action make progress?  A non-root entry whose reached
+		 * world equals its parent's is a stutter: the action was enabled
+		 * but changed nothing the fingerprint sees, a self-loop the
+		 * program cannot leave by that step.  If every reachable path is a
+		 * stutter, the program never advanced past its initial state and a
+		 * safety-only pass is vacuous (reported below). */
+		if (e.len > 0)
+		{
+			if (fp[0] == e.pfp0 && fp[1] == e.pfp1) stutter_leaves++;
+			else progressed++;
+		}
 		kill_all();
 		if (!ok) { report(which, seq, e.len); free(seq); return 1; }
 		if (isnew && na > 0)
 		{
 			if (depth >= 0 && e.len >= depth) cut++;
-			else for (int i = 0; i < na; i++) q_push(seq, e.len, i);
+			else for (int i = 0; i < na; i++) q_push(seq, e.len, i, fp[0], fp[1]);
 		}
 		free(seq);
 		if (po->max_states && distinct >= po->max_states) { why = "max states reached"; break; }
@@ -1848,6 +1860,19 @@ cmc_proc_main(const CmcProcOptions *po)
 		printf("Error: Invariant %s is violated (eventually: no reachable state satisfies it).\n", M.inv[ev].name);
 		printf("%zu states generated, %zu distinct states found; the whole state graph was searched.\n", replays, distinct);
 		return 1;
+	}
+	/* No-progress guard (davros eval ask 4): the search was exhaustive and
+	 * every invariant held, but if no action ever changed the world (every
+	 * transition was a stutter) the program never advanced past its initial
+	 * state, so a safety-only pass is vacuous.  Report INCOMPLETE rather
+	 * than a clean pass; a real check should pair safety with an
+	 * `eventually` that shows progress. */
+	if (progressed == 0 && stutter_leaves > 0)
+	{
+		printf("INCOMPLETE (no violation found): the program made no progress -- every enabled action left the world unchanged (a self-loop at the initial state).  %zu distinct states, %zu self-loops, %.1f s.\n",
+			   distinct, stutter_leaves, dt);
+		printf("  Pair the safety invariant with an `eventually` property that the program must reach, so a run that never advances fails instead of passing.\n");
+		return 2;
 	}
 	/* TLC's wording; depth counts the initial state as 1 */
 	printf("Model checking completed. No error has been found.\n");
