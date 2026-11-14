@@ -539,8 +539,9 @@ typedef struct {
 	pid_t pid; int listener; int alive;
 	/* association list: which peer each connection fd talks to.
 	 * peer -1 = the synthetic client, >=0 = a node id. */
-	int cfd[MAXCONN]; int cpeer[MAXCONN]; int cnonblock[MAXCONN]; int nc;
-	int ls_nonblock;			/* O_NONBLOCK on the listener socket */
+	int cfd[MAXCONN]; int cpeer[MAXCONN]; int cnonblock[MAXCONN]; int ccloexec[MAXCONN]; int nc;
+	int ls_nonblock; int ls_cloexec;	/* O_NONBLOCK / FD_CLOEXEC on the listener socket */
+	int listener_fd;			/* the fd passed to listen(), or -1; the server's accept fd */
 	int pend[MAXCONN]; int npend;	/* connectors queued at this node's listener */
 	int efd[MAXEFD]; uint64_t efdval[MAXEFD]; int efdnb[MAXEFD]; int nefd;
 	int blocked; int block_kind; uint64_t block_id; uint64_t block_bufaddr; int block_want; int block_peer;
@@ -687,7 +688,7 @@ launch(Node *nd)
 	if (nd->listener < 0) return -1;
 	nd->pid = pid; nd->alive = 1; nd->blocked = 0; nd->block_kind = 0; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->preload_ok = 0; nd->timer_fd = -1;
-	nd->ls_nonblock = 0; nd->nefd = 0; nd->pollfd_n = 0; nd->block_pollarr = 0; nd->poll_woke_fd = -1;
+	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->pollfd_n = 0; nd->block_pollarr = 0; nd->poll_woke_fd = -1;
 	ptrace(PTRACE_SEIZE, pid, 0, 0);
 	return 0;
 }
@@ -810,7 +811,8 @@ try_pending_for(Node *nd)
 			memset(z, 0, n); cr_write(nd->pid, a[0], z, n);
 			g_resp->val = (long) n; break;
 		}
-		case SYS_setsockopt: case SYS_bind: case SYS_listen: g_resp->val = 0; break;
+		case SYS_setsockopt: case SYS_bind: g_resp->val = 0; break;
+		case SYS_listen: nd->listener_fd = (int) a[0]; g_resp->val = 0; break;
 		case SYS_close:
 		{
 			/* a checker-owned fd: forget the connection, so the table and
@@ -842,6 +844,15 @@ try_pending_for(Node *nd)
 			g_resp->val = 0; break;
 		}
 		case SYS_accept: case SYS_accept4:
+			/* A non-blocking listener with no connection queued returns
+			 * EAGAIN at once, so an event loop that drains the backlog
+			 * (accept until EAGAIN) makes progress instead of parking on
+			 * the second accept.  This is sound for the same reason a
+			 * non-blocking read's EAGAIN is: the loop's following poll()
+			 * defers and hands control back to the search, which owns when
+			 * a connection becomes available. */
+			if (nd->ls_nonblock && nd->npend == 0)
+			{ g_resp->error = -EAGAIN; g_resp->val = 0; break; }
 			/* DEFER: which waiting connection the node accepts, and when,
 			 * is a search action, so the topology is whatever the nodes
 			 * dial (shortcut: the sockaddr out-parameter is not filled) */
@@ -930,18 +941,21 @@ try_pending_for(Node *nd)
 		}
 		case SYS_fcntl:
 		{
-			/* F_GETFL / F_SETFL for the O_NONBLOCK flag on a virtual fd;
-			 * any other fcntl on one of our fds has no complete model, so
-			 * it is an error, never a silent pass (a half-modelled fcntl
-			 * could hide an interleaving). */
+			/* F_GETFL/F_SETFL carry O_NONBLOCK, which the model acts on;
+			 * F_GETFD/F_SETFD carry FD_CLOEXEC, which is inert in the
+			 * model (a running node never execs, so close-on-exec cannot
+			 * change its future) but is stored and returned so the flag
+			 * round-trips.  Any other fcntl on one of our fds has no
+			 * complete model, so it is an error, never a silent pass. */
 			int fd = (int) a[0]; int cmd = (int) a[1];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
-			/* route the flag to the connection, the eventfd, or (the
-			 * fallback) the one listener socket a server sets nonblock */
 			int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
-			int *flagp = cs >= 0 ? &nd->cnonblock[cs] : es >= 0 ? &nd->efdnb[es] : &nd->ls_nonblock;
-			if (cmd == F_GETFL) g_resp->val = *flagp ? O_NONBLOCK : 0;
-			else if (cmd == F_SETFL) { *flagp = (a[2] & O_NONBLOCK) ? 1 : 0; g_resp->val = 0; }
+			int *nbp = cs >= 0 ? &nd->cnonblock[cs] : es >= 0 ? &nd->efdnb[es] : &nd->ls_nonblock;
+			int *clp = cs >= 0 ? &nd->ccloexec[cs] : es >= 0 ? NULL : &nd->ls_cloexec;
+			if (cmd == F_GETFL) g_resp->val = *nbp ? O_NONBLOCK : 0;
+			else if (cmd == F_SETFL) { *nbp = (a[2] & O_NONBLOCK) ? 1 : 0; g_resp->val = 0; }
+			else if (cmd == F_GETFD) g_resp->val = (clp && *clp) ? FD_CLOEXEC : 0;
+			else if (cmd == F_SETFD) { if (clp) *clp = (a[2] & FD_CLOEXEC) ? 1 : 0; g_resp->val = 0; }
 			else die(1, "node %d: fcntl cmd %d on virtual fd %d has no model", nd->id, cmd, fd);
 			break;
 		}
@@ -1285,6 +1299,7 @@ enum_actions(Act *out)
 			for (int k = 0; k < nd->pollfd_n; k++)
 			{
 				int fd = nd->pollfds[k];
+				if (fd < 0) continue;	/* a negative fd is ignored by poll(2) */
 				int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
 				if (cs >= 0)
 				{
@@ -1297,8 +1312,18 @@ enum_actions(Act *out)
 				{
 					if (nd->efdval[es] > 0) ADD(A_WAKE, d, POLL_LISTENER - 1 - es);
 				}
-				else if (nd->npend > 0)
-					ADD(A_WAKE, d, POLL_LISTENER);
+				else if (fd == nd->listener_fd)
+				{
+					if (nd->npend > 0) ADD(A_WAKE, d, POLL_LISTENER);
+				}
+				else
+					/* a polled fd that is none of this node's connections,
+					 * eventfds or its listener is a kernel fd the model does
+					 * not track (a self-pipe, a timerfd).  It is never treated
+					 * as the listener, so a wake is not offered for it; a loop
+					 * that only ever becomes ready through such an fd makes no
+					 * progress, which the no-progress check reports. */
+					;
 			}
 			if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER);
 			continue;
@@ -1335,7 +1360,7 @@ poll_wake(Node *nd, int target)
 		int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
 		int match = (target == TIMER_PEER) ? (fd == nd->timer_fd)
 			: (target >= -1) ? (cs >= 0 && nd->cpeer[cs] == target)
-			: (target == POLL_LISTENER) ? (cs < 0 && es < 0)
+			: (target == POLL_LISTENER) ? (fd == nd->listener_fd)
 			: (es >= 0 && es == (POLL_LISTENER - 1 - target));
 		pfs[k].fd = fd; pfs[k].events = nd->pollevents[k];
 		pfs[k].revents = (match && hit < 0) ? (short) (nd->pollevents[k] & POLLIN) : 0;
