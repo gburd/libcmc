@@ -83,7 +83,12 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   it last reported on descriptor 193 (durable); what it reported on
   descriptor 3 is lost, and its peers read EOF once their connections
   to it are drained.
-- `drops`: the oldest message on a connection is lost.
+- `drops`: a drop resets a connection.  TCP never loses one byte from a
+  live stream, so a drop does not vanish a message from the middle of a
+  connection; it fails the connection.  Every queued message on it, in
+  both directions, is discarded, and both ends read EOF from then on
+  (as they would on `ECONNRESET`).  This models a network partition or a
+  reset peer, the failures a TCP program must survive.
 - `depth`: a search that reaches this many actions stops and is
   reported as incomplete (exit 2), never as a pass.  `--depth`
   overrides it.  Absent: unbounded.

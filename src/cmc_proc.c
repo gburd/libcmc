@@ -598,6 +598,13 @@ static Msg bag[MAXMSG];
 /* sends so far on each channel (src+1, dst): a message's place in its
  * channel, so delivery is FIFO per connection, as TCP is */
 static int chcount[MAXNODES + 1][MAXNODES];
+/* reset connections, by unordered node pair (the client, peer -1, cannot
+ * be reset: it is not a node with its own reads).  A DROP resets the
+ * connection rather than losing one message from the middle of the
+ * stream, so a drop is a visible failure both ends see (EOF), not a
+ * silent byte loss TCP never produces.  Part of the fingerprint. */
+static int conn_reset[MAXNODES][MAXNODES];
+static int is_reset(int a, int b){ return a >= 0 && b >= 0 && a < MAXNODES && b < MAXNODES && conn_reset[a][b]; }
 
 /* ghost reply log */
 static unsigned char rep_src[MAXREP], rep_val[MAXREP]; static int nrep;
@@ -890,6 +897,14 @@ try_pending_for(Node *nd)
 			if (peer == -2) die(1, "node %d writes fd %d, which is no connection", nd->id, fd);
 			int len = (int) a[2];
 			if (len < 0 || len > M.max_write) die(1, "node %d writes %d bytes in one call; the limit is %d (raise [target] max_write, up to %d)", nd->id, len, M.max_write, MSGLEN);
+			if (is_reset(nd->id, peer))
+			{
+				/* writing into a reset connection reaches no one: the bytes
+				 * are dropped, not buffered, so a dead channel never carries
+				 * a message.  Report the length written (a target that cares
+				 * learns the failure on its next read, as EOF). */
+				g_resp->val = len; break;
+			}
 			unsigned char buf[MSGLEN] = {0};
 			cr_read(nd->pid, a[1], buf, (size_t) len);
 			if (peer == -1)			/* reply to the client: ghost log */
@@ -925,6 +940,13 @@ try_pending_for(Node *nd)
 			}
 			int peer = cfd_peer(nd, fd);
 			if (peer == -2) die(1, "node %d reads fd %d, which is no connection", nd->id, fd);
+			if (is_reset(nd->id, peer))
+			{
+				/* the connection has been reset (a DROP): every read on it
+				 * returns EOF, blocking or not, as TCP does once a peer has
+				 * reset.  No search choice remains, so answer immediately. */
+				nd->poll_woke_fd = -1; g_resp->val = 0; break;
+			}
 			if (fd == nd->timer_fd)
 			{
 				/* the first recv on a timer connection returns the fired
@@ -1234,6 +1256,12 @@ world_fp(uint64_t fp[2])
 				for (int k = 0; k < bag[best].len; k++) PUT(bag[best].body[k]);
 			}
 	PUT(0xfe);
+	/* reset connections, by node pair: a reset channel reaches EOF
+	 * forever, so two worlds that differ only in which pair is reset are
+	 * distinct futures */
+	for (int a = 0; a < M.nodes; a++)
+		for (int b = a + 1; b < M.nodes; b++)
+			PUT(conn_reset[a][b]);
 	/* connections waiting to be accepted, as a multiset per node */
 	for (int d = 0; d < M.nodes; d++)
 		for (int s = 0; s < M.nodes; s++)
@@ -1254,6 +1282,7 @@ static void
 reset_world(void)
 {
 	memset(bag, 0, sizeof bag); memset(chcount, 0, sizeof chcount);
+	memset(conn_reset, 0, sizeof conn_reset);
 	nrep = 0; logical_ns = CLK_BASE;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
 }
@@ -1352,9 +1381,14 @@ enum_actions(Act *out)
 		for (int d = 0; d < M.nodes; d++)
 			if (N[d].alive) ADD(A_CRASH, d, -1);
 	if (bud.drops > 0)
-		for (int s = -1; s < M.nodes; s++)
-			for (int d = 0; d < M.nodes; d++)
-				if (chan_head(s, d) >= 0) ADD(A_DROP, d, s);
+		for (int s = 0; s < M.nodes; s++)
+			for (int d = s + 1; d < M.nodes; d++)
+				/* one reset per node pair, offered while the connection
+				 * carries a message in either direction and is not already
+				 * reset.  A reset discards both channels and gives both ends
+				 * EOF, so there is nothing to reset twice. */
+				if (!conn_reset[s][d] && (chan_head(s, d) >= 0 || chan_head(d, s) >= 0))
+					ADD(A_DROP, d, s);
 #undef ADD
 	return c;
 }
@@ -1387,6 +1421,38 @@ poll_wake(Node *nd, int target)
 	 * wake is serviced by the timer-'T' read path, not a message */
 	nd->poll_woke_fd = (target >= -1) ? nd->pollfds[hit] : -1;
 	answer(nd, 1);
+}
+
+/* Reset the connection between nodes a and b (a DROP): discard every
+ * queued message in both directions, mark the pair reset, and tell both
+ * ends at once.  A node parked in recv on the other sees EOF; a node
+ * parked in poll on a channel to the other is woken so its next read
+ * sees EOF.  Modelling a drop as a reset (not a mid-stream byte loss)
+ * keeps the process front end faithful to TCP, which never loses a byte
+ * from a live stream -- a failure is always visible to both ends. */
+static void
+reset_conn(int a, int b)
+{
+	for (int i = 0; i < MAXMSG; i++)
+		if (bag[i].used &&
+			((bag[i].src == a && bag[i].dst == b) || (bag[i].src == b && bag[i].dst == a)))
+			bag[i].used = 0;
+	conn_reset[a][b] = conn_reset[b][a] = 1;
+	/* answer either end that is already parked waiting on the other */
+	int ends[2] = {a, b}, peers[2] = {b, a};
+	for (int e = 0; e < 2; e++)
+	{
+		Node *nd = &N[ends[e]];
+		if (!nd->alive || !nd->blocked) continue;
+		if (nd->block_kind == BK_RECV && nd->block_peer == peers[e])
+			deliver(nd, NULL, 0);		/* EOF */
+		else if (nd->block_kind == BK_POLL)
+			for (int k = 0; k < nd->pollfd_n; k++)
+			{
+				int cs = cfd_slot(nd, nd->pollfds[k]);
+				if (cs >= 0 && nd->cpeer[cs] == peers[e]) { poll_wake(nd, peers[e]); break; }
+			}
+	}
 }
 
 static void
@@ -1439,7 +1505,7 @@ apply(const Act *a)
 		}
 		case A_WAKE: poll_wake(nd, a->peer); break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
-		case A_DROP: bud.drops--; bag[chan_head(a->peer, a->node)].used = 0; break;
+		case A_DROP: bud.drops--; reset_conn(a->node, a->peer); break;
 	}
 	drive_quiescent();
 }
@@ -1563,6 +1629,7 @@ act_name(const Act *a, char *b, size_t n)
 	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
+	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);
 	else if (a->kind == A_WAKE && a->peer == POLL_LISTENER) snprintf(b, n, "wake n%d listener", a->node);
 	else if (a->kind == A_WAKE && a->peer < POLL_LISTENER) snprintf(b, n, "wake n%d eventfd%d", a->node, POLL_LISTENER - 1 - a->peer);
 	else if (a->peer < 0) snprintf(b, n, "%s client->n%d", k[a->kind], a->node);

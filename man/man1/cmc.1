@@ -315,19 +315,31 @@ Client requests each node may receive.
 Default 1.
 .It Fl -drops Ar n
 Messages the network may lose.
+In the FIFO network a drop resets the connection: every queued message
+on it is discarded and both ends read EOF, the way a TCP reset or a
+partition appears, never a byte lost from the middle of a live stream.
 With
-.Fl -net Cm fifo ,
-a drop resets the connection and both ends are told.
+.Fl -model-file
+this is the only drop semantics; the actor engine's
+.Fl -net Cm bag
+may instead lose a single message.
 Default 0.
 .It Fl -dups Ar n
 Messages the network may duplicate.
 Needs
-.Fl -net Cm bag .
+.Fl -net Cm bag ,
+so it applies only to the actor engine, not
+.Fl -model-file .
 Default 0.
 .It Fl -crashes Ar n
 Crashes, of any node.
-A crash keeps any prefix of the node's pending disk writes, loses the
-rest and the volatile state, resets its connections and restarts it.
+A crash keeps any prefix of the node's pending disk writes and loses the
+rest and the volatile state; a peer reading a connection to the crashed
+node gets EOF once that channel drains.
+The actor engine then restarts the node; with
+.Fl -model-file
+a crash is final, the process does not come back (a restart action is
+not yet modelled there).
 Default 0.
 .It Fl -net-cap Ar n
 Messages in flight at once.

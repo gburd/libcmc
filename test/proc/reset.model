@@ -1,0 +1,24 @@
+# test/proc/fifo.c checked with a drop budget: the drop-as-reset teeth.
+#
+# Node 0 sends two messages, valued 1 then 2, on one TCP connection; node
+# 1 reads up to two of them.  TCP delivers a connection's bytes in order
+# and never loses one from the middle of a live stream, so node 1 can
+# never see the second value (2) without the first (1).
+#
+# A drop models a connection RESET, not a lost byte: dropping discards
+# the channel and both ends see EOF, so after a drop node 1 reads nothing
+# more -- it never receives 2 ahead of 1.  `never_b_first` therefore
+# holds even with drops = 1.  Were a drop a silent mid-stream byte loss
+# (losing the head, value 1, while value 2 stayed queued), node 1 would
+# read 2 first and the checker would report a counterexample TCP can
+# never produce.  This model passing with drops = 1 is the evidence the
+# drop is a reset, not a vanished byte.
+#
+#   cc -O1 -no-pie -o fifo test/proc/fifo.c
+#   cmc --model-file test/proc/reset.model --binary ./fifo
+[target]
+nodes = 2
+[environment]
+drops = 1
+[invariants]
+never_b_first = "node[1][0] != 2"

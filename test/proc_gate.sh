@@ -119,6 +119,12 @@ expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $
 expect "zab: --simulate finds it"           1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug) --simulate --seed 1 --walks 2000
 expect "idle: time passing is not merged"  1 "never_late is violated" $(run idle idle)
 expect "fifo: a connection is in order"    0 "No error has been found" $(run fifo fifo)
+# drop-as-reset (ask 7): a drop resets the connection, it does not vanish
+# one byte from a live stream.  With drops = 1 node 1 still never sees the
+# second value ahead of the first -- a reset gives EOF, not reordering.
+# Were a drop a silent head loss, this would report never_b_first
+# violated (a counterexample TCP cannot produce).
+expect "reset: a drop is a reset, not a lost byte" 0 "No error has been found" $(run reset fifo)
 expect "chain: any topology the nodes dial" 1 "not_reached is violated" $(run chain chain)
 
 # every intercepted syscall is pinned by a fixture.  clocks reads
