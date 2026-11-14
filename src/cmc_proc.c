@@ -1317,13 +1317,14 @@ enum_actions(Act *out)
 					if (nd->npend > 0) ADD(A_WAKE, d, POLL_LISTENER);
 				}
 				else
+				{
 					/* a polled fd that is none of this node's connections,
 					 * eventfds or its listener is a kernel fd the model does
 					 * not track (a self-pipe, a timerfd).  It is never treated
 					 * as the listener, so a wake is not offered for it; a loop
 					 * that only ever becomes ready through such an fd makes no
 					 * progress, which the no-progress check reports. */
-					;
+				}
 			}
 			if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER);
 			continue;
