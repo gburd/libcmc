@@ -78,7 +78,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define BASE 20000				/* node i listens on 127.0.0.1:BASE+i */
 #define MAXNODES 8
 #define MAXMSG 128				/* messages in flight, total */
-#define MSGLEN 64				/* bytes per write; a longer write is an error */
+#define MSGLEN 4096			/* hard cap on a message body / write; [target] max_write bounds a model within it */
 #define MAXREP 64				/* client replies recorded */
 #define MAXCONN 16				/* connections per node */
 #define MAXPOLL 16				/* pollfd entries read in one poll() */
@@ -108,6 +108,8 @@ static struct
 	int			nodes;
 	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
 	int			timeouts, crashes, drops;
+	int			max_write;		/* largest single write a node may make (<= MSGLEN) */
+	char		args[512];		/* extra argv after the node id, space-separated (e.g. flags) */
 	long		depth;			/* -1 = unbounded */
 	Inv			inv[MAXINV];
 	int			ninv;
@@ -148,7 +150,7 @@ load_model(const char *path)
 
 	if (!f) { fprintf(stderr, "cmc: cannot open model file %s: %s\n", path, strerror(errno)); return -1; }
 	memset(&M, 0, sizeof M);
-	M.nodes = 1; M.client_write = -1; M.depth = -1;
+	M.nodes = 1; M.client_write = -1; M.depth = -1; M.max_write = MSGLEN;
 	while (fgets(line, sizeof line, f))
 	{
 		ln++;
@@ -186,6 +188,10 @@ load_model(const char *path)
 		}
 		else if (!strcmp(sect, "target") && !strcmp(k, "nodes"))
 		{ if (int_value(path, ln, k, v, 1, MAXNODES, &x)) goto bad; M.nodes = (int) x; seen_nodes = 1; }
+		else if (!strcmp(sect, "target") && !strcmp(k, "max_write"))
+		{ if (int_value(path, ln, k, v, 1, MSGLEN, &x)) goto bad; M.max_write = (int) x; }
+		else if (!strcmp(sect, "target") && !strcmp(k, "args"))
+		{ snprintf(M.args, sizeof M.args, "%s", v); }
 		else if (!strcmp(sect, "target") && !strcmp(k, "state"))
 		{
 			if (strcmp(v, "canon"))
@@ -674,7 +680,14 @@ launch(Node *nd)
 		struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm->cmsg_level = SOL_SOCKET; cm->cmsg_type = SCM_RIGHTS; cm->cmsg_len = CMSG_LEN(sizeof(int));
 		memcpy(CMSG_DATA(cm), &lf, sizeof(int)); sendmsg(sp[1], &mh, 0);
 		char idbuf[8]; snprintf(idbuf, sizeof idbuf, "%d", nd->id);
-		execl(nd->binary, nd->binary, idbuf, (char *) NULL);
+		/* argv = binary, id, then the space-separated [target] args (so a
+		 * target that takes flags needs no wrapper) */
+		char *av[64]; int ac = 0;
+		av[ac++] = (char *) nd->binary; av[ac++] = idbuf;
+		char argbuf[512]; snprintf(argbuf, sizeof argbuf, "%s", M.args);
+		for (char *p = strtok(argbuf, " \t"); p && ac < 63; p = strtok(NULL, " \t")) av[ac++] = p;
+		av[ac] = NULL;
+		execv(nd->binary, av);
 		_exit(2);
 	}
 	close(sp[1]); close(nd->fd3[1]); close(nd->fd4[1]);
@@ -875,7 +888,7 @@ try_pending_for(Node *nd)
 			int peer = cfd_peer(nd, fd);
 			if (peer == -2) die(1, "node %d writes fd %d, which is no connection", nd->id, fd);
 			int len = (int) a[2];
-			if (len < 0 || len > MSGLEN) die(1, "node %d writes %d bytes in one call; the limit is %d", nd->id, len, MSGLEN);
+			if (len < 0 || len > M.max_write) die(1, "node %d writes %d bytes in one call; the limit is %d (raise [target] max_write, up to %d)", nd->id, len, M.max_write, MSGLEN);
 			unsigned char buf[MSGLEN] = {0};
 			cr_read(nd->pid, a[1], buf, (size_t) len);
 			if (peer == -1)			/* reply to the client: ghost log */
