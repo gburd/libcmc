@@ -193,6 +193,13 @@ the richer, opt-in path; nothing is forced to migrate.
 Each is independently useful, independently gated, and leaves every
 existing example green.  Ordered by dependency.
 
+**Audit (1.3.0):** an audit found false passes in milestones C (C2
+skips Init and action gates), F (liveness disagrees with TLC) and in
+the expression handling of A and B, and found the protocol models
+overstated.  The
+[soundness remediation plan]({{ '/reference/plan-soundness/' | relative_url }})
+takes precedence over the status below until it is done.
+
 **Status (as of v1.0.0):** A, B, C, D, E and F are implemented and
 calibrated against single-worker TLC; D's bridge also reaches Apalache
 (the symbolic, Z3-backed engine), verified by `make
@@ -208,10 +215,12 @@ invariant.  C's "one model, many
 implementations" gate is met: a second, structurally different Paxos
 (`examples/paxos/paxos2.c` -- three symmetric nodes, a different hook
 layout) refines the *same* `examples/spec/paxos.cml` through its own
-binding (`examples/spec/paxos2.bind`), the spec unchanged.  The whole
-consensus family now has a certified abstract model -- `paxos.cml`,
-`raft.cml`, `hc.cml` and `zab.cml`, each agreeing across `cmc --spec`,
-TLC and Apalache.
+binding (`examples/spec/paxos2.bind`), the spec unchanged.  (Withdrawn:
+paxos2 blocks on a self-RPC and its values fall outside the binding's
+domain; see the remediation plan, 4.1.)  The consensus examples
+(`paxos.cml`, `raft.cml`, `hc.cml`, `zab.cml`) agree across `cmc
+--spec`, TLC and Apalache, which shows the encoded rules were executed
+as written, not that they model the named protocols.
 
 - **A -- a value model for abstract state.**  Grow the invariant language
   beyond bytes to sets, records, sequences, functions and quantifiers
@@ -288,8 +297,8 @@ to "libcmc and TLC agree on the *same* abstract model", retiring the
 hand-kept twin.
 
 In practice it does not retire `calib/hc`, and the plan was
-over-optimistic here.  `examples/spec/hc.cml` is a certified HC abstract
-model, but a minimal single-property one; it does not reproduce the
+over-optimistic here.  `examples/spec/hc.cml` is a minimal
+single-property HC model; it does not reproduce the
 `calib/hc` rows.  And the in-process engine is a shipped, documented
 path, not a scaffold to discard.  So the bridge gives a second, no-
 duplicate calibration track for the abstract checker (the real win of
