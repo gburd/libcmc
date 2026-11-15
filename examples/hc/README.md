@@ -102,8 +102,10 @@ cmc runs all three participants and tries every order of their
 iterations and every pattern of a dropped message (an asymmetric network
 partition), and finds that no two ever adopt different configurations at
 one epoch -- **agreement holds even under a partition**, because adoption
-needs a quorum majority and quorums intersect.  That is the strong,
-positive result: the shipping code is proven, not just tested.
+needs a quorum majority and quorums intersect.  That is a positive
+result for this program at this instance (three participants, the
+budgets given): no schedule within them breaks agreement.  It is not a
+proof for other sizes or budgets.
 
 ## The planted bug
 

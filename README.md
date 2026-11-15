@@ -24,11 +24,21 @@ state, and prints the shortest sequence of actions that breaks one.  The
 program needs no libcmc header and no rewrite: only an eight-line hook
 that reports its state on a file descriptor, and `-no-pie`.
 
-The engine underneath is calibrated against TLC: on 22 configurations of
-a published consensus specification, written as in-process step
-functions, it gives the same verdicts, the same shortest counterexample
-depths and exactly the same distinct-state counts as single-worker TLC
-(`calib/hc`).  Output follows TLC's wording.
+The in-process engine (`cmc --model`) is calibrated against TLC: on 22
+configurations of a published consensus specification, written as
+in-process step functions, it gives the same verdicts, the same
+shortest counterexample depths and exactly the same distinct-state
+counts as single-worker TLC (`calib/hc`; two rows' expected values come
+from a multi-worker or unfinished TLC run, see `calibrate.sh`).  The
+process front end (`cmc --model-file`) and the abstract checker (`cmc
+--spec`) have separate search loops that this calibration does not
+cover.  Output follows TLC's wording.
+
+**Not verification evidence yet.**  An audit of 1.3.0 found false
+passes in all three engines and gates that could report success after a
+tool failed.  Until the [soundness remediation plan](docs/plans/soundness-remediation.md)
+is done, treat a cmc pass as a debugging aid, not as evidence that a
+system is correct.
 
 Documentation, with a guide that builds a first model and the manual
 pages: <https://gregburd.codeberg.page/libcmc/> (mirrored at
@@ -86,19 +96,21 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 1.1.0.  `cmc --model-file` checks the shipped binary as it runs,
-under seccomp, with the network, timeouts, crashes and connection resets
-as search decisions.  Blocking sockets and the readiness vocabulary an
-event loop uses (`poll`/`ppoll`, `fcntl` for `O_NONBLOCK`, `eventfd`) are
-all modelled; single-decree Paxos, Raft leader election and a replicated
-log, HummingConsensus and ZAB ship as worked examples.  Single-threaded.
+Release 1.3.0, under remediation (see above).  `cmc --model-file`
+checks the shipped binary as it runs, under seccomp, with the network,
+timeouts, crashes and connection resets as search decisions.  Blocking
+sockets, `poll`/`ppoll`/`epoll`, `fcntl` for `O_NONBLOCK`, `eventfd`,
+threads and node restart are intercepted, each with the limits listed in
+cmc(7) and the remediation plan; multi-threaded nodes are run in one
+thread schedule, not every schedule.  The worked examples are small
+safety demonstrations, not complete models of the protocols they are
+named after.
 Process mode replays every state from a fresh launch, so the rate scales
 with how much the program does per launch: the small fixtures run several
 hundred replays a second (HummingConsensus with three processes, three
 timeouts and one drop is 11,545 distinct states in about 50 seconds, 555
-replays a second, on the CI box).  The abstract engine (`cmc --model`,
-`.cml` specs checked against TLC and Apalache) is faster.  History and
-measurements are in `docs/measurements/`.
+replays a second, on the CI box).  History and measurements are in
+`docs/measurements/`.
 
 ## CI
 

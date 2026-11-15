@@ -34,40 +34,45 @@ so you do not reach for it where it cannot help.
 
 ## Where it is a strong fit
 
+Read this section with the [soundness remediation plan]({{ '/reference/plan-soundness/' | relative_url }}):
+an audit of 1.3.0 found false passes, so these are the problems the tool
+is designed for, not ones on which a pass is yet evidence.
+
 - **Crash-fault agreement and replication protocols at a small
-  instance.**  Paxos and its family, Raft, ZAB, Humming Consensus: their
-  safety reduces to a pigeonhole over quorums (two quorums overlap, so a
-  write-once or vote-once discipline on the overlap forbids two
-  decisions).  A three- to five-node instance exposes the classic bug,
-  and the property is a one-line invariant.  The `examples/spec/`
-  directory ships Paxos, Flexible Paxos, Raft, HC and ZAB this way, each
-  cross-checked against TLC and Apalache.
-- **The quorum-intersection knob.**  The single most instructive family
-  of bugs, undersizing a quorum so two disjoint quorums can each decide,
-  is exactly what this tool catches.  Flexible Paxos is the sharpest
-  case: its correct and unsafe forms differ by one inequality
-  (`Q1 + Q2 > A`), and libcmc reaches the violation the moment the
-  inequality fails.
+  instance.**  Safety in this family often rests on quorum intersection
+  (two quorums overlap, so a write-once or vote-once discipline on the
+  overlap forbids two decisions), and a three- to five-node instance can
+  expose a classic bug.  The `examples/spec/` models illustrate this
+  shape; they are small demonstrations, not complete models of the
+  protocols they are named after (see the examples page).
+- **The quorum-intersection knob.**  Undersizing a quorum so two disjoint
+  quorums can each decide is a bug class this search finds at a small
+  instance.  The `fpaxos.cml` demonstration shows the arithmetic
+  (`Q1 + Q2 > A`) on a write-once tally; it has no ballots or phase 1, so
+  it does not check Flexible Paxos itself.
 - **Commit durability and "no committed entry lost."**  The
-  single-contested-slot reduction (as in the ZAB and Raft-log examples)
-  checks that a committed value is quorum-backed, so it survives a
-  leader change whose recovery quorum must intersect.
-- **A real implementation against a reusable model.**  `cmc --refine`
-  checks that the shipping binary refines an abstract `.cml`; one model
-  validates many implementations (two different Paxos binaries refine
-  the same `paxos.cml`).  `--refine-steps` checks each step, not only
-  each state.
+  single-contested-slot reduction (as in the Raft-log process example)
+  checks that an acknowledged value survives the crashes in the budget.
+  `zab.cml` is a guarded counter, not a model of ZAB's recovery.
+- **A real implementation against an invariant.**  `cmc --refine` maps
+  the binary's observable state onto an abstract `.cml` and checks the
+  abstract invariants on it.  That is invariant reuse, not proof that
+  the binary's steps are the model's steps.  `--refine-steps` is meant
+  to check each step, but it currently skips the initial-state and
+  action-gate checks (remediation 1.1, 1.2).
 - **Finding the shortest failing schedule.**  Breadth-first search
   returns the shortest interleaving that breaks the property, which is
-  what you want to read and to turn into a regression test.
+  what you want to read and to turn into a regression test.  This is the
+  use the tool serves well today: a counterexample it prints is a real
+  schedule you can replay, even where a pass is not yet trustworthy.
 
 ## Where it is a partial fit
 
 - **Multi-slot logs.**  Full state-machine safety over an unbounded log
   (log matching across all slots, contiguity, commit-index
   monotonicity) is not directly expressible.  The honest reduction is a
-  single contested slot: it catches "a stale leader overwrites a
-  committed entry" faithfully, but does not check the across-slot
+  single contested slot: it catches a lost acknowledged entry at that
+  slot, but does not check the across-slot
   properties.  Model one slot, and state that limit.
 - **Protocols whose interesting objects are not interchangeable.**
   Reconfiguration across many configurations, or ordering over many
@@ -78,6 +83,12 @@ so you do not reach for it where it cannot help.
 
 ## Where it is the wrong tool
 
+- **Sole evidence for a safety-critical system.**  Banking ledgers,
+  launch control, medical devices: do not accept such a system on a cmc
+  pass.  1.3.0 has reproduced false passes, and even a sound bounded
+  check covers only the instance and budgets it searched.  Use it, once
+  remediated, as one input beside formal specifications, proofs where
+  feasible, review, testing and fault injection.
 - **Liveness and progress under partial synchrony.**  "Eventually a
   value is chosen," leader stabilization, termination under an
   adversarial-but-fair scheduler: these are what the FLP result and the

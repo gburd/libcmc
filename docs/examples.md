@@ -16,10 +16,10 @@ in the source tree, and `make check` builds and checks each one.
 
 - **[Single-decree Paxos](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/paxos)**
   -- two proposers and three acceptors; the safety property is agreement.
-  Reference: Lamport's `Paxos.tla`.  A **second** implementation
-  (`paxos2.c`, three symmetric nodes, a different hook layout) refines
-  the *same* abstract model `examples/spec/paxos.cml` through its own
-  binding -- the "one model, many implementations" claim, demonstrated.
+  Reference: Lamport's `Paxos.tla`.  A second implementation,
+  `paxos2.c`, is withdrawn as a demonstration: it blocks on a
+  synchronous RPC to itself and its values fall outside the binding's
+  domain (remediation plan, 4.1).
 - **[Raft leader election](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/raft)**
   -- three nodes; Election Safety (at most one leader per term), with and
   without a crash.  Reference: Ongaro's `raft.tla`.
@@ -69,8 +69,16 @@ checked three ways that agree -- `cmc --spec`, TLC
 
 Each also ships a `--define BUG` build that breaks the safety rule (a
 double vote, a revote, an overwrite), and the checker finds the shortest
-counterexample.  Paxos also demonstrates "one model, many
-implementations" (`paxos.c` and `paxos2.c` refine the same model).
+counterexample.
+
+These models are small safety demonstrations, each a few guarded
+actions over a tally.  `cmc --spec`, TLC and Apalache agreeing on one
+shows the encoded rules were executed as written; it does not show the
+rules are the named protocol.  Fast Paxos recovery does not read a
+quorum, Flexible Paxos has no ballots or phase 1, CASPaxos models a
+write-once register rather than a mutable one, and ZAB is a guarded
+counter with no epochs or recovery.  The remediation plan (Phase 4)
+either makes each a faithful abstraction or renames it.
 
 ## The failure, animated
 

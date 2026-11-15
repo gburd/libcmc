@@ -39,7 +39,8 @@ that a committed entry is never lost, the failure Brooker animates.
 
 ## The protocol
 
-`raft.c` is a faithful Raft election.  Each node listens on 127.0.0.1
+`raft.c` is a Raft election, reduced: no logs, so the up-to-date check
+on a vote is absent.  Each node listens on 127.0.0.1
 port 20000 + its id and sits in `accept()`, idle.  The checker drives
 time: a node whose election timer fires (a timeout cmc chooses) becomes
 a candidate -- it increments its term, votes for itself, and dials the

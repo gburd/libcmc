@@ -195,8 +195,7 @@ same `.cml` is both checked by `cmc --spec` and emitted to TLC by `cmc
 
 Milestone D envisaged retiring the engine track in favour of the bridge.
 That has not happened, and the plan was over-optimistic about it.
-`examples/spec/hc.cml` is a *certified* HC abstract model, but it is a
-minimal single-property model (write-once Agreement at three
+`examples/spec/hc.cml` is a minimal single-property HC model (write-once Agreement at three
 participants, 41 states); it does **not** reproduce the `calib/hc` rows,
 which pin many properties and variants at up to tens of millions of
 states.  A full-fidelity HC `.cml` that reproduced those rows through

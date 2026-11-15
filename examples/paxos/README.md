@@ -104,19 +104,16 @@ file holds only the environment to explore and the one invariant.  A
 pass covers the budgets given -- raise `--crashes` and `--drops` until
 your own planted bugs are caught.
 
-## One model, many implementations
+## One model, many implementations (withdrawn)
 
-`paxos2.c` is a *different* Paxos -- three symmetric nodes, each both a
-proposer and an acceptor, with its own wire protocol and a different
-state-hook layout.  It is checked against the **same** abstract model
-`examples/spec/paxos.cml`, through its own binding
-`examples/spec/paxos2.bind` (the spec is unchanged, only the binding
-differs because the implementation observes differently):
-
-    cc -no-pie -o paxos2 examples/paxos/paxos2.c
-    cmc --model-file examples/spec/paxos2-refine.model --binary ./paxos2 \
-        --refine examples/spec/paxos.cml --bind examples/spec/paxos2.bind
-
-Both binaries refine one specification -- the sense in which they are the
-same protocol, verified against the shipping code rather than a model of
+`paxos2.c` was meant to show a second, structurally different Paxos
+checked against the same abstract model `examples/spec/paxos.cml`
+through its own binding.  It does not show that.  A proposer sends its
+prepare to every node, itself included, with a blocking RPC from the
+thread that alone serves requests, so it cannot answer itself and never
+decides.  Its values are 10 to 12, but the binding compares them with the
+spec's values 1 and 2, so two conflicting decisions would map to
+"nothing chosen".  And `--refine` checks the abstract invariant on the
+mapped state, not that the binary's steps are steps of the model.  The
+example stays as a fixture until the remediation plan's item 4.1 fixes
 it.
