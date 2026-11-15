@@ -98,30 +98,54 @@ ctor(void)
 	(void) syscall(SYS_clock_gettime, CMC_PRELOAD_MAGIC, &ts);
 }
 
-static void *
-bump(size_t n)
-{
-	arena_init();
-	size_t		off = (cmc_arena_bump + (ALIGN - 1)) & ~(ALIGN - 1);
-	if (off + n > cmc_arena_size)
-		return NULL;
-	cmc_arena_bump = off + n;
-	return (unsigned char *) ARENA_BASE + off;
-}
-
-/* carve n bytes aligned to `align` (a power of two).  The arena base is
- * 2 MiB aligned, so an aligned offset yields an aligned pointer. */
+/* carve n bytes aligned to `align` (a power of two, at least ALIGN),
+ * preceded by an ALIGN-byte header that records n, so realloc knows how
+ * much of the old block to copy.  The arena base is 2 MiB aligned, so an
+ * aligned offset yields an aligned pointer.  Returns NULL with errno
+ * ENOMEM when the request does not fit; every sum is checked, so a huge
+ * n cannot wrap around and hand out memory already in use. */
 static void *
 bump_aligned(size_t align, size_t n)
 {
 	arena_init();
 	if (align < ALIGN)
 		align = ALIGN;
-	size_t		off = (cmc_arena_bump + (align - 1)) & ~(align - 1);
-	if (off + n > cmc_arena_size)
-		return NULL;
+	size_t		used = cmc_arena_bump + ALIGN;
+	if (used > cmc_arena_size || align - 1 > cmc_arena_size - used)
+		goto nomem;
+	size_t		off = (used + (align - 1)) & ~(align - 1);
+	if (n > cmc_arena_size - off)
+		goto nomem;
 	cmc_arena_bump = off + n;
+	*(size_t *) ((unsigned char *) ARENA_BASE + off - ALIGN) = n;
 	return (unsigned char *) ARENA_BASE + off;
+nomem:
+	errno = ENOMEM;
+	return NULL;
+}
+
+static void *
+bump(size_t n)
+{
+	return bump_aligned(ALIGN, n);
+}
+
+/* the size recorded for a block bump_aligned returned.  A pointer from
+ * anywhere else has no header to read, so it ends the node visibly
+ * rather than copying a guessed length. */
+static size_t
+block_size(const void *p)
+{
+	const unsigned char *u = p, *base = ARENA_BASE;
+
+	if (u < base + ALIGN || u > base + cmc_arena_bump)
+	{
+		static const char msg[] = "cmc-preload: realloc of a block the arena did not allocate\n";
+
+		(void) !write(2, msg, sizeof msg - 1);
+		_exit(97);
+	}
+	return *(const size_t *) (u - ALIGN);
 }
 
 void *
@@ -139,6 +163,11 @@ free(void *p)
 void *
 calloc(size_t a, size_t b)
 {
+	if (b != 0 && a > SIZE_MAX / b)
+	{
+		errno = ENOMEM;
+		return NULL;
+	}
 	size_t		n = a * b;
 	void	   *p = bump(n ? n : 1);
 	/* the arena is freshly mmap'd zero and never reused, so it is already
@@ -153,9 +182,11 @@ realloc(void *old, size_t n)
 {
 	void	   *p = bump(n ? n : 1);
 	if (p && old)
-		memcpy(p, old, n);		/* bounded run: copying n may over-read the
-								 * old block, but our blocks are arena-resident
-								 * and the arena is readable, so it is safe */
+	{
+		size_t		k = block_size(old);
+
+		memcpy(p, old, k < n ? k : n);
+	}
 	return p;
 }
 

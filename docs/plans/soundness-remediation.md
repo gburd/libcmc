@@ -145,7 +145,10 @@ than checked, since a permuted successor folds into a self-loop.
   same two nodes, or a reconnection after a reset, is refused.  Then
   model connections by identity with a generation number, keep stale
   descriptors until the peer closes them, and make a write to a reset
-  connection fail as Linux does.
+  connection fail as Linux does.  A `connect()` to a node that is not
+  listening returns success and waits forever; Linux gives
+  `ECONNREFUSED`, so the refusal path of a retrying client is never
+  explored until this is modelled.
 - **3.8 Threads.**  Until the scheduler explores every order in which
   runnable threads may proceed at the modelled preemption points (a
   futex wake, a thread birth, each intercepted syscall), a run in which a
@@ -154,8 +157,9 @@ than checked, since a permuted successor folds into a self-loop.
   woken thread proceeds a search action, and state the preemption
   boundary in cmc(7).
 - **3.9 A root with no enabled action.**  The no-progress guard also
-  reports an initial state with no enabled action and an unmet
-  eventuality, instead of a pass.
+  reports a safety-only model whose initial state enables no action,
+  instead of a pass.  (An unmet `eventually` there already fails, on
+  1.3.0 too.)
 
 ## Phase 4: protocol models
 

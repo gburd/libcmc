@@ -1,0 +1,9 @@
+# test/proc/unmodelled.c: node 0 exercises a construct the engine once
+# answered wrongly; test/proc_gate.sh runs each mode with `args = MODE`.
+# untouched holds unless a write from an unmapped buffer succeeded; the
+# gate adds `eventually node[0][0] == 2` (the write saw EFAULT) for the
+# badptr mode.
+[target]
+nodes = 2
+[invariants]
+untouched = "node[0][0] != 1"

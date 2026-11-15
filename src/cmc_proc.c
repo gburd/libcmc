@@ -60,6 +60,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
@@ -728,14 +729,33 @@ static struct seccomp_notif_sizes g_sz;
 static char preload_path[4096];
 #define CMC_PRELOAD_MAGIC 0x434d43
 
-static void
+/* Move n bytes to or from a node's memory.  Each returns how many bytes
+ * moved: n on success, fewer when the target passed an address it does
+ * not own.  A short read zero-fills the rest of buf, but every caller
+ * checks the count: a fixed-size argument the kernel copies whole gets
+ * the kernel's EFAULT, and a transfer the model cannot answer exactly
+ * ends the check (cr_fail), so a bad pointer is never a success. */
+static size_t
 cr_write(pid_t pid, uint64_t addr, const void *buf, size_t n)
 { struct iovec l = {(void*)(uintptr_t)buf, n}, r = {(void*)(uintptr_t)addr, n};
-  (void) process_vm_writev(pid, &l, 1, &r, 1, 0); }
-static void
+  ssize_t k = n ? process_vm_writev(pid, &l, 1, &r, 1, 0) : 0;
+  return k > 0 ? (size_t) k : 0; }
+static size_t
 cr_read(pid_t pid, uint64_t addr, void *buf, size_t n)
 { struct iovec l = {buf, n}, r = {(void*)(uintptr_t)addr, n};
-  if (process_vm_readv(pid, &l, 1, &r, 1, 0) != (ssize_t) n) memset(buf, 0, n); }
+  ssize_t k = n ? process_vm_readv(pid, &l, 1, &r, 1, 0) : 0;
+  size_t got = k > 0 ? (size_t) k : 0;
+  if (got < n) memset((unsigned char *) buf + got, 0, n - got);
+  return got; }
+
+static void die(int code, const char *fmt, ...);
+/* end the check: node id passed an address the engine could not read or
+ * write for `what`, on a path where the kernel's answer is not modelled */
+static void
+cr_fail(int id, const char *what)
+{
+	die(3, "node %d: %s at an address it does not own; EFAULT on this path is not modelled", id, what);
+}
 
 static int
 is_pie(const char *b)
@@ -909,6 +929,21 @@ cfd_slot(Node *nd, int fd)
 	return -1;
 }
 
+/* The epoll events the model answers: level-triggered EPOLLIN and
+ * EPOLLOUT, plus EPOLLERR and EPOLLHUP, which epoll always reports.
+ * EPOLLET and EPOLLONESHOT change when a ready fd is reported again, and
+ * EPOLLEXCLUSIVE, EPOLLRDHUP and EPOLLPRI report conditions the model
+ * never raises, so each is refused rather than answered as if level
+ * triggered. */
+static void
+ep_events_modelled(const Node *nd, uint32_t ev)
+{
+	uint32_t	ok = EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP;
+
+	if (ev & ~ok)
+		die(3, "node %d: epoll events %#x are not modelled (only level-triggered EPOLLIN and EPOLLOUT)", nd->id, ev & ~ok);
+}
+
 /* the epoll-instance slot index for an epfd on this node, or -1 */
 static int
 ep_slot(Node *nd, int epfd)
@@ -950,14 +985,17 @@ try_pending_for(Node *nd)
 			/* answer with the logical clock (a[1] = struct timespec*) */
 			struct { long long sec, nsec; } ts;
 			ts.sec = logical_ns / 1000000000ULL; ts.nsec = logical_ns % 1000000000ULL;
-			cr_write(nd->pid, a[1], &ts, sizeof ts); g_resp->val = 0; break;
+			if (cr_write(nd->pid, a[1], &ts, sizeof ts) != sizeof ts) { g_resp->error = -EFAULT; break; }
+			g_resp->val = 0; break;
 		}
 		case SYS_gettimeofday:
 		{
 			/* gettimeofday(tv, tz): the buffer is the FIRST argument */
 			struct { long long sec, usec; } tv;
 			tv.sec = logical_ns / 1000000000ULL; tv.usec = (logical_ns % 1000000000ULL) / 1000;
-			cr_write(nd->pid, a[0], &tv, sizeof tv); g_resp->val = 0; break;
+			/* a NULL tv is allowed and writes nothing */
+			if (a[0] && cr_write(nd->pid, a[0], &tv, sizeof tv) != sizeof tv) { g_resp->error = -EFAULT; break; }
+			g_resp->val = 0; break;
 		}
 		case SYS_getrandom:
 		{
@@ -965,7 +1003,10 @@ try_pending_for(Node *nd)
 			 * is reproducible (a real nondeterministic source would need its
 			 * own budget; deterministic is the honest default here) */
 			unsigned char z[256]; size_t n = a[1]; if (n > sizeof z) n = sizeof z;
-			memset(z, 0, n); cr_write(nd->pid, a[0], z, n);
+			memset(z, 0, n);
+			size_t got = cr_write(nd->pid, a[0], z, n);
+			if (got == 0 && n > 0) { g_resp->error = -EFAULT; break; }
+			if (got < n) cr_fail(nd->id, "getrandom fills a buffer");
 			g_resp->val = (long) n; break;
 		}
 		case SYS_setsockopt: case SYS_bind: g_resp->val = 0; break;
@@ -985,7 +1026,7 @@ try_pending_for(Node *nd)
 		{
 			/* read the dest port to learn the peer id */
 			struct { unsigned short fam; unsigned short port; } sa;
-			cr_read(nd->pid, a[1], &sa, sizeof sa);
+			if (cr_read(nd->pid, a[1], &sa, sizeof sa) != sizeof sa) { g_resp->error = -EFAULT; break; }
 			int port = (sa.port >> 8) | ((sa.port & 0xff) << 8);
 			int peer = port - BASE;
 			if (peer < 0 || peer >= M.nodes)
@@ -1026,7 +1067,7 @@ try_pending_for(Node *nd)
 				 * the eventfd poll-ready (checked locally in poll) */
 				uint64_t add = 0; int len = (int) a[2];
 				if (len != 8) die(1, "node %d writes %d bytes to an eventfd (must be 8)", nd->id, len);
-				cr_read(nd->pid, a[1], &add, 8);
+				if (cr_read(nd->pid, a[1], &add, 8) != 8) { g_resp->error = -EFAULT; break; }
 				nd->efdval[ews] += add; g_resp->val = 8; break;
 			}
 			int peer = cfd_peer(nd, fd);
@@ -1042,7 +1083,12 @@ try_pending_for(Node *nd)
 				g_resp->val = len; break;
 			}
 			unsigned char buf[MSGLEN] = {0};
-			cr_read(nd->pid, a[1], buf, (size_t) len);
+			size_t got = cr_read(nd->pid, a[1], buf, (size_t) len);
+			/* nothing readable is the kernel's EFAULT with nothing sent; a
+			 * buffer that faults partway would send a prefix, which the
+			 * model does not do */
+			if (got == 0 && len > 0) { g_resp->error = -EFAULT; break; }
+			if (got < (size_t) len) cr_fail(nd->id, "write sends from a buffer that ends");
 			if (peer == -1)			/* reply to the client: ghost log */
 			{
 				if (len >= 2 && buf[0] == 'A')
@@ -1074,7 +1120,8 @@ try_pending_for(Node *nd)
 				int want = (int) a[2];
 				int avail = flen - nd->durable_read_off;
 				int k = avail < want ? avail : want; if (k < 0) k = 0;
-				if (k > 0) cr_write(nd->pid, a[1], framed + nd->durable_read_off, (size_t) k);
+				if (k > 0 && cr_write(nd->pid, a[1], framed + nd->durable_read_off, (size_t) k) != (size_t) k)
+					cr_fail(nd->id, "a read of the durable record");
 				nd->durable_read_off += k;
 				g_resp->val = k; break;
 			}
@@ -1091,8 +1138,9 @@ try_pending_for(Node *nd)
 					die(1, "node %d blocks reading an empty eventfd (no model)", nd->id);
 				}
 				if (want < 8) die(1, "node %d reads %d bytes from an eventfd (must be 8)", nd->id, want);
-				uint64_t v = nd->efdval[ers]; nd->efdval[ers] = 0;
-				cr_write(nd->pid, a[1], &v, 8); g_resp->val = 8; break;
+				uint64_t v = nd->efdval[ers];
+				if (cr_write(nd->pid, a[1], &v, 8) != 8) cr_fail(nd->id, "an eventfd read");
+				nd->efdval[ers] = 0; g_resp->val = 8; break;
 			}
 			int peer = cfd_peer(nd, fd);
 			if (peer == -2) die(1, "node %d reads fd %d, which is no connection", nd->id, fd);
@@ -1111,7 +1159,7 @@ try_pending_for(Node *nd)
 				static const unsigned char t = 'T';
 				int want = (int) a[2]; int k = want < 1 ? want : 1;
 				nd->timer_fd = -1; th->poll_woke_fd = -1;
-				if (k > 0) cr_write(nd->pid, a[1], &t, (size_t) k);
+				if (k > 0 && cr_write(nd->pid, a[1], &t, (size_t) k) != (size_t) k) cr_fail(nd->id, "a read of a timer byte");
 				g_resp->val = k; break;
 			}
 			/* A non-blocking channel read with nothing deliverable returns
@@ -1154,12 +1202,15 @@ try_pending_for(Node *nd)
 		case SYS_eventfd2:
 		{
 			/* a virtual eventfd: next_fd with a counter seeded from the
-			 * initval (a[0]); EFD_SEMAPHORE (a[1] & 1) is not modelled
-			 * (shortcut: read drains to 0, not decrement-by-one; upgrade
-			 * when a target uses semaphore mode) */
+			 * initval (a[0]).  A read drains the counter to 0, so
+			 * EFD_SEMAPHORE (decrement by one) is refused rather than
+			 * answered wrongly; EFD_NONBLOCK sets the flag F_SETFL would,
+			 * and EFD_CLOEXEC is inert (a node never execs). */
+			if (a[1] & EFD_SEMAPHORE) die(3, "node %d: an EFD_SEMAPHORE eventfd is not modelled", nd->id);
+			if (a[1] & ~(uint64_t) (EFD_NONBLOCK | EFD_CLOEXEC)) die(3, "node %d: eventfd flags %#llx are not modelled", nd->id, (unsigned long long) a[1]);
 			if (nd->nefd >= MAXEFD) die(1, "node %d opens more than %d eventfds", nd->id, MAXEFD);
 			int fd = nd->next_fd++;
-			nd->efd[nd->nefd] = fd; nd->efdval[nd->nefd] = a[0]; nd->efdnb[nd->nefd] = 0; nd->nefd++;
+			nd->efd[nd->nefd] = fd; nd->efdval[nd->nefd] = a[0]; nd->efdnb[nd->nefd] = (a[1] & EFD_NONBLOCK) ? 1 : 0; nd->nefd++;
 			g_resp->val = fd; break;
 		}
 		case SYS_epoll_create1: case SYS_epoll_create:
@@ -1194,14 +1245,16 @@ try_pending_for(Node *nd)
 			{
 				if (at >= 0) { g_resp->error = -EEXIST; g_resp->val = 0; break; }
 				if (e->nit >= MAXEPITEM) die(1, "node %d: epoll instance watches more than %d fds", nd->id, MAXEPITEM);
-				cr_read(nd->pid, a[3], &ev, sizeof ev);
+				if (cr_read(nd->pid, a[3], &ev, sizeof ev) != sizeof ev) { g_resp->error = -EFAULT; break; }
+				ep_events_modelled(nd, ev.events);
 				e->fd[e->nit] = fd; e->events[e->nit] = (short) ev.events; e->data[e->nit] = ev.data; e->nit++;
 				g_resp->val = 0; break;
 			}
 			if (op == EPOLL_CTL_MOD)
 			{
 				if (at < 0) { g_resp->error = -ENOENT; g_resp->val = 0; break; }
-				cr_read(nd->pid, a[3], &ev, sizeof ev);
+				if (cr_read(nd->pid, a[3], &ev, sizeof ev) != sizeof ev) { g_resp->error = -EFAULT; break; }
+				ep_events_modelled(nd, ev.events);
 				e->events[at] = (short) ev.events; e->data[at] = ev.data;
 				g_resp->val = 0; break;
 			}
@@ -1234,7 +1287,11 @@ try_pending_for(Node *nd)
 			Epoll *e = &nd->ep[eps];
 			if (e->nit > MAXPOLL) die(1, "node %d: epoll instance watches %d fds; the limit is %d", nd->id, e->nit, MAXPOLL);
 			/* epoll_wait's timeout is a[3] (ms); epoll_pwait's too (a[4] is the
-			 * sigmask).  A 0 timeout returns at once with whatever is ready. */
+			 * sigmask).  A 0 timeout returns at once with whatever is ready,
+			 * and a negative one blocks.  A positive timeout would return 0
+			 * when it expires, which the search never offers, so it is
+			 * refused. */
+			if ((int) a[3] > 0) die(3, "node %d: epoll_wait with a %d ms timeout is not modelled (only 0 or -1)", nd->id, (int) a[3]);
 			int zero_timeout = (a[3] == 0);
 			struct __attribute__((packed)) { uint32_t events; uint64_t data; } out[MAXPOLL];
 			int ready = 0;
@@ -1248,7 +1305,9 @@ try_pending_for(Node *nd)
 			}
 			if (ready > 0 || zero_timeout)
 			{
-				if (ready > 0) cr_write(nd->pid, arr, out, (size_t) ready * sizeof out[0]);
+				size_t want = (size_t) ready * sizeof out[0];
+				if (ready > 0 && cr_write(nd->pid, arr, out, want) != want)
+					cr_fail(nd->id, "epoll_wait returns events");
 				g_resp->val = ready; break;
 			}
 			/* nothing locally ready and the call blocks: a quiescence point,
@@ -1271,10 +1330,26 @@ try_pending_for(Node *nd)
 			uint64_t arr = a[0]; int nfds = (int) a[1];
 			if (nfds < 0 || nfds > MAXPOLL) die(1, "node %d polls %d fds; the limit is %d", nd->id, nfds, MAXPOLL);
 			struct pollfd pfs[MAXPOLL];
-			cr_read(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]);
-			/* poll's timeout is a[2] (ms); ppoll's is a struct timespec*
-			 * at a[2] (NULL = block forever) */
-			int zero_timeout = (nr == SYS_poll) ? (a[2] == 0) : 0;
+			if (cr_read(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]) != (size_t) nfds * sizeof pfs[0])
+			{ g_resp->error = -EFAULT; break; }
+			/* poll's timeout is a[2] (ms, negative = block forever); ppoll's
+			 * is a struct timespec* at a[2] (NULL = block forever).  A zero
+			 * timeout returns at once; a finite positive one would return 0
+			 * on expiry, which the search never offers, so it is refused. */
+			int zero_timeout;
+			if (nr == SYS_poll)
+			{
+				if ((int) a[2] > 0) die(3, "node %d: poll with a %d ms timeout is not modelled (only 0 or -1)", nd->id, (int) a[2]);
+				zero_timeout = (a[2] == 0);
+			}
+			else if (a[2] == 0) zero_timeout = 0;
+			else
+			{
+				struct { long long sec, nsec; } ts;
+				if (cr_read(nd->pid, a[2], &ts, sizeof ts) != sizeof ts) { g_resp->error = -EFAULT; break; }
+				if (ts.sec != 0 || ts.nsec != 0) die(3, "node %d: ppoll with a finite timeout is not modelled (only zero or NULL)", nd->id);
+				zero_timeout = 1;
+			}
 			int ready = 0;
 			for (int i = 0; i < nfds; i++)
 			{
@@ -1288,7 +1363,8 @@ try_pending_for(Node *nd)
 			}
 			if (ready > 0 || zero_timeout)
 			{
-				cr_write(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]);
+				if (cr_write(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]) != (size_t) nfds * sizeof pfs[0])
+				{ g_resp->error = -EFAULT; break; }
 				g_resp->val = ready; break;
 			}
 			/* nothing locally ready and the call blocks: a quiescence
@@ -1318,7 +1394,9 @@ try_pending_for(Node *nd)
 			{
 				struct clone_args ca; memset(&ca, 0, sizeof ca);
 				size_t sz = (size_t) a[1]; if (sz > sizeof ca) sz = sizeof ca;
-				cr_read(nd->pid, a[0], &ca, sz);
+				/* the kernel itself fails a clone3 whose arguments it cannot
+				 * read, so no thread is born: let it, and record nothing */
+				if (cr_read(nd->pid, a[0], &ca, sz) != sz) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
 				flags = ca.flags; ctid = ca.child_tid;
 			}
 			else
@@ -1350,12 +1428,16 @@ try_pending_for(Node *nd)
 			int cmd = op & FUTEX_CMD_MASK;
 			if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET)
 			{
+				/* a timed wait could return ETIMEDOUT, which the search never
+				 * offers, so it is refused rather than treated as untimed */
+				if (a[3]) die(3, "node %d: a futex wait with a timeout is not modelled", nd->id);
 				/* honour the kernel's atomic compare: FUTEX_WAIT sleeps only
 				 * if *uaddr == val, else it returns EAGAIN at once.  Reading
 				 * *uaddr and matching that keeps us from parking a thread the
 				 * kernel would have let run (which could wrongly look
 				 * quiescent). */
-				uint32_t cur = 0; cr_read(nd->pid, uaddr, &cur, sizeof cur);
+				uint32_t cur = 0;
+				if (cr_read(nd->pid, uaddr, &cur, sizeof cur) != sizeof cur) { g_resp->error = -EFAULT; break; }
 				if (cur != (uint32_t) a[2]) { g_resp->error = -EAGAIN; g_resp->val = 0; break; }
 				th->block_kind = BK_FUTEX; th->block_id = g_req->id; th->futex_addr = uaddr;
 				return 1;			/* do NOT answer: a wake will */
@@ -1376,7 +1458,8 @@ try_pending_for(Node *nd)
 			 * completes.  CONTINUE lets the real thread die. */
 			if (th->ctid_addr)
 			{
-				uint32_t zero = 0; cr_write(nd->pid, th->ctid_addr, &zero, sizeof zero);
+				uint32_t zero = 0;
+				if (cr_write(nd->pid, th->ctid_addr, &zero, sizeof zero) != sizeof zero) cr_fail(nd->id, "a thread exit clears its tid word");
 				futex_wake(nd, th->ctid_addr, 1);
 			}
 			th->inuse = 0; th->block_kind = 0;
@@ -1466,7 +1549,7 @@ static int
 deliver(Node *nd, Thread *th, const unsigned char *body, int len)
 {
 	int k = len < th->block_want ? len : th->block_want;
-	if (k > 0) cr_write(nd->pid, th->block_bufaddr, body, (size_t) k);
+	if (k > 0 && cr_write(nd->pid, th->block_bufaddr, body, (size_t) k) != (size_t) k) cr_fail(nd->id, "a recv buffer");
 	answer(nd, th, k);
 	return k;
 }
@@ -1984,7 +2067,7 @@ poll_wake(Node *nd, Thread *th, int target)
 		struct __attribute__((packed)) { uint32_t events; uint64_t data; } ev;
 		ev.events = (th->pollevents[hit] & POLLIN) ? EPOLLIN : 0;
 		ev.data = th->polldata[hit];
-		cr_write(nd->pid, th->block_pollarr, &ev, sizeof ev);
+		if (cr_write(nd->pid, th->block_pollarr, &ev, sizeof ev) != sizeof ev) cr_fail(nd->id, "epoll_wait returns an event");
 	}
 	else
 	{
@@ -1994,7 +2077,8 @@ poll_wake(Node *nd, Thread *th, int target)
 			pfs[k].fd = th->pollfds[k]; pfs[k].events = th->pollevents[k];
 			pfs[k].revents = (k == hit) ? (short) (th->pollevents[k] & POLLIN) : 0;
 		}
-		cr_write(nd->pid, th->block_pollarr, pfs, (size_t) th->pollfd_n * sizeof pfs[0]);
+		size_t want = (size_t) th->pollfd_n * sizeof pfs[0];
+		if (cr_write(nd->pid, th->block_pollarr, pfs, want) != want) cr_fail(nd->id, "poll returns revents");
 	}
 	/* a woken channel's next read must deliver, not return EAGAIN; a timer
 	 * wake is serviced by the timer-'T' read path, not a message */
@@ -2595,14 +2679,22 @@ cmc_proc_main(const CmcProcOptions *po)
 	}
 	/* No-progress guard (davros eval ask 4): the search was exhaustive and
 	 * every invariant held, but if no action ever changed the world (every
-	 * transition was a stutter) the program never advanced past its initial
-	 * state, so a safety-only pass is vacuous.  Report INCOMPLETE rather
-	 * than a clean pass; a real check should pair safety with an
-	 * `eventually` that shows progress. */
-	if (progressed == 0 && stutter_leaves > 0)
+	 * transition was a stutter, or none was enabled) the program never
+	 * advanced past its initial state, so a safety-only pass is vacuous.
+	 * Report INCOMPLETE rather than a clean pass.  A model with an
+	 * `eventually` property is exempt: reaching it was checked above, and
+	 * is the progress the guard asks for. */
+	int has_eventually = 0;
+	for (int k = 0; k < M.ninv; k++) has_eventually |= M.inv[k].eventually;
+	if (progressed == 0 && !has_eventually)
 	{
-		printf("INCOMPLETE (no violation found): the program made no progress -- every enabled action left the world unchanged (a self-loop at the initial state).  %zu distinct states, %zu self-loops, %.1f s.\n",
-			   distinct, stutter_leaves, dt);
+		/* a root with no enabled action is the same vacuous pass: no
+		 * environment step was ever possible, so nothing was explored */
+		if (stutter_leaves > 0)
+			printf("INCOMPLETE (no violation found): the program made no progress -- every enabled action left the world unchanged (a self-loop at the initial state).  %zu distinct states, %zu self-loops, %.1f s.\n",
+				   distinct, stutter_leaves, dt);
+		else
+			printf("INCOMPLETE (no violation found): the program made no progress -- no action was ever enabled, so only the initial state was checked.  %.1f s.\n", dt);
 		printf("  Pair the safety invariant with an `eventually` property that the program must reach, so a run that never advances fails instead of passing.\n");
 		return 2;
 	}
