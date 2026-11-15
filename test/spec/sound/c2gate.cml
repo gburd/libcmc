@@ -1,0 +1,6 @@
+module c2gate
+var x : 0 .. 2
+init x == 0
+action forbidden [BUG]:
+  x' = 2
+invariant range: x >= 0 and x <= 2

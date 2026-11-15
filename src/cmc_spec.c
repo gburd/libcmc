@@ -360,10 +360,12 @@ static long sp_const_eval(const char *expr, int *ok){
 }
 
 static int sp_load_into(const char *path);
+static int g_symok;		/* symmetry reduction is active (sym_init) */
 
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
 	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0; S.nprop=0; S.fair_weak=0;
+	g_symok=0;	/* no symmetry carries over from a previously loaded spec */
 	if(sp_load_into(path)) return -1;
 	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
 	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
@@ -513,7 +515,7 @@ static uint64_t fnv(const unsigned char *b, size_t n){ uint64_t h=14695981039346
  * and off, strictly fewer states.  A permutation remaps every integer
  * that is a member of S, wherever it appears (int values, set elements,
  * and both the keys and values of functions). */
-static Value g_symset; static int g_symok;
+static Value g_symset;
 static void sym_init(void){
 	g_symok=0; if(!S.has_sym) return;
 	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
@@ -965,18 +967,30 @@ static const char *first_unbound_var(void){
 	return NULL;
 }
 
-/* does some abstract action step take `from` to exactly `to`? */
+/* exact equality of two abstract states: the canonical serialisation,
+ * compared byte for byte.  C2 matching uses this, never state_fp(), so
+ * neither symmetry canonicalisation nor a hash collision can make two
+ * different states match. */
+static int state_eq(const State *a, const State *b){
+	static unsigned char ba[65536], bb[65536];
+	size_t na=state_bytes(a,ba,sizeof ba), nb=state_bytes(b,bb,sizeof bb);
+	return na==nb && na<=sizeof ba && !memcmp(ba,bb,na);
+}
+
+/* does some active abstract action step take `from` to exactly `to`?  An
+ * action gated out by a [TAG] that was not --define'd is not part of the
+ * transition relation, as in the search and the TLA+ emitter. */
 static int abstract_step_exists(const State *from, const State *to, char *err, size_t errcap){
-	uint64_t want=state_fp(to);
 	enum { C2_SUCC = 4096 };
 	State *succ = malloc((size_t)C2_SUCC * sizeof *succ);
 	if(!succ){ snprintf(err,errcap,"out of memory"); return -2; }
 	int found=0;
 	for(int ai=0; ai<S.nact && !found; ai++){
+		if(!act_active(&S.act[ai])) continue;
 		int ns=0, rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
 		bind_params(&S.act[ai],&env,0,from,succ,&ns,C2_SUCC,err,errcap,&rc);
 		if(rc<0){ free(succ); return -2; }
-		for(int k=0;k<ns;k++) if(state_fp(&succ[k])==want){ found=1; break; }
+		for(int k=0;k<ns;k++) if(state_eq(&succ[k],to)){ found=1; break; }
 	}
 	free(succ);
 	return found;
@@ -999,11 +1013,15 @@ int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errc
 	if(bad==-2) return -2;
 	if(bad>=0){ *name=S.inv[bad].name; return bad; }
 	if(C2_have){
-		if(state_fp(&C2_prev)!=state_fp(&cur)){	/* not a stutter */
+		if(!state_eq(&C2_prev,&cur)){	/* not a stutter */
 			int e=abstract_step_exists(&C2_prev,&cur,err,errcap);
 			if(e==-2) return -2;
 			if(e==0){ *name="no matching abstract action"; C2_prev=cur; C2_have=1; return -3; }
 		}
+	} else {
+		/* the first observation of a behaviour must be an initial state */
+		State init; if(sp_init_state(&init,err,errcap)) return -2;
+		if(!state_eq(&init,&cur)){ *name="the first state is not the spec's init"; return -3; }
 	}
 	C2_prev=cur; C2_have=1;
 	return -1;
