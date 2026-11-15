@@ -14,6 +14,44 @@
 # Java 21+ is required (Apalache 0.63 is class-file 65); the gate uses
 # `nix shell nixpkgs#jdk21` when the host java is older or absent.
 set -u
+
+# classify OUT: the verdict in an `apalache-mc check` log, from Apalache's
+# own outcome and exit lines and nothing else.  PASS needs outcome NoError
+# (or ExecutionsTooShort: no error up to the bound) with EXITCODE OK;
+# VIOLATION needs outcome Error, a violated state invariant, and exit
+# code 12 (Apalache's code for a found violation).  Any other log --
+# a parse, typing or input error, a crash, a missing outcome -- is
+# ERROR, so a tool failure can never pass as an expected violation.
+classify() {
+	log=$1
+	if grep -qE 'The outcome is: (NoError|ExecutionsTooShort)' "$log" &&
+	   grep -qE '^EXITCODE: OK' "$log"; then
+		echo PASS
+	elif grep -qE 'The outcome is: Error' "$log" &&
+	     grep -qE 'state invariant [0-9]+ violated' "$log" &&
+	     grep -qE '^EXITCODE: ERROR \(12\)' "$log"; then
+		echo VIOLATION
+	else
+		echo ERROR
+	fi
+}
+
+# --self-test: the classifier against recorded and failing logs, with no
+# Apalache needed (run by the spec gate)
+if [ "${1:-}" = --self-test ]; then
+	t=${CMC_SCRATCH:-$HOME/tmp/cmc-build}/apalache-selftest; mkdir -p "$t"; st=0
+	printf 'The outcome is: NoError\nEXITCODE: OK\n' > "$t/pass"
+	printf 'State 6: state invariant 0 violated.\nThe outcome is: Error\nChecker has found an error\nEXITCODE: ERROR (12)\n' > "$t/viol"
+	printf 'Input error: artificial parser failure\nChecker has found an error\nEXITCODE: ERROR (120)\n' > "$t/parse"
+	printf 'Typing input error: Expected a type annotation\nThe outcome is: Error\nEXITCODE: ERROR (120)\n' > "$t/type"
+	printf 'The outcome is: NoError\n' > "$t/noexit"
+	for c in pass:PASS viol:VIOLATION parse:ERROR type:ERROR noexit:ERROR; do
+		got=$(classify "$t/${c%%:*}")
+		[ "$got" = "${c#*:}" ] || { echo "apalache_gate self-test: ${c%%:*} gave $got, want ${c#*:}"; st=1; }
+	done
+	[ $st = 0 ] && echo "apalache_gate self-test: ok"
+	exit $st
+fi
 CMC=${1:?usage: apalache_gate.sh CMC}
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 VER=${APALACHE_VERSION:-0.63.0}
@@ -76,14 +114,12 @@ check() {
 	# module name must match the filename for the tools
 	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
 	( cd "$d" && RUN "$MC" check --no-deadlock --cinit=CInit "--inv=$inv" --length=10 "$mod.tla" > out.txt 2>&1 )
-	if grep -qiE 'Annotation required|type input error|Typing input error' "$d/out.txt"; then
-		echo "FAIL $cml [$want]: Apalache rejected the generated types"; grep -iE 'error|annotation' "$d/out.txt" | head -3 | sed 's/^/     /'; echo x>"$OUT/fail"; return
+	disp=$(classify "$d/out.txt")
+	if [ "$disp" != "$want" ]; then
+		echo "FAIL $cml [$want]: Apalache gave $disp"; grep -iE 'outcome|error|EXITCODE' "$d/out.txt" | head -3 | sed 's/^/     /'; echo x>"$OUT/fail"; return
 	fi
-	if [ "$want" = VIOLATION ]; then
-		grep -q 'Checker has found an error' "$d/out.txt" && echo "ok   $cml [$want]: Apalache found the violation" || { echo "FAIL $cml [$want]: expected a violation"; grep -iE 'outcome|error' "$d/out.txt" | head -2 | sed 's/^/     /'; echo x>"$OUT/fail"; }
-	else
-		grep -qE 'Checker reports no error|The outcome is: NoError' "$d/out.txt" && echo "ok   $cml [$want]: Apalache reports no error" || { echo "FAIL $cml [$want]: expected no error"; grep -iE 'outcome|error|violat' "$d/out.txt" | head -2 | sed 's/^/     /'; echo x>"$OUT/fail"; }
-	fi
+	if [ "$want" = VIOLATION ]; then echo "ok   $cml [$want]: Apalache found an invariant violation"
+	else echo "ok   $cml [$want]: Apalache reports no error up to length 10"; fi
 }
 
 echo "-- the TLA+ bridge reaches Apalache: cmc --emit-tla is Apalache-checkable"

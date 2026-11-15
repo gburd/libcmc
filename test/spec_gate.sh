@@ -115,5 +115,13 @@ expect "a spec with no invariant is an error" 3 "no invariant" --spec "$OUT/noin
 printf 'var x : 0 .. 2\ninit x == 0\ninvariant t: x <= 2\n' > "$OUT/nomod.cml"
 expect "a spec with no module is an error"    3 "no module" --spec "$OUT/nomod.cml"
 
+# the Apalache gate's verdict classifier: a tool error (parse, typing,
+# input) must never count as an expected violation (audit 0.2)
+if bash "$HERE/test/apalache_gate.sh" --self-test > "$OUT/apa-selftest.txt" 2>&1; then
+	echo "ok   apalache gate classifies tool errors as errors"
+else
+	echo "FAIL apalache gate classifier"; sed 's/^/     /' "$OUT/apa-selftest.txt"; fail=1
+fi
+
 [ $fail = 0 ] && echo "spec_gate: ok (abstract-model checker: verdicts, counts and depths match TLC)" || echo "spec_gate: FAILED"
 exit $fail
