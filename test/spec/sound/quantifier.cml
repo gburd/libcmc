@@ -1,0 +1,4 @@
+module quantifier
+var x : 0 .. 1
+init x == 0
+invariant scoped: all i in 0 .. 1 : some i in 0 .. 1 : i == 0

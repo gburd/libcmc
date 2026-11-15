@@ -1,0 +1,10 @@
+module edges
+var x : 0 .. 3200
+init x == 0
+action advance:
+  when x < 3200
+  x' = x + 1
+action stay(i in 0 .. 15, j in 0 .. 15):
+  x' = x
+fairness weak
+property progress: eventually x == 3200

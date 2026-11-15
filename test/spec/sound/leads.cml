@@ -1,0 +1,14 @@
+module leads
+var x : 0 .. 2
+init x == 0
+action left:
+  when x == 0
+  x' = 1
+action right:
+  when x == 0
+  x' = 2
+action stay:
+  when x != 0
+  x' = x
+fairness weak
+property response: x == 1 ~> FALSE

@@ -1,0 +1,5 @@
+module dead
+var x : 0 .. 1
+init x == 0
+fairness weak
+property progress: eventually x == 1

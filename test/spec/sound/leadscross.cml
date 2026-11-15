@@ -1,0 +1,11 @@
+module leadscross
+var x : 0 .. 2
+init x == 0
+action go:
+  when x < 2
+  x' = x + 1
+action stay:
+  when x == 2
+  x' = x
+fairness weak
+property response: x == 0 ~> x == 1

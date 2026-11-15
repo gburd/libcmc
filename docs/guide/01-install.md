@@ -46,6 +46,7 @@ The longer gates:
 | target | what | time |
 |---|---|---|
 | `make check-msan` | the engine tests under clang's MemorySanitizer | 10 s |
+| `make check-asan` | the spec gate under AddressSanitizer and UBSan | 20 s |
 | `make check-calibration` | all 22 calibration rows against TLC; about 7 GB of RAM | 8 min |
 | `make check-hc-bugs` | planted bugs in the calibration core must break calibration | 30 s |
 | `make check-all` | all of the above | 10 min |

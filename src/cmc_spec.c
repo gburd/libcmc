@@ -30,6 +30,7 @@
  */
 #define _GNU_SOURCE
 #include <ctype.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -108,8 +109,8 @@ static struct {
 typedef struct {
 	const Value *var;			/* current value of each variable, by index */
 	char pname[SP_MAXPARAM][SP_NAME]; long pval[SP_MAXPARAM]; int np;	/* bound params */
-	const Value *primed; int have_primed;	/* for x' in assignments (unused in guards) */
 	const CmcObs *obs;			/* refinement: observable accessor, or NULL */
+	const int *assigned;			/* init: which vars are set so far, or NULL (all) */
 } Env;
 
 static long cst_lookup(const char *name, int *found){
@@ -144,6 +145,7 @@ static int sp_ident(Pst *s, char *out, int cap){
 
 /* a SET value literal or range: {a,b,c} or LO .. HI */
 static Value sp_setspec(Pst *s);
+static int env_bind(Pst *s, Env *ne, const char *name, long val);
 
 /* atom: integer, TRUE/FALSE, const, variable, param, x', fun app f[k],
  * fun literal [i in SET -> EXPR], [f except [k]=v], ( EXPR ), set literal */
@@ -167,7 +169,7 @@ static Value sp_atom(Pst *s){
 				/* bind id=dom.e[e], evaluate body */
 				Pst sub=*s; sub.p=body;
 				/* temporary param binding */
-				Env ne=*s->env; if(ne.np<SP_MAXPARAM){ snprintf(ne.pname[ne.np],SP_NAME,"%s",id); ne.pval[ne.np]=dom.e[e]; ne.np++; } sub.env=&ne;
+				Env ne=*s->env; if(!env_bind(s,&ne,id,dom.e[e])) return z; sub.env=&ne;
 				Value bv=sp_or(&sub); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return z; }
 				f.k[f.n]=dom.e[e]; f.v[f.n]=bv.i; f.n++;
 				s->p=sub.p;
@@ -202,7 +204,10 @@ static Value sp_atom(Pst *s){
 		sp_skip(s); if(*s->p!='}'){ fail(s,"expected }"); return z; } s->p++;
 		set_canon(&set); return set;
 	}
-	if(isdigit((unsigned char)*s->p)){ long x=strtol(s->p,(char**)&s->p,10); return vint(x); }
+	if(isdigit((unsigned char)*s->p)){
+		errno=0; long x=strtol(s->p,(char**)&s->p,10);
+		if(errno==ERANGE){ fail(s,"integer literal overflows a long"); return z; }
+		return vint(x); }
 	/* identifier-led: keywords, const, var, param, fun application */
 	const char *save=s->p; char id[SP_NAME]; int n=sp_ident(s,id,sizeof id);
 	if(n==0){ fail(s,"expected an expression"); return z; }
@@ -236,11 +241,16 @@ static Value sp_atom(Pst *s){
 	for(int i=0;i<s->env->np;i++) if(!strcmp(id,s->env->pname[i])) return vint(s->env->pval[i]);
 	/* constant? */
 	{ int f; long c=cst_lookup(id,&f); if(f) return vint(c); }
-	/* variable, possibly primed, possibly applied f[k] */
-	int primed=0; if(*s->p=='\''){ s->p++; primed=1; }
+	/* variable, possibly primed, possibly applied f[k].  A primed
+	 * variable has no next-state value here: guards, right-hand sides and
+	 * invariants are all evaluated against the current state, so reading
+	 * x' as x would silently change the spec's meaning (and the emitted
+	 * TLA+ keeps the prime).  Refuse it. */
+	if(*s->p=='\''){ fail(s,"a primed variable can only be assigned (x' = E), not read"); return z; }
 	int vi=var_index(id);
 	if(vi>=0){
-		Value base = (primed && s->env->have_primed) ? s->env->primed[vi] : s->env->var[vi];
+		if(s->env->assigned && !s->env->assigned[vi]){ fail(s,"init reads a variable before assigning it"); return z; }
+		Value base = s->env->var[vi];
 		sp_skip(s);
 		if(*s->p=='['){ s->p++; Value kk=sp_or(s); if(!s->ok) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ] in application"); return z; } s->p++;
 			if(base.tag!=T_FUN){ fail(s,"applied a non-function"); return z; }
@@ -253,6 +263,21 @@ static Value sp_atom(Pst *s){
 
 /* a set spec used in domains and quantifiers: {..} literal or LO .. HI */
 static Value sp_add(Pst *s);
+
+/* env with one more bound name, or an error when SP_MAXPARAM names are
+ * already bound (silently skipping the binding would let the body read
+ * an outer value of the same name) */
+static int env_bind(Pst *s, Env *ne, const char *name, long val){
+	if(ne->np>=SP_MAXPARAM){ fail(s,"too many nested bound names"); return 0; }
+	/* TLA+ forbids redeclaring a name in scope (SANY rejects it); here an
+	 * inner binding would be shadowed by the outer one, not the reverse */
+	int f; (void)cst_lookup(name,&f);
+	for(int i=0;i<ne->np;i++) if(!strcmp(ne->pname[i],name)) f=1;
+	if(f || var_index(name)>=0){ fail(s,"a bound name redeclares a name already in scope"); return 0; }
+	snprintf(ne->pname[ne->np],SP_NAME,"%s",name); ne->pval[ne->np]=val; ne->np++;
+	return 1;
+}
+
 static Value sp_setspec(Pst *s){
 	sp_skip(s);
 	if(*s->p=='{') return sp_atom(s);
@@ -261,23 +286,29 @@ static Value sp_setspec(Pst *s){
 	if(s->p[0]=='.'&&s->p[1]=='.'){ s->p+=2; Value hi=sp_add(s); if(!s->ok) return hi;
 		Value set={0}; set.tag=T_SET; for(long x=lo.i;x<=hi.i;x++){ if(set.n>=SP_SETMAX){ fail(s,"range too large"); return set; } set.e[set.n++]=x; } set_canon(&set); return set; }
 	/* a bare set-valued expression (a variable of set type) */
+	if(s->ok && lo.tag!=T_SET){ fail(s,"expected a set (LO .. HI or {..}), not a scalar"); return lo; }
 	return lo;
 }
 
+/* arithmetic is checked: an overflow is a model error, never a wrapped
+ * value (signed overflow is also undefined in C).  `/` and `mod` are
+ * refused on negative operands, where C's truncating division differs
+ * from TLA+'s \div and %, so the emitted module would mean something
+ * else. */
 static Value sp_mul(Pst *s){
 	Value a=sp_atom(s);
 	for(;;){ sp_skip(s);
-		if(*s->p=='*'){ s->p++; Value b=sp_atom(s); a=vint(a.i*b.i); }
-		else if(*s->p=='/'){ s->p++; Value b=sp_atom(s); if(b.i==0){ fail(s,"divide by zero"); return a; } a=vint(a.i/b.i); }
-		else if(sp_word(s,"mod")){ Value b=sp_atom(s); if(b.i==0){ fail(s,"mod by zero"); return a; } a=vint(a.i%b.i); }
+		if(*s->p=='*'){ s->p++; Value b=sp_atom(s); long r; if(__builtin_mul_overflow(a.i,b.i,&r)){ fail(s,"integer overflow in *"); return a; } a=vint(r); }
+		else if(*s->p=='/'){ s->p++; Value b=sp_atom(s); if(b.i==0){ fail(s,"divide by zero"); return a; } if(a.i<0||b.i<0){ fail(s,"/ of a negative number is not supported"); return a; } a=vint(a.i/b.i); }
+		else if(sp_word(s,"mod")){ Value b=sp_atom(s); if(b.i==0){ fail(s,"mod by zero"); return a; } if(a.i<0||b.i<0){ fail(s,"mod of a negative number is not supported"); return a; } a=vint(a.i%b.i); }
 		else break; }
 	return a;
 }
 static Value sp_add(Pst *s){
 	Value a=sp_mul(s);
 	for(;;){ sp_skip(s);
-		if(*s->p=='+'){ s->p++; Value b=sp_mul(s); a=vint(a.i+b.i); }
-		else if(*s->p=='-'&&s->p[1]!='>'){ s->p++; Value b=sp_mul(s); a=vint(a.i-b.i); }
+		if(*s->p=='+'){ s->p++; Value b=sp_mul(s); long r; if(__builtin_add_overflow(a.i,b.i,&r)){ fail(s,"integer overflow in +"); return a; } a=vint(r); }
+		else if(*s->p=='-'&&s->p[1]!='>'){ s->p++; Value b=sp_mul(s); long r; if(__builtin_sub_overflow(a.i,b.i,&r)){ fail(s,"integer overflow in -"); return a; } a=vint(r); }
 		else break; }
 	return a;
 }
@@ -294,7 +325,7 @@ static Value sp_quant(Pst *s){
 		sp_skip(s); if(*s->p!=':'){ fail(s,"expected ':' in quantifier"); return vbool(0); } s->p++;
 		const char *body=s->p; long cnt=0; int res=isall?1:0; const char *endp=body;
 		for(int e=0;e<set.n;e++){
-			Pst sub=*s; sub.p=body; Env ne=*s->env; if(ne.np<SP_MAXPARAM){ snprintf(ne.pname[ne.np],SP_NAME,"%s",var); ne.pval[ne.np]=set.e[e]; ne.np++; } sub.env=&ne;
+			Pst sub=*s; sub.p=body; Env ne=*s->env; if(!env_bind(s,&ne,var,set.e[e])) return vbool(0); sub.env=&ne;
 			Value bv=sp_or(&sub); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return vbool(0); }
 			endp=sub.p;
 			if(isall && !bv.i) res=0;
@@ -302,7 +333,7 @@ static Value sp_quant(Pst *s){
 			if(iscount && bv.i) cnt++;
 		}
 		if(set.n==0){ /* still parse the body once so a broken body is caught */
-			Pst sub=*s; sub.p=body; Env ne=*s->env; if(ne.np<SP_MAXPARAM){ snprintf(ne.pname[ne.np],SP_NAME,"%s",var); ne.pval[ne.np]=0; ne.np++; } sub.env=&ne;
+			Pst sub=*s; sub.p=body; Env ne=*s->env; if(!env_bind(s,&ne,var,0)) return vbool(0); sub.env=&ne;
 			(void)sp_or(&sub); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return vbool(0); } endp=sub.p;
 		}
 		s->p=endp;
@@ -353,7 +384,7 @@ static char *sp_trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=
 /* evaluate a constant-only integer expression at parse time (for bounds
  * like N-1): reuse sp_eval with an env that has no variables */
 static long sp_const_eval(const char *expr, int *ok){
-	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0; env.have_primed=0;
+	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
 	Value v; char e[128];
 	if(!sp_eval(expr,&env,&v,e,sizeof e)){ *ok=0; return 0; }
 	*ok=1; return v.i;
@@ -361,6 +392,16 @@ static long sp_const_eval(const char *expr, int *ok){
 
 static int sp_load_into(const char *path);
 static int g_symok;		/* symmetry reduction is active (sym_init) */
+
+/* copy src into dst[cap], or report that it does not fit.  A model whose
+ * text does not fit a buffer is an error, never a silently shorter
+ * expression (a truncated `A and FALSE` would read as `A`). */
+static int fits(char *dst, size_t cap, const char *src, const char *path, int ln, const char *what){
+	if((size_t)snprintf(dst,cap,"%s",src)<cap) return 1;
+	fprintf(stderr,"cmc: %s:%d: %s is too long (limit %zu bytes)\n",path,ln,what,cap-1);
+	return 0;
+}
+#define CPY(dst,src,what) do{ if(!fits((dst),sizeof(dst),(src),path,ln,(what))) goto bad; }while(0)
 
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
@@ -383,17 +424,18 @@ static int sp_load_into(const char *path){
 	char line[1024]; int ln=0; Action *cur=NULL; int in_action=0;
 	while(fgets(line,sizeof line,f)){
 		ln++;
+		if(!strchr(line,'\n') && !feof(f)){ fprintf(stderr,"cmc: %s:%d: line is too long (limit %zu bytes)\n",path,ln,sizeof line-2); goto bad; }
 		char *h=strchr(line,'#'); if(h)*h=0;
 		char *s=sp_trim(line);
 		if(!*s) continue;
-		if(!strncmp(s,"module ",7)){ if(!S.modname[0]) snprintf(S.modname,SP_NAME,"%s",sp_trim(s+7)); in_action=0; continue; }
+		if(!strncmp(s,"module ",7)){ if(!S.modname[0]) CPY(S.modname,sp_trim(s+7),"module name"); in_action=0; continue; }
 		if(!strncmp(s,"extends ",8) || !strncmp(s,"import ",7)){
 			const char *base=sp_trim(s+(s[0]=='e'?8:7));
 			/* resolve relative to this file's directory; add .cml if absent */
 			char bp[1024]; const char *sl=strrchr(path,'/');
-			if(base[0]=='/'||!sl) snprintf(bp,sizeof bp,"%s",base);
-			else snprintf(bp,sizeof bp,"%.*s/%s",(int)(sl-path),path,base);
-			if(!strstr(bp,".cml")) strncat(bp,".cml",sizeof bp-strlen(bp)-1);
+			if(base[0]=='/'||!sl) CPY(bp,base,"extends path");
+			else if((size_t)snprintf(bp,sizeof bp,"%.*s/%s",(int)(sl-path),path,base)>=sizeof bp){ fprintf(stderr,"cmc: %s:%d: extends path is too long\n",path,ln); goto bad; }
+			if(!strstr(bp,".cml")){ if(strlen(bp)+4>=sizeof bp){ fprintf(stderr,"cmc: %s:%d: extends path is too long\n",path,ln); goto bad; } strcat(bp,".cml"); }
 			if(sp_load_into(bp)){ fprintf(stderr,"cmc: %s:%d: cannot extend %s\n",path,ln,base); goto bad; }
 			in_action=0; continue;
 		}
@@ -402,36 +444,36 @@ static int sp_load_into(const char *path){
 			*eq=0; char *nm=sp_trim(rest), *vv=sp_trim(eq+1);
 			if(S.ncst>=SP_MAXCONST){ fprintf(stderr,"cmc: too many consts\n"); goto bad; }
 			int ok; long val=sp_const_eval(vv,&ok); if(!ok){ fprintf(stderr,"cmc: %s:%d: const %s: bad value\n",path,ln,nm); goto bad; }
-			snprintf(S.cst[S.ncst].name,SP_NAME,"%s",nm); S.cst[S.ncst].val=val; S.ncst++; in_action=0; continue;
+			CPY(S.cst[S.ncst].name,nm,"const name"); S.cst[S.ncst].val=val; S.ncst++; in_action=0; continue;
 		}
 		if(!strncmp(s,"var ",4)){
 			char *rest=sp_trim(s+4); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: var needs :\n",path,ln); goto bad; }
 			*col=0; char *nm=sp_trim(rest), *dom=sp_trim(col+1);
 			if(S.nvar>=SP_MAXVAR){ fprintf(stderr,"cmc: too many vars\n"); goto bad; }
 			Var *V=&S.var[S.nvar];
-			snprintf(V->name,SP_NAME,"%s",nm);
+			CPY(V->name,nm,"var name");
 			if(dom[0]=='['){ /* [DOM -> RANGE] : a function variable */
 				V->is_fun=1; char *arrow=strstr(dom,"->"); if(!arrow){ fprintf(stderr,"cmc: %s:%d: function var needs ->\n",path,ln); goto bad; }
 				*arrow=0; char *d=sp_trim(dom+1); char *r=sp_trim(arrow+2); char *rb=strrchr(r,']'); if(rb)*rb=0; r=sp_trim(r);
-				snprintf(V->fdom,SP_EXPR,"%s",d); snprintf(V->dom,SP_EXPR,"%s",r);
-			} else { V->is_fun=0; snprintf(V->dom,SP_EXPR,"%s",dom); V->fdom[0]=0; }
+				CPY(V->fdom,d,"function domain"); CPY(V->dom,r,"function range");
+			} else { V->is_fun=0; CPY(V->dom,dom,"var domain"); V->fdom[0]=0; }
 			S.nvar++; in_action=0; continue;
 		}
 		if(!strncmp(s,"fairness ",9)){ if(!strcmp(sp_trim(s+9),"weak")) S.fair_weak=1; else { fprintf(stderr,"cmc: %s:%d: only 'fairness weak' is supported\n",path,ln); goto bad; } in_action=0; continue; }
 		if(!strncmp(s,"property",8)){
 			char *rest=sp_trim(s+8); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: property needs name:\n",path,ln); goto bad; }
 			*col=0; if(S.nprop>=SP_MAXINV){ fprintf(stderr,"cmc: too many properties\n"); goto bad; }
-			SpProp *P=&S.prop[S.nprop]; snprintf(P->name,SP_NAME,"%s",sp_trim(rest)); char *body=sp_trim(col+1);
+			SpProp *P=&S.prop[S.nprop]; CPY(P->name,sp_trim(rest),"property name"); char *body=sp_trim(col+1);
 			char *lt=strstr(body,"~>");
-			if(lt){ *lt=0; P->kind=1; snprintf(P->a,SP_EXPR,"%s",sp_trim(body)); snprintf(P->b,SP_EXPR,"%s",sp_trim(lt+2)); }
-			else if(!strncmp(body,"eventually",10)){ P->kind=0; snprintf(P->a,SP_EXPR,"%s",sp_trim(body+10)); P->b[0]=0; }
+			if(lt){ *lt=0; P->kind=1; CPY(P->a,sp_trim(body),"property"); CPY(P->b,sp_trim(lt+2),"property"); }
+			else if(!strncmp(body,"eventually",10)){ P->kind=0; CPY(P->a,sp_trim(body+10),"property"); P->b[0]=0; }
 			else { fprintf(stderr,"cmc: %s:%d: property must be 'eventually E' or 'A ~> B'\n",path,ln); goto bad; }
 			S.nprop++; in_action=0; continue;
 		}
-		if(!strncmp(s,"symmetry ",9)){ snprintf(S.symmetry,SP_EXPR,"%s",sp_trim(s+9)); S.has_sym=1; in_action=0; continue; }
+		if(!strncmp(s,"symmetry ",9)){ CPY(S.symmetry,sp_trim(s+9),"symmetry set"); S.has_sym=1; in_action=0; continue; }
 		if(!strncmp(s,"init ",5)){ const char *ic=sp_trim(s+5);
-			if(S.init[0]){ strncat(S.init," and ",SP_EXPR-strlen(S.init)-1); strncat(S.init,ic,SP_EXPR-strlen(S.init)-1); }
-			else snprintf(S.init,SP_EXPR,"%s",ic);
+			if(S.init[0]){ if(strlen(S.init)+5+strlen(ic)>=sizeof S.init){ fprintf(stderr,"cmc: %s:%d: init is too long (limit %zu bytes)\n",path,ln,sizeof S.init-1); goto bad; } strcat(S.init," and "); strcat(S.init,ic); }
+			else CPY(S.init,ic,"init");
 			in_action=0; continue; }
 		if(!strncmp(s,"action ",7)){
 			if(S.nact>=SP_MAXACT){ fprintf(stderr,"cmc: too many actions\n"); goto bad; }
@@ -443,24 +485,24 @@ static int sp_load_into(const char *path){
 			rest=sp_trim(rest);
 			/* an optional [TAG] gate before the colon */
 			char *tb=strrchr(rest,'[');
-			if(tb && strchr(tb,']')){ char *te=strchr(tb,']'); *te=0; snprintf(cur->tag,SP_NAME,"%s",sp_trim(tb+1)); *tb=0; rest=sp_trim(rest); }
+			if(tb && strchr(tb,']')){ char *te=strchr(tb,']'); *te=0; CPY(cur->tag,sp_trim(tb+1),"action tag"); *tb=0; rest=sp_trim(rest); }
 			char *lp=strchr(rest,'(');
 			if(lp){ *lp=0; char *params=lp+1; char *pe=strrchr(params,')'); if(pe)*pe=0;
-				snprintf(cur->name,SP_NAME,"%s",sp_trim(rest));
+				CPY(cur->name,sp_trim(rest),"action name");
 				/* parse  p in SET, q in SET */
 				char *save=NULL; for(char *t=strtok_r(params,",",&save); t; t=strtok_r(NULL,",",&save)){
 					char *in=strstr(t," in "); if(!in){ fprintf(stderr,"cmc: %s:%d: action param needs 'in'\n",path,ln); goto bad; }
 					*in=0; if(cur->nparam>=SP_MAXPARAM){ fprintf(stderr,"cmc: too many params\n"); goto bad; }
-					snprintf(cur->pname[cur->nparam],SP_NAME,"%s",sp_trim(t)); snprintf(cur->pdom[cur->nparam],SP_EXPR,"%s",sp_trim(in+4)); cur->nparam++;
+					CPY(cur->pname[cur->nparam],sp_trim(t),"parameter name"); CPY(cur->pdom[cur->nparam],sp_trim(in+4),"parameter domain"); cur->nparam++;
 				}
-			} else snprintf(cur->name,SP_NAME,"%s",sp_trim(rest));
+			} else CPY(cur->name,sp_trim(rest),"action name");
 			in_action=1; continue;
 		}
-		if(!strncmp(s,"when ",5)){ if(!cur){ fprintf(stderr,"cmc: %s:%d: when outside action\n",path,ln); goto bad; } snprintf(cur->guard,SP_EXPR,"%s",sp_trim(s+5)); continue; }
+		if(!strncmp(s,"when ",5)){ if(!cur){ fprintf(stderr,"cmc: %s:%d: when outside action\n",path,ln); goto bad; } CPY(cur->guard,sp_trim(s+5),"guard"); continue; }
 		if(!strncmp(s,"invariant",9)){
 			char *rest=sp_trim(s+9); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: invariant needs name:\n",path,ln); goto bad; }
 			*col=0; if(S.ninv>=SP_MAXINV){ fprintf(stderr,"cmc: too many invariants\n"); goto bad; }
-			snprintf(S.inv[S.ninv].name,SP_NAME,"%s",sp_trim(rest)); snprintf(S.inv[S.ninv].expr,SP_EXPR,"%s",sp_trim(col+1)); S.ninv++; in_action=0; continue;
+			CPY(S.inv[S.ninv].name,sp_trim(rest),"invariant name"); CPY(S.inv[S.ninv].expr,sp_trim(col+1),"invariant"); S.ninv++; in_action=0; continue;
 		}
 		/* otherwise: an assignment  lhs' = rhs  inside an action */
 		if(in_action && cur){
@@ -468,7 +510,9 @@ static int sp_load_into(const char *path){
 			if(pr && eq && pr<eq){
 				*pr=0; char *lhs=sp_trim(s); char *rhs=sp_trim(eq+1);
 				if(cur->nasgn>=SP_MAXVAR){ fprintf(stderr,"cmc: too many assignments\n"); goto bad; }
-				snprintf(cur->lhs[cur->nasgn],SP_NAME,"%s",lhs); snprintf(cur->rhs[cur->nasgn],SP_EXPR,"%s",rhs); cur->nasgn++;
+				/* x' = 1 together with x' = 0 is FALSE in TLA+; refuse it */
+				for(int i=0;i<cur->nasgn;i++) if(!strcmp(cur->lhs[i],lhs)){ fprintf(stderr,"cmc: %s:%d: %s' is assigned twice in action %s\n",path,ln,lhs,cur->name); goto bad; }
+				CPY(cur->lhs[cur->nasgn],lhs,"assignment target"); CPY(cur->rhs[cur->nasgn],rhs,"assignment"); cur->nasgn++;
 				continue;
 			}
 		}
@@ -550,8 +594,19 @@ static uint64_t state_fp(const State *st){
 	sym_perms(perm,0,g_symset.n,st,&best,&first); return best;
 }
 
+/* exact equality of two abstract states: the canonical serialisation,
+ * compared byte for byte.  C2 matching and the liveness graph use this,
+ * never state_fp() alone, so neither symmetry canonicalisation nor a
+ * hash collision can make two different states match. */
+static int state_eq(const State *a, const State *b){
+	static unsigned char ba[65536], bb[65536];
+	size_t na=state_bytes(a,ba,sizeof ba), nb=state_bytes(b,bb,sizeof bb);
+	return na==nb && na<=sizeof ba && !memcmp(ba,bb,na);
+}
+
 /* set the initial state from the `init` predicate (a conjunction of
  * `var == EXPR`).  Returns 0 ok. */
+static int in_domains(const State *st, char *err, size_t errcap);
 static int sp_init_state(State *st, char *err, size_t errcap){
 	for(int i=0;i<S.nvar;i++) st->v[i]=vint(0);
 	/* split init on " and " at top level (init conjuncts are var == expr) */
@@ -565,20 +620,72 @@ static int sp_init_state(State *st, char *err, size_t errcap){
 		if(!eq){ snprintf(err,errcap,"init conjunct is not var == expr: %s",conj); return -1; }
 		*eq=0; char *lhs=sp_trim(conj); char *rhs=sp_trim(eq+2);
 		int vi=var_index(lhs); if(vi<0){ snprintf(err,errcap,"init assigns unknown var %s",lhs); return -1; }
-		Env env; memset(&env,0,sizeof env); env.var=st->v; env.np=0;
+		if(set[vi]){ snprintf(err,errcap,"init assigns %s twice",lhs); return -1; }
+		Env env; memset(&env,0,sizeof env); env.var=st->v; env.np=0; env.assigned=set;
 		Value v; if(!sp_eval(rhs,&env,&v,err,errcap)) return -1;
 		st->v[vi]=v; set[vi]=1;
 		if(!nx) break;
 		p=nx+5;
 	}
 	for(int i=0;i<S.nvar;i++) if(!set[i]){ snprintf(err,errcap,"init does not set %s",S.var[i].name); return -1; }
+	return in_domains(st,err,errcap);
+}
+
+static int set_has(const Value *set, long x){
+	for(int j=0;j<set->n;j++) if(set->e[j]==x) return 1;
+	return 0;
+}
+
+/* is x a member of the domain expression dom?  A range `LO .. HI` is
+ * tested by its bounds, since a value range (0 .. 99) can exceed
+ * SP_SETMAX; any other form is evaluated as a set.  Returns 1 member,
+ * 0 not, -1 on an error (message in err). */
+static int dom_has(const char *dom, long x, char *err, size_t errcap){
+	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	const char *dd=strstr(dom,"..");
+	if(dd && !strchr(dom,'{')){
+		char lo[SP_EXPR]; snprintf(lo,sizeof lo,"%.*s",(int)(dd-dom),dom);
+		Value l,h; if(!sp_eval(lo,&env,&l,err,errcap) || !sp_eval(dd+2,&env,&h,err,errcap)) return -1;
+		if(l.tag!=T_INT || h.tag!=T_INT){ snprintf(err,errcap,"the bounds of %s are not integers",dom); return -1; }
+		return x>=l.i && x<=h.i;
+	}
+	Value set; if(!sp_eval_set(dom,&env,&set,err,errcap)) return -1;
+	if(set.tag!=T_SET){ snprintf(err,errcap,"%s is not a set",dom); return -1; }
+	return set_has(&set,x);
+}
+
+/* does state st lie in every variable's declared domain?  A scalar var
+ * `x : D` must be an integer in D; a function var `f : [K -> R]` must be
+ * a function with key set exactly K and every value in R.  The checker
+ * enumerates states, not declarations, so a value outside its domain is
+ * a different model than the one written (and than the emitted TLA+'s
+ * type annotations allow): a model error, never a silently explored
+ * state.  Returns 0 if in, -1 (message in err) if not or on an
+ * evaluation error. */
+static int in_domains(const State *st, char *err, size_t errcap){
+	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	for(int vi=0;vi<S.nvar;vi++){ const Var *V=&S.var[vi]; const Value *v=&st->v[vi];
+		if(!V->is_fun){
+			if(v->tag!=T_INT && v->tag!=T_BOOL){ snprintf(err,errcap,"%s is not an integer",V->name); return -1; }
+			int in=dom_has(V->dom,v->i,err,errcap); if(in<0) return -1;
+			if(!in){ snprintf(err,errcap,"%s = %ld is outside its domain %s",V->name,v->i,V->dom); return -1; }
+			continue;
+		}
+		Value keys; if(!sp_eval_set(V->fdom,&env,&keys,err,errcap)) return -1;
+		if(v->tag!=T_FUN || keys.tag!=T_SET || v->n!=keys.n){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
+		for(int j=0;j<v->n;j++){
+			if(v->k[j]!=keys.e[j]){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
+			int in=dom_has(V->dom,v->v[j],err,errcap); if(in<0) return -1;
+			if(!in){ snprintf(err,errcap,"%s[%ld] = %ld is outside its range %s",V->name,v->k[j],v->v[j],V->dom); return -1; }
+		}
+	}
 	return 0;
 }
 
 /* apply action a with bound params (in env) to st, producing *out;
  * returns 1 if the guard held and the step was taken, 0 if disabled. */
 static int sp_step(const Action *a, Env *env, const State *st, State *out, char *err, size_t errcap){
-	env->var=st->v; env->have_primed=0;
+	env->var=st->v;
 	if(a->guard[0]){ Value g; if(!sp_eval(a->guard,env,&g,err,errcap)) return -1; if(!g.i) return 0; }
 	*out=*st;
 	/* evaluate all RHS against the CURRENT state (simultaneous assignment) */
@@ -600,15 +707,22 @@ static void bind_params(const Action *a, Env *env, int pi, const State *st,
 	if(pi==a->nparam){
 		State out; int r=sp_step(a,env,st,&out,err,errcap);
 		if(r<0){ *rc=-1; return; }
-		if(r==1){ if(*nsucc<cap) succ[(*nsucc)++]=out; else { snprintf(err,errcap,"too many successors"); *rc=-1; } }
+		if(r==1){
+			if(in_domains(&out,err,errcap)){ *rc=-1; return; }
+			if(*nsucc<cap) succ[(*nsucc)++]=out; else { snprintf(err,errcap,"too many successors"); *rc=-1; }
+		}
 		return;
 	}
 	Env e2=*env; Pst s={0}; /* evaluate the param domain in the current env */
 	Value dom; char derr[128]; Env denv=*env; denv.var=st->v;
 	if(!sp_eval_set(a->pdom[pi],&denv,&dom,derr,sizeof derr)){ snprintf(err,errcap,"param domain: %s",derr); *rc=-1; return; }
+	if(dom.tag!=T_SET){ snprintf(err,errcap,"action %s: the domain of %s is not a set",a->name,a->pname[pi]); *rc=-1; return; }
 	(void)s;
 	for(int k=0;k<dom.n;k++){
-		Env e3=e2; if(e3.np<SP_MAXPARAM){ snprintf(e3.pname[e3.np],SP_NAME,"%s",a->pname[pi]); e3.pval[e3.np]=dom.e[k]; e3.np++; }
+		Env e3=e2; if(e3.np>=SP_MAXPARAM){ snprintf(err,errcap,"action %s: too many parameters",a->name); *rc=-1; return; }
+		{ int f; (void)cst_lookup(a->pname[pi],&f); for(int i=0;i<e3.np;i++) if(!strcmp(e3.pname[i],a->pname[pi])) f=1;
+		  if(f || var_index(a->pname[pi])>=0){ snprintf(err,errcap,"action %s: parameter %s redeclares a name already in scope",a->name,a->pname[pi]); *rc=-1; return; } }
+		snprintf(e3.pname[e3.np],SP_NAME,"%s",a->pname[pi]); e3.pval[e3.np]=dom.e[k]; e3.np++;
 		bind_params(a,&e3,pi+1,st,succ,nsucc,cap,err,errcap,rc);
 		if(*rc<0) return;
 	}
@@ -634,136 +748,221 @@ static int seen_insert(uint64_t h){
 typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
 
 /* =====================================================================
- * liveness (Milestone F): weak-fairness-based temporal properties on the
- * abstract model.  After the safety search, rebuild the reachable state
- * graph explicitly (states, action-labeled edges, per-state enabled
- * actions), then for each property find a FAIR violating cycle (lasso):
- *   eventually P : a reachable cycle, all of whose states have ~P, that
- *                  is weakly fair (no action is enabled throughout the
- *                  cycle yet never taken in it) -> P is not guaranteed.
- *   A ~> B       : a reachable A-state from which such a ~B fair cycle
- *                  is reachable -> B does not always follow A.
- * Sound under the stated weak-fairness-of-all-actions assumption; gated
- * against TLC's liveness on the emitted TLA+.
+ * liveness (Milestone F): temporal properties on the abstract model,
+ * with TLA+'s meaning for Spec == Init /\ [][Next]_vars /\ Fairness.
+ *
+ * A behaviour may stutter at any state, so a run can stop moving
+ * anywhere unless fairness forbids it.  `fairness weak` adds WF_vars(A)
+ * for every active action A, which forbids a run that from some point
+ * on has <<A>>_vars continuously enabled and never takes it.  An action
+ * step that leaves every variable unchanged is a stutter, not an A
+ * step, so it neither enables A nor discharges A's fairness.
+ *
+ * After the safety search, rebuild the reachable graph with
+ * non-stuttering, action-labelled edges and, per state, the actions
+ * with a non-stuttering successor.  For a goal G, let M be the ~G
+ * states.  A run that stays in M forever ends inside one SCC C of the M
+ * subgraph, and a fair run covering C exists iff every action is
+ * disabled at some state of C or labels an edge inside C.  (A single
+ * state with no internal edge qualifies when every action is disabled
+ * there, and always without fairness.)  Call the states of such SCCs
+ * the bad core, and the M states that reach the core through M the bad
+ * region:
+ *   eventually P : violated iff init lies in the bad region of ~P.
+ *   A ~> B       : violated iff a reachable A state lies in the bad
+ *                  region of ~B.  The path to the core avoids B, since
+ *                  reaching B discharges the obligation.
+ * Symmetry reduction is refused here: a permuted successor would fold
+ * into a self-loop and read as a stutter.  The spec gate checks each
+ * verdict against TLC on the emitted module.
  * ===================================================================== */
 #define LV_MAX 200000
-static int lv_cap;
-static State *lv_st;				/* lv_st[i] = state i */
-static int *lv_eadj, *lv_eact, *lv_ehead, *lv_enext; /* edge lists */
-static int lv_ne;
-static unsigned char *lv_enabled;	/* lv_enabled[i*nact + a] = action a enabled at state i */
-static int lv_n;
-/* fp -> index map (open addressing) */
-static uint64_t *lv_fp; static int *lv_idx; static size_t lv_mcap;
-static int lv_find_or_add(uint64_t h, int *added){
-	size_t m=lv_mcap-1, i=h&m;
-	for(;;){ if(lv_fp[i]==0 && lv_idx[i]==0 && !(h==0)){ /* empty */ }
-		if(lv_idx[i]==-1){ lv_fp[i]=h; lv_idx[i]=lv_n; *added=1; return lv_n; }
-		if(lv_fp[i]==h){ *added=0; return lv_idx[i]; } i=(i+1)&m; }
-}
-static void lv_add_edge(int from,int to,int act){ lv_eadj[lv_ne]=to; lv_eact[lv_ne]=act; lv_enext[lv_ne]=lv_ehead[from]; lv_ehead[from]=lv_ne; lv_ne++; }
+#define LV_SUCC 4096
+static struct {
+	State *st; int n, cap;			/* states by index; 0 is init */
+	int *head;				/* first out-edge of each state, -1 none */
+	int *to, *act, *next; int ne, ecap;	/* out-edges, as linked lists */
+	int *rhead, *rsrc;			/* in-edges, CSR: rsrc[rhead[v] .. rhead[v+1]) */
+	unsigned char *en;			/* en[i*nact+a]: a has a non-stuttering successor at i */
+	int *slot; size_t mcap;			/* open-addressed index of states, -1 empty */
+} lv;
 
-/* build the reachable graph from init; returns 0 ok, -1 too big/err */
+static void lv_free(void){
+	free(lv.st); free(lv.head); free(lv.to); free(lv.act); free(lv.next);
+	free(lv.rhead); free(lv.rsrc); free(lv.en); free(lv.slot);
+	memset(&lv,0,sizeof lv);
+}
+
+/* the index of state s, adding it if new (*added says which).  Lookup
+ * compares states exactly, so a hash collision cannot merge two. */
+static int lv_find_or_add(const State *s, int *added, char *err, size_t errcap){
+	size_t m=lv.mcap-1, i=(size_t)state_fp(s)&m;
+	while(lv.slot[i]!=-1){
+		if(state_eq(&lv.st[lv.slot[i]],s)){ *added=0; return lv.slot[i]; }
+		i=(i+1)&m;
+	}
+	if(lv.n>=LV_MAX){ snprintf(err,errcap,"more than %d states",LV_MAX); return -1; }
+	if(lv.n==lv.cap){
+		int nc=lv.cap?lv.cap*2:1024; if(nc>LV_MAX) nc=LV_MAX;
+		State *ns=realloc(lv.st,sizeof(State)*(size_t)nc); if(!ns) goto oom; lv.st=ns;
+		int *nh=realloc(lv.head,sizeof(int)*(size_t)nc); if(!nh) goto oom; lv.head=nh;
+		lv.cap=nc;
+	}
+	lv.st[lv.n]=*s; lv.head[lv.n]=-1; lv.slot[i]=lv.n; *added=1;
+	return lv.n++;
+oom:	snprintf(err,errcap,"out of memory"); return -1;
+}
+
+static int lv_add_edge(int from, int to, int act, char *err, size_t errcap){
+	if(lv.ne==lv.ecap){
+		int nc=lv.ecap?lv.ecap*2:4096;
+		int *a=realloc(lv.to,sizeof(int)*(size_t)nc); if(!a) goto oom; lv.to=a;
+		int *b=realloc(lv.act,sizeof(int)*(size_t)nc); if(!b) goto oom; lv.act=b;
+		int *c=realloc(lv.next,sizeof(int)*(size_t)nc); if(!c) goto oom; lv.next=c;
+		lv.ecap=nc;
+	}
+	lv.to[lv.ne]=to; lv.act[lv.ne]=act; lv.next[lv.ne]=lv.head[from]; lv.head[from]=lv.ne; lv.ne++;
+	return 0;
+oom:	snprintf(err,errcap,"out of memory"); return -1;
+}
+
+/* build the reachable graph from init (the state array doubles as the
+ * BFS queue), then its in-edge index.  Returns 0 ok, -1 on error. */
 static int lv_build(const State *init, char *err, size_t errcap){
-	lv_cap=LV_MAX; lv_mcap=1; while(lv_mcap<(size_t)LV_MAX*4) lv_mcap<<=1;
-	lv_st=malloc(sizeof(State)*lv_cap); lv_ehead=malloc(sizeof(int)*lv_cap); lv_enabled=calloc((size_t)lv_cap*S.nact,1);
-	lv_eadj=malloc(sizeof(int)*lv_cap*4); lv_eact=malloc(sizeof(int)*lv_cap*4); lv_enext=malloc(sizeof(int)*lv_cap*4);
-	lv_fp=calloc(lv_mcap,sizeof(uint64_t)); lv_idx=malloc(sizeof(int)*lv_mcap);
-	if(!lv_st||!lv_ehead||!lv_enabled||!lv_eadj||!lv_eact||!lv_enext||!lv_fp||!lv_idx){ snprintf(err,errcap,"out of memory"); return -1; }
-	for(size_t i=0;i<lv_mcap;i++) lv_idx[i]=-1;
-	for(int i=0;i<lv_cap;i++) lv_ehead[i]=-1;
-	lv_n=0; lv_ne=0;
-	int *queue=malloc(sizeof(int)*lv_cap); size_t qh=0,qt=0;
-	int added; int i0=lv_find_or_add(state_fp(init),&added); lv_st[lv_n++]=*init; queue[qt++]=i0;
-	while(qh<qt){
-		int si=queue[qh++]; State *cs=&lv_st[si];
-		for(int a=0;a<S.nact && lv_ne+16<lv_cap*4;a++){
+	memset(&lv,0,sizeof lv);
+	lv.mcap=1; while(lv.mcap<(size_t)LV_MAX*4) lv.mcap<<=1;
+	lv.slot=malloc(sizeof(int)*lv.mcap); lv.en=calloc((size_t)LV_MAX*(size_t)S.nact+1,1);
+	State *succ=malloc(sizeof(State)*LV_SUCC);
+	if(!lv.slot||!lv.en||!succ){ free(succ); snprintf(err,errcap,"out of memory"); return -1; }
+	for(size_t i=0;i<lv.mcap;i++) lv.slot[i]=-1;
+	int added, rc=0;
+	if(lv_find_or_add(init,&added,err,errcap)<0) rc=-1;
+	for(int si=0; si<lv.n && rc==0; si++){
+		State cur=lv.st[si];	/* lv.st may move as states are added */
+		for(int a=0; a<S.nact && rc==0; a++){
 			if(!act_active(&S.act[a])) continue;
-			State succ[256]; int ns=0,rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
-			bind_params(&S.act[a],&env,0,cs,succ,&ns,256,err,errcap,&rc);
-			if(rc<0) return -1;
-			if(ns>0) lv_enabled[(size_t)si*S.nact+a]=1;
+			int ns=0, brc=0; Env env; memset(&env,0,sizeof env); env.np=0;
+			bind_params(&S.act[a],&env,0,&cur,succ,&ns,LV_SUCC,err,errcap,&brc);
+			if(brc<0){ rc=-1; break; }
 			for(int k=0;k<ns;k++){
-				uint64_t h=state_fp(&succ[k]); int ad; int ti=lv_find_or_add(h,&ad);
-				if(ad){ if(lv_n>=lv_cap){ snprintf(err,errcap,"liveness: more than %d states",LV_MAX); return -1; } lv_st[lv_n++]=succ[k]; queue[qt++]=ti; }
-				lv_add_edge(si,ti,a);
+				if(state_eq(&succ[k],&cur)) continue;	/* a stutter */
+				lv.en[(size_t)si*(size_t)S.nact+(size_t)a]=1;
+				int ti=lv_find_or_add(&succ[k],&added,err,errcap);
+				if(ti<0 || lv_add_edge(si,ti,a,err,errcap)){ rc=-1; break; }
 			}
 		}
 	}
-	free(queue); return 0;
+	free(succ);
+	if(rc) return -1;
+	lv.rhead=calloc((size_t)lv.n+1,sizeof(int)); lv.rsrc=malloc(sizeof(int)*((size_t)lv.ne+1));
+	if(!lv.rhead||!lv.rsrc){ snprintf(err,errcap,"out of memory"); return -1; }
+	for(int e=0;e<lv.ne;e++) lv.rhead[lv.to[e]+1]++;
+	for(int v=0;v<lv.n;v++) lv.rhead[v+1]+=lv.rhead[v];
+	int *fill=malloc(sizeof(int)*((size_t)lv.n+1));
+	if(!fill){ snprintf(err,errcap,"out of memory"); return -1; }
+	memcpy(fill,lv.rhead,sizeof(int)*((size_t)lv.n+1));
+	for(int u=0;u<lv.n;u++) for(int e=lv.head[u];e!=-1;e=lv.next[e]) lv.rsrc[fill[lv.to[e]]++]=u;
+	free(fill);
+	return 0;
 }
 
-/* Tarjan SCC restricted to states where mask[i]==1, over edges between
- * masked states; fills comp[] (only for masked states).  lv_nscc SCCs. */
-static int *lv_low,*lv_num,*lv_comp,*lv_stk,*lv_onstk; static int lv_cnt,lv_sp,lv_nscc;
-static const unsigned char *lv_mask;
-static void lv_scc(int u){
-	lv_num[u]=lv_low[u]=lv_cnt++; lv_stk[lv_sp++]=u; lv_onstk[u]=1;
-	for(int e=lv_ehead[u];e!=-1;e=lv_enext[e]){ int v=lv_eadj[e]; if(!lv_mask[v]) continue;
-		if(lv_num[v]==-1){ lv_scc(v); if(lv_low[v]<lv_low[u]) lv_low[u]=lv_low[v]; }
-		else if(lv_onstk[v] && lv_num[v]<lv_low[u]) lv_low[u]=lv_num[v]; }
-	if(lv_low[u]==lv_num[u]){ int w; do{ w=lv_stk[--lv_sp]; lv_onstk[w]=0; lv_comp[w]=lv_nscc; }while(w!=u); lv_nscc++; }
-}
-
-/* is SCC c (within the masked subgraph) a weakly-fair cycle?  It must
- * have an internal edge, and no action may be enabled at every state of
- * c yet taken on no intra-c edge. */
-static int lv_fair(int c){
-	int has_internal=0;
-	for(int u=0;u<lv_n;u++){ if(!lv_mask[u]||lv_comp[u]!=c) continue;
-		for(int ed=lv_ehead[u];ed!=-1;ed=lv_enext[ed]) if(lv_mask[lv_eadj[ed]]&&lv_comp[lv_eadj[ed]]==c) has_internal=1; }
-	if(!has_internal) return 0;
-	if(S.fair_weak){
-		for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue;
-			int enabled_all=1, taken=0;
-			for(int u=0;u<lv_n;u++){ if(!lv_mask[u]||lv_comp[u]!=c) continue;
-				if(!lv_enabled[(size_t)u*S.nact+a]) enabled_all=0;
-				for(int ed=lv_ehead[u];ed!=-1;ed=lv_enext[ed]) if(lv_mask[lv_eadj[ed]]&&lv_comp[lv_eadj[ed]]==c && lv_eact[ed]==a) taken=1; }
-			if(enabled_all && !taken) return 0;	/* WF forbids staying in c */
+/* Tarjan's SCC algorithm over the states with mask[] set, run
+ * iteratively (a recursive walk overflows the stack on a long chain).
+ * Fills comp[] for masked states; returns the SCC count, -1 on OOM. */
+static int lv_scc(const unsigned char *mask, int *comp){
+	int n=lv.n, cnt=0, sp=0, nscc=0;
+	int *num=malloc(sizeof(int)*(size_t)n), *low=malloc(sizeof(int)*(size_t)n);
+	int *stk=malloc(sizeof(int)*(size_t)n), *cs=malloc(sizeof(int)*(size_t)n), *ce=malloc(sizeof(int)*(size_t)n);
+	unsigned char *on=calloc((size_t)n,1);
+	if(!num||!low||!stk||!cs||!ce||!on){ nscc=-1; goto out; }
+	for(int i=0;i<n;i++){ num[i]=-1; comp[i]=-1; }
+	for(int r=0;r<n;r++){
+		if(!mask[r] || num[r]!=-1) continue;
+		int top=0; cs[0]=r; ce[0]=lv.head[r]; num[r]=low[r]=cnt++; stk[sp++]=r; on[r]=1;
+		while(top>=0){
+			int u=cs[top], e=ce[top];
+			if(e!=-1){
+				ce[top]=lv.next[e];
+				int v=lv.to[e]; if(!mask[v]) continue;
+				if(num[v]==-1){ num[v]=low[v]=cnt++; stk[sp++]=v; on[v]=1; top++; cs[top]=v; ce[top]=lv.head[v]; }
+				else if(on[v] && num[v]<low[u]) low[u]=num[v];
+				continue;
+			}
+			if(low[u]==num[u]){ int w; do{ w=stk[--sp]; on[w]=0; comp[w]=nscc; }while(w!=u); nscc++; }
+			top--;
+			if(top>=0 && low[u]<low[cs[top]]) low[cs[top]]=low[u];
 		}
 	}
-	return 1;
+out:	free(num); free(low); free(stk); free(cs); free(ce); free(on);
+	return nscc;
 }
 
-/* find a weakly-fair cycle entirely within states where `goal` is FALSE;
- * returns the SCC id, or -1 if none.  (A fair ~goal cycle = a liveness
- * counterexample for `eventually goal`.) */
-static unsigned char *lv_maskbuf;
-static int lv_bad_cycle(const char *goal){
-	for(int u=0;u<lv_n;u++){ Env env; memset(&env,0,sizeof env); env.var=lv_st[u].v; env.np=0; Value v; char e[64];
-		int g = sp_eval(goal,&env,&v,e,sizeof e) ? (int)v.i : 0; lv_maskbuf[u] = g?0:1; }
-	lv_mask=lv_maskbuf;
-	for(int i=0;i<lv_n;i++){ lv_num[i]=-1; lv_low[i]=0; lv_comp[i]=-1; lv_onstk[i]=0; }
-	lv_cnt=0; lv_sp=0; lv_nscc=0;
-	for(int i=0;i<lv_n;i++) if(lv_mask[i] && lv_num[i]==-1) lv_scc(i);
-	for(int c=0;c<lv_nscc;c++) if(lv_fair(c)) return c;
-	return -1;
+/* the bad region of mask (see the section comment): reg[i] is set for
+ * each masked state that reaches, through masked states, an SCC a fair
+ * run can stay in forever.  Returns 0 ok, -1 on OOM. */
+static int lv_bad_region(const unsigned char *mask, unsigned char *reg){
+	int n=lv.n, na=S.nact, rc=-1;
+	int *comp=malloc(sizeof(int)*(size_t)n), *queue=malloc(sizeof(int)*(size_t)n);
+	unsigned char *dis=NULL, *tak=NULL, *fair=NULL;
+	if(!comp||!queue) goto out;
+	int nscc=lv_scc(mask,comp); if(nscc<0) goto out;
+	dis=calloc((size_t)nscc*(size_t)na+1,1); tak=calloc((size_t)nscc*(size_t)na+1,1); fair=calloc((size_t)nscc+1,1);
+	if(!dis||!tak||!fair) goto out;
+	for(int u=0;u<n;u++){
+		if(!mask[u]) continue;
+		size_t c=(size_t)comp[u];
+		for(int a=0;a<na;a++) if(!lv.en[(size_t)u*(size_t)na+(size_t)a]) dis[c*(size_t)na+(size_t)a]=1;
+		for(int e=lv.head[u];e!=-1;e=lv.next[e]){ int v=lv.to[e];
+			if(mask[v] && comp[v]==comp[u]) tak[c*(size_t)na+(size_t)lv.act[e]]=1; }
+	}
+	for(int c=0;c<nscc;c++){
+		fair[c]=1;
+		if(!S.fair_weak) continue;
+		for(int a=0;a<na;a++){
+			if(!act_active(&S.act[a])) continue;
+			if(!dis[(size_t)c*(size_t)na+(size_t)a] && !tak[(size_t)c*(size_t)na+(size_t)a]) fair[c]=0;
+		}
+	}
+	int qt=0;
+	for(int u=0;u<n;u++){ reg[u]=mask[u] && fair[comp[u]]; if(reg[u]) queue[qt++]=u; }
+	for(int qh=0; qh<qt; qh++){ int v=queue[qh];
+		for(int k=lv.rhead[v];k<lv.rhead[v+1];k++){ int u=lv.rsrc[k];
+			if(mask[u] && !reg[u]){ reg[u]=1; queue[qt++]=u; } } }
+	rc=0;
+out:	free(comp); free(queue); free(dis); free(tak); free(fair);
+	return rc;
+}
+
+/* evaluate expr at state u into *holds; -1 on an evaluation error,
+ * which fails the check rather than reading as FALSE */
+static int lv_holds(const char *expr, int u, int *holds, char *err, size_t errcap){
+	Env env; memset(&env,0,sizeof env); env.var=lv.st[u].v; env.np=0;
+	Value v; if(!sp_eval(expr,&env,&v,err,errcap)) return -1;
+	*holds=v.i!=0; return 0;
 }
 
 /* check all liveness properties; returns index+1 of a violated property
  * (name via *name), 0 if all hold, -1 on error */
 static int liveness_check(const State *init, const char **name, char *err, size_t errcap){
 	if(S.nprop==0) return 0;
-	if(lv_build(init,err,errcap)) return -1;
-	lv_low=malloc(sizeof(int)*lv_n); lv_num=malloc(sizeof(int)*lv_n); lv_comp=malloc(sizeof(int)*lv_n);
-	lv_stk=malloc(sizeof(int)*lv_n); lv_onstk=calloc(lv_n,sizeof(int)); lv_maskbuf=malloc(lv_n);
+	if(g_symok){ snprintf(err,errcap,"liveness properties cannot be checked under symmetry reduction"); return -1; }
 	int rc=0;
-	for(int pi=0;pi<S.nprop && !rc;pi++){ SpProp *P=&S.prop[pi];
-		if(P->kind==0){ /* eventually a: fail if a fair ~a cycle is reachable */
-			if(lv_bad_cycle(P->a)>=0){ *name=P->name; rc=pi+1; }
-		} else { /* a ~> b: fail if an A-state can reach a fair ~b cycle */
-			int bad=lv_bad_cycle(P->b);
-			if(bad>=0){
-				unsigned char *canreach=calloc(lv_n,1);
-				for(int u=0;u<lv_n;u++) if(lv_maskbuf[u]&&lv_comp[u]==bad) canreach[u]=1;
-				int chg=1; while(chg){ chg=0; for(int u=0;u<lv_n;u++){ if(canreach[u]) continue; for(int ed=lv_ehead[u];ed!=-1;ed=lv_enext[ed]) if(canreach[lv_eadj[ed]]){ canreach[u]=1; chg=1; break; } } }
-				for(int u=0;u<lv_n && !rc;u++) if(canreach[u]){ Env env; memset(&env,0,sizeof env); env.var=lv_st[u].v; env.np=0; Value v; char e[64]; if(sp_eval(P->a,&env,&v,e,sizeof e) && v.i){ *name=P->name; rc=pi+1; } }
-				free(canreach);
-			}
+	unsigned char *mask=NULL, *reg=NULL;
+	if(lv_build(init,err,errcap)){ rc=-1; goto out; }
+	mask=malloc((size_t)lv.n); reg=malloc((size_t)lv.n);
+	if(!mask||!reg){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+	for(int pi=0; pi<S.nprop && rc==0; pi++){ const SpProp *P=&S.prop[pi];
+		const char *goal = P->kind==0 ? P->a : P->b;
+		for(int u=0;u<lv.n;u++){ int g; if(lv_holds(goal,u,&g,err,errcap)){ rc=-1; goto out; } mask[u]=!g; }
+		if(lv_bad_region(mask,reg)){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+		if(P->kind==0){ if(reg[0]){ *name=P->name; rc=pi+1; } continue; }
+		for(int u=0;u<lv.n && rc==0;u++){
+			if(!reg[u]) continue;
+			int a; if(lv_holds(P->a,u,&a,err,errcap)){ rc=-1; goto out; }
+			if(a){ *name=P->name; rc=pi+1; }
 		}
 	}
-	free(lv_low);free(lv_num);free(lv_comp);free(lv_stk);free(lv_onstk);free(lv_maskbuf);
-	free(lv_st);free(lv_ehead);free(lv_enabled);free(lv_eadj);free(lv_eact);free(lv_enext);free(lv_fp);free(lv_idx);
+out:	free(mask); free(reg); lv_free();
 	return rc;
 }
 
@@ -873,19 +1072,25 @@ int cmc_refine_load_bind(const char *path, char *err, size_t errcap){
 	FILE *f=fopen(path,"r"); if(!f){ snprintf(err,errcap,"cannot open %s",path); return -1; }
 	B_nmap=0; S.nfield=0; char line[1024]; int sect=0; /* 1=fields 2=map */
 	while(fgets(line,sizeof line,f)){
+		if(!strchr(line,'\n') && !feof(f)){ snprintf(err,errcap,"a line is too long (limit %zu bytes)",sizeof line-2); fclose(f); return -1; }
 		char *h=strchr(line,'#'); if(h)*h=0; char *s=sp_trim(line); if(!*s) continue;
 		if(s[0]=='['){ if(!strncmp(s,"[fields]",8)) sect=1; else if(!strncmp(s,"[map]",5)) sect=2; else sect=0; continue; }
 		char *eq=strchr(s,'='); if(!eq){ continue; } /* spec=/binary= header lines ignored here */
 		*eq=0; char *k=sp_trim(s); char *v=sp_trim(eq+1);
 		/* strip quotes around v */
 		if(*v=='"'){ v++; char *q=strrchr(v,'"'); if(q)*q=0; }
-		if(sect==1){ if(S.nfield<SP_MAXCONST){ snprintf(S.fname[S.nfield],SP_NAME,"%s",k); S.foff[S.nfield]=atoi(v); S.nfield++; } }
+		#define BCPY(dst,src,what) do{ if((size_t)snprintf((dst),sizeof(dst),"%s",(src))>=sizeof(dst)){ snprintf(err,errcap,"%s is too long (limit %zu bytes)",(what),sizeof(dst)-1); fclose(f); return -1; } }while(0)
+		if(sect==1){
+			if(S.nfield>=SP_MAXCONST){ snprintf(err,errcap,"too many fields"); fclose(f); return -1; }
+			BCPY(S.fname[S.nfield],k,"field name"); S.foff[S.nfield]=atoi(v); S.nfield++;
+		}
 		else if(sect==2){
 			if(B_nmap>=SP_MAXVAR){ snprintf(err,errcap,"too many bindings"); fclose(f); return -1; }
 			/* k is VAR or VAR[idx] */
-			char *lb=strchr(k,'['); if(lb){ *lb=0; char *rb=strchr(lb+1,']'); if(rb)*rb=0; snprintf(B_map[B_nmap].idx,SP_NAME,"%s",sp_trim(lb+1)); } else B_map[B_nmap].idx[0]=0;
-			snprintf(B_map[B_nmap].var,SP_NAME,"%s",sp_trim(k)); snprintf(B_map[B_nmap].expr,SP_EXPR,"%s",v); B_nmap++;
+			char *lb=strchr(k,'['); if(lb){ *lb=0; char *rb=strchr(lb+1,']'); if(rb)*rb=0; BCPY(B_map[B_nmap].idx,sp_trim(lb+1),"binding index"); } else B_map[B_nmap].idx[0]=0;
+			BCPY(B_map[B_nmap].var,sp_trim(k),"binding variable"); BCPY(B_map[B_nmap].expr,v,"binding expression"); B_nmap++;
 		}
+		#undef BCPY
 	}
 	fclose(f);
 	if(B_nmap==0){ snprintf(err,errcap,"binding has no [map]"); return -1; }
@@ -965,16 +1170,6 @@ static const char *first_unbound_var(void){
 		if(!bound) return S.var[vi].name;
 	}
 	return NULL;
-}
-
-/* exact equality of two abstract states: the canonical serialisation,
- * compared byte for byte.  C2 matching uses this, never state_fp(), so
- * neither symmetry canonicalisation nor a hash collision can make two
- * different states match. */
-static int state_eq(const State *a, const State *b){
-	static unsigned char ba[65536], bb[65536];
-	size_t na=state_bytes(a,ba,sizeof ba), nb=state_bytes(b,bb,sizeof bb);
-	return na==nb && na<=sizeof ba && !memcmp(ba,bb,na);
 }
 
 /* does some active abstract action step take `from` to exactly `to`?  An

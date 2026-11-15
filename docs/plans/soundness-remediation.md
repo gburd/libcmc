@@ -82,7 +82,11 @@ Each item has a reproduction in the audit; each becomes a row in
 - **1.5 Types, domains and numbers.**  A quantifier or parameter domain
   must be a set; `init` and every successor must lie in each variable's
   declared domain; integer literals and arithmetic that overflow are
-  model errors.
+  model errors.  `/` and `mod` refuse negative operands, where C's
+  truncating division differs from TLA+.  Constructs TLC rejects are
+  errors too: an `init` conjunct that reads a variable not yet set, two
+  assignments to one primed variable, and a bound name that redeclares
+  one already in scope.
 - **1.6 Primes.**  A primed variable is rejected anywhere the evaluator
   would read it as unprimed (right-hand sides, guards, invariants).
 - **1.7 Liveness semantics match TLA+.**  Stuttering is a behavior: a
@@ -94,6 +98,12 @@ Each item has a reproduction in the audit; each becomes a row in
 - **1.8 Capacity.**  The liveness graph checks capacity on every edge;
   overflow is an error, never a truncated graph.  AddressSanitizer runs
   the spec gate in CI.
+
+Phase 1 status: done on `pr/soundness`.  Every item has a row in
+`test/spec_gate.sh` that failed on `b2eab84`; the liveness probes also
+run through TLC in `test/emit_gate.sh`; `make check-asan` runs the spec
+gate under ASan and UBSan.  Liveness under `symmetry` is refused rather
+than checked, since a permuted successor folds into a self-loop.
 
 ## Phase 2: in-process engine (`src/cmc.c`)
 

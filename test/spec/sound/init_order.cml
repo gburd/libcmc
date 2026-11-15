@@ -1,0 +1,5 @@
+module init_order
+var x : 0 .. 1
+var y : 0 .. 1
+init y == x and x == 1
+invariant equal: x == y

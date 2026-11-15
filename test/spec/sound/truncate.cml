@@ -1,0 +1,4 @@
+module truncate
+var x : 0 .. 1
+init x == 0
+invariant hidden: TRUE                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           and FALSE

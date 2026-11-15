@@ -79,6 +79,13 @@ checkprop() {
 }
 checkprop examples/spec ticker ticker "CONSTANT N = 3" reaches_max PASS ""
 checkprop examples/spec ticker tickerb "CONSTANT N = 3" reaches_max VIOLATION "--define RESET"
+# the soundness probes (remediation 1.7): TLC fixes the verdict that
+# test/spec_gate.sh asserts for cmc --spec on the same file
+checkprop test/spec/sound dead dead "" progress VIOLATION ""
+checkprop test/spec/sound unfair unfair "" progress VIOLATION ""
+checkprop test/spec/sound once once "" achieved PASS ""
+checkprop test/spec/sound leads leads "" response VIOLATION ""
+checkprop test/spec/sound leadscross leadscross "" response PASS ""
 
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "emit_gate: ok (generated TLA+ parses and agrees with cmc --spec)" || echo "emit_gate: FAILED"

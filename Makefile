@@ -43,11 +43,12 @@ HC     = $(B)/hc_core.o $(B)/hc_glue.o $(B)/hc_inv.o
 PURE   = $(B)/hc_core.o $(B)/toy0.o $(B)/toy1.o $(B)/toy2.o $(B)/toy3.o
 PURE_SRC = calib/hc/hc_core.c calib/hc/hc_core.h test/toy/toy_core.c test/toy/toy.h
 MSAN_B ?= build-msan
+ASAN_B ?= build-asan
 
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples \
+        check-examples check-asan \
         codeberg-release \
         install docs-site clean
 
@@ -132,6 +133,15 @@ check-msan:
 	  echo "check-msan: ok (probe reported: $$(grep -m1 -oE 'in copy_garbage [^ ]*uninit.c:[0-9]+' $(MSAN_B)/probe_uninit.txt))"; \
 	else echo "check-msan: probe failed unexpectedly"; cat $(MSAN_B)/probe_uninit.txt; exit 1; fi
 
+# AddressSanitizer and UBSan over the abstract checker (soundness plan
+# 1.8): the spec gate, every .cml model and soundness probe, with any
+# out-of-bounds access, leak or undefined operation fatal.  Separate
+# build tree; the preload is not part of the spec gate.
+ASAN_FLAGS = -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+check-asan:
+	$(MAKE) B=$(ASAN_B) CFLAGS="$(ASAN_FLAGS)" $(ASAN_B)/cmc
+	CFLAGS="$(ASAN_FLAGS)" test/spec_gate.sh $(ASAN_B)
+
 check-calibration: $(B)/cmc
 	calib/hc/calibrate.sh $(B)/cmc all
 
@@ -163,7 +173,7 @@ check-emit-tla: $(B)/cmc
 check-emit-apalache: $(B)/cmc
 	test/apalache_gate.sh $(B)/cmc
 
-check-all: check-unit check-msan check-calibration check-hc-bugs
+check-all: check-unit check-msan check-asan check-calibration check-hc-bugs
 
 install: $(LIB) $(B)/cmc $(PRELOAD)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \

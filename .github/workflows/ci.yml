@@ -60,6 +60,14 @@ jobs:
       - name: make check-msan
         run: make check-msan
 
+  asan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check-asan
+        run: make check-asan
+
   nix:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

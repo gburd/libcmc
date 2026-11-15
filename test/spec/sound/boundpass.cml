@@ -1,0 +1,4 @@
+module boundpass
+var x : 0 .. 1
+init x == 2
+invariant safe: TRUE

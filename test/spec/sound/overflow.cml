@@ -1,0 +1,4 @@
+module overflow
+var x : 0 .. 1
+init x == 0
+invariant wrong: 9223372036854775808 == 9223372036854775807

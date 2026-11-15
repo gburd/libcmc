@@ -1,0 +1,7 @@
+module duplicate
+var x : 0 .. 1
+init x == 0
+action contradictory:
+  x' = 1
+  x' = 0
+invariant safe: x == 0

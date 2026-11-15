@@ -1,0 +1,7 @@
+module once
+var x : 0 .. 1
+init x == 1
+action leave:
+  x' = 0
+fairness weak
+property achieved: eventually x == 1

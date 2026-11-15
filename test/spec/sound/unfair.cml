@@ -1,0 +1,7 @@
+module unfair
+var x : 0 .. 1
+init x == 0
+action go:
+  when x == 0
+  x' = 1
+property progress: eventually x == 1

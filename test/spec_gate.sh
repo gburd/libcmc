@@ -13,10 +13,11 @@ OUT=${CMC_SCRATCH:-$HOME/tmp/cmc-build}/spec-gate
 mkdir -p "$OUT"
 fail=0
 
-# expect DESC EXIT NEEDLE cmc-args...
-expect() {
+# expectp DESC EXIT NEEDLE PROGRAM args...: PROGRAM exits EXIT and its
+# output contains NEEDLE
+expectp() {
 	desc=$1 want=$2 needle=$3; shift 3
-	"$CMC" "$@" > "$OUT/out.txt" 2>&1
+	"$@" > "$OUT/out.txt" 2>&1
 	rc=$?
 	if [ "$rc" = "$want" ] && grep -q -- "$needle" "$OUT/out.txt"; then
 		echo "ok   $desc -> exit $rc"
@@ -25,6 +26,11 @@ expect() {
 		sed 's/^/     /' "$OUT/out.txt" | head -20
 		fail=1
 	fi
+}
+# expect DESC EXIT NEEDLE cmc-args...
+expect() {
+	desc=$1 want=$2 needle=$3; shift 3
+	expectp "$desc" "$want" "$needle" "$CMC" "$@"
 }
 
 echo "-- the abstract-model checker (cmc --spec), matched to TLC"
@@ -114,6 +120,47 @@ printf 'module m\nvar x : 0 .. 2\ninit x == 0\naction a:\n  when x < 2\n  x%s = 
 expect "a spec with no invariant is an error" 3 "no invariant" --spec "$OUT/noinv.cml"
 printf 'var x : 0 .. 2\ninit x == 0\ninvariant t: x <= 2\n' > "$OUT/nomod.cml"
 expect "a spec with no module is an error"    3 "no module" --spec "$OUT/nomod.cml"
+
+# soundness rows from the 1.3.0 audit (docs/plans/soundness-remediation.md,
+# Phase 1).  Each asserts the verdict the semantics require; each was a
+# false pass before its fix.
+echo "-- abstract checker soundness (remediation Phase 1)"
+S=$HERE/test/spec/sound
+RD=$OUT/refine_driver
+# shellcheck disable=SC2086
+${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L ${CFLAGS:--O1} -I"$HERE/src" -I"$HERE/include" \
+	-o "$RD" "$HERE/test/spec/refine_driver.c" "$HERE/src/cmc_spec.c" \
+	|| { echo "FAIL refine_driver does not build"; fail=1; }
+# 1.1: the first observation must satisfy init
+expectp "C2: an observation outside init is rejected" 1 "rejected at step 0" "$RD" "$S/c2init.cml" "$S/scalar.bind" 2
+expectp "C2: a behaviour from init is accepted"       0 "accepted 3"         "$RD" "$S/c2init.cml" "$S/scalar.bind" 0 1 2
+# 1.2: a [TAG] action that is not --define'd is not a step
+expectp "C2: a disabled [BUG] action is not a step"    1 "rejected at step 1" "$RD" "$S/c2gate.cml" "$S/scalar.bind" 0 2
+# 1.4: a truncated expression is an error, never a shorter invariant
+expect "an over-long expression is a model error"  3 "too long" --spec "$S/truncate.cml"
+# 1.5: types, declared domains and integer overflow
+expect "a non-set parameter domain is an error"     3 "expected a set" --spec "$S/typepass.cml"
+expect "init outside the declared domain is an error" 3 "outside" --spec "$S/boundpass.cml"
+expect "a successor outside the domain is an error"  3 "outside" --spec "$S/succbound.cml"
+expect "an overflowing literal is an error"         3 "overflow" --spec "$S/overflow.cml"
+# 1.6: a primed variable on a right-hand side is refused, not read unprimed
+expect "a primed right-hand side is refused"        3 "primed" --spec "$S/primed.cml"
+# constructs TLC rejects or reads as FALSE: an init that reads a variable
+# before setting it, two assignments to one primed variable, and a bound
+# name that redeclares one in scope
+expect "init reading an unset variable is an error" 3 "before assigning" --spec "$S/init_order.cml"
+expect "a variable assigned twice is an error"      3 "assigned twice" --spec "$S/duplicate.cml"
+expect "a redeclared bound name is an error"        3 "redeclares" --spec "$S/quantifier.cml"
+# 1.8: a graph with more edges than states (16x16 stuttering bindings per
+# state) was a heap overflow in the liveness graph; it now just holds
+expect "liveness: an edge-dense graph is checked"   0 "1 property held" --spec "$S/edges.cml"
+# 1.7: liveness agrees with TLC on the emitted module (TLC verdicts in
+# the comments were measured on the audit host)
+expect "liveness: a dead state never reaches the goal" 1 "progress is violated" --spec "$S/dead.cml"     # TLC: violated
+expect "liveness: unfair stuttering avoids the goal"   1 "progress is violated" --spec "$S/unfair.cml"   # TLC: violated
+expect "liveness: a goal already reached holds"        0 "No error has been found" --spec "$S/once.cml" # TLC: holds
+expect "liveness: every bad component is checked"      1 "response is violated" --spec "$S/leads.cml"   # TLC: violated
+expect "liveness: reaching B discharges A ~> B"        0 "No error has been found" --spec "$S/leadscross.cml" # TLC: holds
 
 # the Apalache gate's verdict classifier: a tool error (parse, typing,
 # input) must never count as an expected violation (audit 0.2)
