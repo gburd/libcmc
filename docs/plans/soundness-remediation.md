@@ -9,8 +9,9 @@ lede: >-
 
 # Plan: soundness remediation
 
-Status: in progress.  Audited commit: `b2eab84` (1.3.0).  Branch:
-`pr/soundness`.
+Status: Phases 0 to 4 done, except the thread scheduler of 3.8 (the
+INCOMPLETE rule stands in for it) and Phase 5's randomised fingerprint
+tests.  Audited commit: `b2eab84` (1.3.0).  Branch: `pr/soundness`.
 
 ## Why
 
@@ -374,6 +375,21 @@ demonstration it is.
   the future depends on must not merge.
 - An independent review of the changed engines before the next release.
 - The next release notes list, for each item above, its gate.
+
+Status: in part.  The abstract checker's differential test against TLC
+is the emit gate, which now covers every `.cml` model and the five
+liveness probes, and runs in CI before a tag.  The process engine's
+differential test against Linux covers close and reset
+(`test/proc/tcpsem.c`, run natively and under cmc by proc_gate).
+`test/proc/fingerprint.c` checks named pairs of worlds, not random
+ones; randomised fingerprint tests are still open.  An independent
+review of the engine changes at `21fd57d` found six process-engine
+false passes and a hash-only seen set in the abstract checker; each has
+a fix and a red test (`f9e5370`, `eebaaa9`, `ce59d01`, `1c3ae30`).  The
+review covered Phases 1 to 3, not the Phase 4 models, which rest on
+three-engine agreement (cmc, TLC, Apalache) and, for paxos, a separately
+written TLA+ twin.  The CHANGELOG's Unreleased section lists the
+changes; it does not yet name each item's gate.
 
 ## Order
 
