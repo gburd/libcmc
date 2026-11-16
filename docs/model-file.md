@@ -89,8 +89,9 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   live stream, so a drop does not vanish a message from the middle of a
   connection; it fails the connection.  Every queued message on it, in
   both directions, is discarded, and each end's next read or write
-  fails with `ECONNRESET`; after that reads return 0 and writes fail
-  with `EPIPE` (and `SIGPIPE`), as Linux does.  This models a network
+  fails with `ECONNRESET` (or `EPIPE`, if the end had been sent a FIN);
+  after that reads return 0 and writes fail with `EPIPE` (and
+  `SIGPIPE`), as Linux does.  This models a network
   partition or a reset peer, the failures a TCP program must survive.
 - `restarts`: a crashed node is relaunched as a fresh process.  The
   surviving durable record (what it last reported on descriptor 193) is

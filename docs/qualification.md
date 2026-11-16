@@ -39,14 +39,15 @@ call runs in the kernel, untouched.
 |---|---|---|---|
 | `socket`, `bind`, `listen`, `setsockopt` | exact enough | node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts |
 | `connect` to a live node | approximate | always succeeds and waits at the listener, even before the peer calls `listen()` | proc_gate verdicts |
-| `connect` to a node that is down | exact | `ECONNREFUSED`; later reads return 0, writes `EPIPE` | proc_gate "a dead node refuses the connection" |
+| `connect` to a node that is down | exact | `ECONNREFUSED`; later reads `ENOTCONN`, writes `EPIPE`; the socket may be dialled again | proc_gate "a dead node refuses the connection", tcpsem redial |
 | `accept`, `accept4` | exact | which waiting dialler is a search choice; per dialler, oldest first; the sockaddr out-parameter is not filled | proc_gate verdicts |
 | non-blocking `accept` with nothing waiting | exact | `EAGAIN` | proc_gate pollloop, epollloop |
 | one queue per connection direction | exact | FIFO; two connections between one node pair never share bytes | proc_gate crossrpc, fifo |
 | `read`, `recvfrom` | approximate | one read takes at most one write's bytes; a short read leaves the rest queued | proc_gate verdicts (the short read: code only, no fixture yet) |
 | `write`, `sendto` | approximate | at most `[target] max_write` bytes (default 64, cap 4096) per call; a longer write is exit 1 | proc_gate bigmsg |
-| `close` | exact | FIN, or RST when bytes were left unread | proc_gate rstwrite, rstignore |
-| a reset connection | exact | one `ECONNRESET`, then reads 0 and writes `EPIPE` | proc_gate rstwrite, rstignore, reset |
+| `close` | exact | FIN, or RST when bytes were left unread; bytes already sent stay readable | proc_gate rstwrite, rstignore, tcpsem rstdata |
+| a reset connection | exact | the reset reported once (`ECONNRESET`, or `EPIPE` after a FIN), then reads 0 and writes `EPIPE` | proc_gate rstwrite, rstignore, reset, tcpsem finwrite |
+| an exited listener's backlog | exact | each waiting dial is reset | proc_gate tcpsem backlog |
 | `SIGPIPE` on a write into a reset connection | exact for ignored and default | default kills the node; ignored leaves `EPIPE` | proc_gate rstwrite, rstignore |
 | `SIGPIPE` with a handler, or blocked | refused | exit 3 | proc_gate "a SIGPIPE handler is refused" |
 | a crashed peer | approximate | no FIN; a reader may notice (EOF) once drained, standing for a timeout | proc_gate durlog, restart |

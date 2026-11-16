@@ -410,21 +410,31 @@ that blocks in anything else for 10 seconds is an error.
 A read gets at most one write.
 Each TCP connection has its own queue in each direction.
 .Fn close
-sends the peer a FIN, or an RST if bytes were left unread; a reset
-connection reports one
+sends the peer a FIN, or an RST if bytes were left unread.
+After an RST the bytes already sent toward an end are still read, in
+order; then the reset is reported once, as
 .Er ECONNRESET ,
-then reads return 0 and writes fail with
+or as
+.Er EPIPE
+to an end that had been sent a FIN (a read there returns 0).
+After that a read returns 0 and a write fails with
 .Er EPIPE
 and the
 .Dv SIGPIPE
 the writer's disposition decides (a handler, or the signal blocked, is
 refused).
+A write to a peer that closed cleanly succeeds once, then fails the same
+way.
+An exited listener resets the dials still in its backlog.
 A
 .Fn connect
-to a node that is down is refused; one to a live node that has not yet
-called
+to a node that is down is refused, and the socket reads
+.Er ENOTCONN
+until it is dialled again; one to a live node that has not yet called
 .Fn listen
 waits rather than failing.
+Each of these is compared with a native Linux run by
+.Pa test/proc/tcpsem.c .
 .Pp
 In-process cores: at most 8 nodes, 32 bytes per message or persist
 record, 16 effects per step, 2048 possible actions per state, 16 timers

@@ -706,10 +706,20 @@ die(int code, const char *fmt, ...)
  *
  * Closing an end with nothing unread queues a FIN toward the other end,
  * which reads it as EOF once delivered.  Closing it with bytes unread is
- * an RST, as Linux sends.  A reset (an RST, a DROP, or a restart of the
- * peer) leaves at each live end one pending ECONNRESET for its next read
- * or write; after that a read returns 0 and a write fails with EPIPE and
- * SIGPIPE, as Linux does. */
+ * an RST, as Linux sends.  What a reset leaves at a live end follows
+ * Linux, as measured on loopback:
+ *   - bytes already queued toward the end stay readable, in order, then
+ *     the reset is reported once: ECONNRESET, or EPIPE if the end had
+ *     already been sent a FIN (Linux's CLOSE_WAIT);
+ *   - a read reports ECONNRESET, never EPIPE (after a FIN it reads 0);
+ *   - once reported, a read returns 0 and a write fails with EPIPE and
+ *     the SIGPIPE the writer's disposition decides;
+ *   - a write to a peer that closed cleanly succeeds once (the peer's
+ *     stack answers it with an RST, leaving EPIPE).
+ * A DROP is a network failure: the bytes in flight are lost both ways,
+ * then both ends see the reset.  A connect() that was refused leaves the
+ * socket unconnected (reads ENOTCONN, writes EPIPE) until it is dialled
+ * again. */
 #define MAXCONNS 64
 typedef struct {
 	int used;
@@ -718,7 +728,8 @@ typedef struct {
 	int gone[2];				/* closed because its node died (crash or exit) */
 	int accepted;				/* end 1 exists (the acceptor took it) */
 	int reset;					/* an RST ended it */
-	int err[2];					/* an ECONNRESET still to report at this end */
+	int err[2];					/* errno still to report at this end (ECONNRESET or EPIPE), or 0 */
+	int refused;				/* the dial was refused: end 0 is unconnected */
 	int eof[2];					/* this end has read the FIN */
 	int seq[2];					/* sends so far toward each end, for FIFO order */
 } Conn;
@@ -999,6 +1010,32 @@ conn_discard(int conn)
 		if (bag[i].used && bag[i].conn == conn) bag[i].used = 0;
 }
 
+/* discard the messages queued on connection conn toward end `to` */
+static void
+conn_discard_to(int conn, int to)
+{
+	for (int i = 0; i < MAXMSG; i++)
+		if (bag[i].used && bag[i].conn == conn && bag[i].to == to) bag[i].used = 0;
+}
+
+/* has end e been sent the peer's FIN (queued, or already read)?  Linux
+ * then holds the end in CLOSE_WAIT, where a reset reports EPIPE */
+static int
+fin_toward(int conn, int e)
+{
+	if (conns[conn].eof[e]) return 1;
+	for (int i = 0; i < MAXMSG; i++)
+		if (bag[i].used && bag[i].conn == conn && bag[i].to == e && bag[i].eof) return 1;
+	return 0;
+}
+
+/* the errno a reset leaves at end e of connection conn */
+static int
+reset_errno(int conn, int e)
+{
+	return fin_toward(conn, e) ? EPIPE : ECONNRESET;
+}
+
 /* a new connection from node a (or -1, the client) to node b's listener */
 static int
 conn_new(int a, int b)
@@ -1093,9 +1130,11 @@ static struct seccomp_notif_resp *g_ans;
 static void answer(Node *nd, Thread *th, long val);
 static void poll_wake(Node *nd, Thread *th, int target, int at);
 
-/* An RST reached end e of connection conn: a thread parked in recv on it
- * gets its ECONNRESET now, and a thread parked in poll on it is woken so
- * its next read gets it, as Linux wakes both. */
+/* An RST reached end e of connection conn.  A thread parked in recv on
+ * it, with nothing queued before the reset, returns now: ECONNRESET, or
+ * 0 when the end was in CLOSE_WAIT (the EPIPE is left for a write).  A
+ * recv with bytes still queued stays parked, since those are delivered
+ * first.  A thread parked in poll on it is woken, as Linux wakes both. */
 static void
 rst_notify(int conn, int e)
 {
@@ -1108,7 +1147,11 @@ rst_notify(int conn, int e)
 		Thread *th = &nd->th[ti];
 		if (!th->inuse || !th->block_kind) continue;
 		if (th->block_kind == BK_RECV && th->block_conn == conn && th->block_end == e)
-		{ cn->err[e] = 0; answer(nd, th, -ECONNRESET); }
+		{
+			if (conn_head(conn, e) >= 0) continue;
+			if (cn->err[e] == ECONNRESET) { cn->err[e] = 0; answer(nd, th, -ECONNRESET); }
+			else answer(nd, th, 0);
+		}
 		else if (th->block_kind == BK_POLL)
 			for (int k = 0; k < th->pollfd_n; k++)
 			{
@@ -1118,21 +1161,28 @@ rst_notify(int conn, int e)
 	}
 }
 
-/* Close end e of connection conn.  dead says the end's node died: its
- * kernel tears the socket down with no FIN or RST, so the peer learns
- * nothing until it writes (the search's EOF action models a peer that
- * notices).  A live close sends a FIN, queued behind the bytes already
- * sent, or an RST when this end still had bytes unread: the RST discards
- * both directions and leaves the peer one ECONNRESET. */
+/* Close end e of connection conn.  dead says the end's host crashed:
+ * nothing is sent, so the peer learns nothing until it writes (the
+ * search's EOF action models a peer that notices).  A live close sends a
+ * FIN, queued behind the bytes already sent, or an RST when this end
+ * still had bytes unread.  The RST discards those unread bytes, keeps
+ * what this end had already sent (it reaches the peer before the RST),
+ * and leaves the peer the reset's errno. */
 static void
 end_close(int conn, int e, int dead)
 {
 	Conn *cn = &conns[conn];
 	if (cn->closed[e]) return;
 	cn->closed[e] = 1; cn->gone[e] = dead;
-	if (!dead && !cn->reset && !cn->closed[1 - e])
+	if (dead) conn_discard_to(conn, e);
+	else if (!cn->reset && !cn->closed[1 - e])
 	{
-		if (conn_has_data(conn, e)) { conn_discard(conn); cn->reset = 1; cn->err[1 - e] = 1; rst_notify(conn, 1 - e); }
+		if (conn_has_data(conn, e))
+		{
+			conn_discard_to(conn, e);
+			cn->reset = 1; cn->err[1 - e] = reset_errno(conn, 1 - e);
+			rst_notify(conn, 1 - e);
+		}
 		else bag_add(conn, 1 - e, NULL, 0, 1);
 	}
 	conn_maybe_free(conn);
@@ -1267,13 +1317,24 @@ try_pending_for(Node *nd)
 			 * shortcut: a live node that has not yet called listen() is
 			 * treated as listening, so a startup race that Linux would
 			 * refuse waits instead; upgrade if a target retries connects. */
+			/* a socket already dialled: a refused one may be dialled again
+			 * (its slot is reused), a connected one is EISCONN */
+			int fd = (int) a[0], cs = cfd_slot(nd, fd);
+			if (cs >= 0)
+			{
+				int old = nd->cconn[cs];
+				if (old < 0 || !conns[old].refused) { g_resp->error = -EISCONN; break; }
+				conns[old].closed[0] = 1; conn_maybe_free(old);
+				cfd_del(nd, cs);
+			}
 			if (!N[peer].alive)
 			{
-				/* the socket stays, unconnected: a later write fails with
-				 * EPIPE and a read returns 0, as on Linux after a refusal */
+				/* the socket stays, unconnected: a read fails with
+				 * ENOTCONN and a write with EPIPE, as on Linux after a
+				 * refusal, until it is dialled again */
 				int c = conn_new(nd->id, peer);
-				conns[c].closed[1] = conns[c].gone[1] = 1; conns[c].reset = 1;
-				cfd_set(nd, (int) a[0], peer, c, 0);
+				conns[c].closed[1] = conns[c].gone[1] = 1; conns[c].refused = 1;
+				cfd_set(nd, fd, peer, c, 0);
 				g_resp->error = -ECONNREFUSED; break;
 			}
 			if (N[peer].npend >= MAXCONN) die(1, "more than %d connections wait at node %d", MAXCONN, peer);
@@ -1281,7 +1342,7 @@ try_pending_for(Node *nd)
 			N[peer].pend[N[peer].npend++] = c;
 			/* the node sends/recvs on the socket() fd (connect's a[0]);
 			 * connect() itself returns 0 */
-			cfd_set(nd, (int) a[0], peer, c, 0);
+			cfd_set(nd, fd, peer, c, 0);
 			g_resp->val = 0; break;
 		}
 		case SYS_accept: case SYS_accept4:
@@ -1320,22 +1381,25 @@ try_pending_for(Node *nd)
 			if (len < 0 || len > M.max_write) die(1, "node %d writes %d bytes in one call; the limit is %d (raise [target] max_write, up to %d)", nd->id, len, M.max_write, MSGLEN);
 			if (c < 0) { g_resp->val = len; break; }	/* a timer fd has no reader */
 			Conn *cn = &conns[c];
-			if (cn->err[e]) { cn->err[e] = 0; g_resp->error = -ECONNRESET; break; }
-			if (cn->reset)
+			int nosig = (nr == SYS_sendto) && (a[3] & MSG_NOSIGNAL);
+			/* a pending reset is reported first; EPIPE, from a reset, a
+			 * refused dial, or a reported reset, raises SIGPIPE unless the
+			 * caller asked for MSG_NOSIGNAL */
+			int werr = cn->err[e] ? cn->err[e] : (cn->reset || cn->refused) ? EPIPE : 0;
+			if (werr)
 			{
-				/* EPIPE, with the SIGPIPE Linux raises unless the caller
-				 * asked for MSG_NOSIGNAL */
-				int nosig = (nr == SYS_sendto) && (a[3] & MSG_NOSIGNAL);
-				if (!nosig && sigpipe_kills(nd, th)) return 1;
-				g_resp->error = -EPIPE; break;
+				cn->err[e] = 0;
+				if (werr == EPIPE && !nosig && sigpipe_kills(nd, th)) return 1;
+				g_resp->error = -werr; break;
 			}
 			if (cn->closed[1 - e])
 			{
 				/* The peer's descriptor is gone.  If its host died nothing
 				 * answers and the bytes are lost; otherwise its stack answers
-				 * the data with an RST, which this end sees on its next call.
-				 * shortcut: the RST arrives at once, not after a delay. */
-				if (!cn->gone[1 - e]) { cn->reset = 1; cn->err[e] = 1; }
+				 * the data with an RST, and this end, which had its FIN, gets
+				 * EPIPE on its next call.  shortcut: the RST arrives at once,
+				 * not a round trip later. */
+				if (!cn->gone[1 - e]) { cn->reset = 1; cn->err[e] = reset_errno(c, e); }
 				g_resp->val = len; break;
 			}
 			unsigned char buf[MSGLEN] = {0};
@@ -1403,12 +1467,14 @@ try_pending_for(Node *nd)
 			int peer = nd->cpeer[rs], c = nd->cconn[rs], e = nd->cend[rs];
 			if (fd != nd->timer_fd && c >= 0 && conn_head(c, e) < 0)
 			{
-				/* nothing queued: a pending ECONNRESET is reported once, and
-				 * after it, or after the FIN was read, every read returns 0
-				 * at once, blocking or not, as Linux does.  No search choice
-				 * remains, so answer immediately. */
+				/* nothing queued: an unconnected socket reads ENOTCONN, a
+				 * pending ECONNRESET is reported once, and after it, or after
+				 * the FIN was read, every read returns 0 at once, blocking or
+				 * not, as Linux does.  No search choice remains, so answer
+				 * immediately. */
 				Conn *cn = &conns[c];
-				if (cn->err[e]) { cn->err[e] = 0; th->poll_woke_fd = -1; g_resp->error = -ECONNRESET; break; }
+				if (cn->refused) { th->poll_woke_fd = -1; g_resp->error = -ENOTCONN; break; }
+				if (cn->err[e] == ECONNRESET) { cn->err[e] = 0; th->poll_woke_fd = -1; g_resp->error = -ECONNRESET; break; }
 				if (cn->eof[e] || cn->reset) { th->poll_woke_fd = -1; g_resp->val = 0; break; }
 			}
 			if (fd == nd->timer_fd)
@@ -1852,7 +1918,7 @@ peer_lost(int conn, int e)
 {
 	if (conn < 0) return 0;
 	const Conn *cn = &conns[conn];
-	return cn->gone[1 - e] && !cn->reset && conn_head(conn, e) < 0;
+	return cn->gone[1 - e] && !cn->reset && !cn->refused && conn_head(conn, e) < 0;
 }
 
 /* a waiting connection from `peer` at node nd's listener? */
@@ -1866,10 +1932,9 @@ pend_from(const Node *nd, int peer)
 
 /* Node nd is gone.  If its process exited on a live host (it returned,
  * or a signal killed it), its kernel closes every socket as a close()
- * would: a FIN, or an RST where bytes were left unread.  If the host
- * crashed (crashed set), nothing is sent and each end just goes dead.
- * Either way, connections waiting at its listener are refused, so the
- * dialler's end is reset. */
+ * would (a FIN, or an RST where bytes were left unread) and resets the
+ * dials still waiting in its backlog.  If the host crashed (crashed
+ * set), nothing is sent, and each end just goes dead. */
 static void
 node_gone(Node *nd)
 {
@@ -1878,10 +1943,18 @@ node_gone(Node *nd)
 	nd->nc = 0; nd->timer_fd = -1;
 	for (int k = 0; k < nd->npend; k++)
 	{
-		Conn *cn = &conns[nd->pend[k]];
-		cn->closed[1] = cn->gone[1] = 1; cn->reset = 1; cn->err[0] = 1;
-		conn_discard(nd->pend[k]);
-		conn_maybe_free(nd->pend[k]);
+		int c = nd->pend[k];
+		Conn *cn = &conns[c];
+		cn->closed[1] = 1; cn->gone[1] = nd->crashed;
+		conn_discard_to(c, 1);
+		if (!nd->crashed)
+		{
+			/* the kernel of an exited listener resets the dials still in
+			 * its backlog; a crashed host answers nothing */
+			cn->reset = 1; cn->err[0] = reset_errno(c, 0);
+			rst_notify(c, 0);
+		}
+		conn_maybe_free(c);
 	}
 	nd->npend = 0;
 }
@@ -2174,7 +2247,8 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 {
 #define PUTC(b) do { if (n >= cap) die(1, "world encoding exceeds %zu bytes", cap); w[n++] = (unsigned char) (b); } while (0)
 	const Conn *cn = &conns[c];
-	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->err[e] << 3) | (cn->eof[e] << 4) | (cn->accepted << 5));
+	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5));
+	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : 0);
 	for (int last = -1;;)
 	{
 		int h = conn_next(c, e, last);
@@ -2361,7 +2435,7 @@ enum_actions(Act *out)
 						saw_chan = 1;
 						/* readable: a queued byte or FIN, a pending reset, or
 						 * a peer whose node is gone (the EOF a peer notices) */
-						if (conn_head(ci, e) >= 0 || (ci >= 0 && (conns[ci].err[e] || conns[ci].reset)) ||
+						if (conn_head(ci, e) >= 0 || (ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
 							peer_lost(ci, e))
 							ADD2(A_WAKE, d, peer, ti, k);
 					}
@@ -2477,9 +2551,10 @@ static void
 reset_conn(int conn)
 {
 	Conn *cn = &conns[conn];
+	int errs[2] = {reset_errno(conn, 0), reset_errno(conn, 1)};
 	conn_discard(conn);
 	cn->reset = 1;
-	for (int e = 0; e < 2; e++) if (!cn->closed[e]) cn->err[e] = 1;
+	for (int e = 0; e < 2; e++) if (!cn->closed[e]) cn->err[e] = errs[e];
 	for (int e = 0; e < 2; e++) rst_notify(conn, e);
 }
 

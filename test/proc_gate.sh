@@ -358,6 +358,34 @@ expect "rst: a SIGPIPE handler is refused"                 3 "SIGPIPE handler" -
 expect "unmodelled: an over-long state record is refused" 3 "longer than the 64" --model-file "$OUT/u-longrec.model"
 expect "unmodelled: a partial state record is refused"    3 "partial volatile state record" --model-file "$OUT/u-partrec.model"
 
+# TCP close and reset semantics against Linux (soundness plan 3.7): each
+# scenario of test/proc/tcpsem.c runs natively on loopback, then under
+# cmc, which must reach exactly the code Linux gave.  Node 0's code is
+# two bytes; a digit is one call's result (see tcpsem.c).
+$CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpsem.c does not build"; fail=1; }
+tcpsem_native() {	# MODE FIRST PAUSE: run natively, print node 0's two code bytes
+	d="$OUT/tcpsem-$1"; mkdir -p "$d"
+	other=$((1 - $2))
+	( cd "$d" && exec "$B/proc/tcpsem" "$2" "$1" 3>"$d/n$2.state" ) & pa=$!
+	sleep "$3"
+	( cd "$d" && exec "$B/proc/tcpsem" "$other" "$1" 3>"$d/n$other.state" ) & pb=$!
+	wait $pa; wait $pb
+	od -An -tu1 "$d/n0.state" | tr -s ' ' '\n' | grep -v '^$' | tail -2 | tr '\n' ' '
+}
+tcpsem_row() {	# MODE FIRST PAUSE HI LO ENV
+	got=$(tcpsem_native "$1" "$2" "$3")
+	if [ "$got" = "$4 $5 " ]; then echo "ok   tcpsem $1: Linux gives $4,$5"
+	else echo "FAIL tcpsem $1: Linux gave '$got', the fixture expects '$4 $5'"; fail=1; fi
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[fields]\nhi = 0\nlo = 1\n[invariants]\nlinux = "node[0].hi < 1 or (node[0].hi == %s and node[0].lo == %s) or node[0].lo == 9"\nreached = "eventually node[0].hi == %s and node[0].lo == %s"\n' \
+		"$B/proc/tcpsem" "$1" "$6" "$4" "$5" "$4" "$5" > "$OUT/tcpsem-$1.model"
+	expect "tcpsem $1: cmc reaches Linux's result and no other" 0 "No error has been found" --model-file "$OUT/tcpsem-$1.model"
+}
+tcpsem_row finwrite 1 0.1 13 44 "timeouts = 0"
+tcpsem_row rstdata  1 0.1 7 24  "timeouts = 0"
+tcpsem_row backlog  1 0.1 0 24  "timeouts = 1"
+tcpsem_row redial   0 0.3 6 51  "crashes = 1
+restarts = 1"
+
 # the world encoding (soundness plan 3.1, 3.2): worlds whose futures
 # differ encode differently, and the seen set compares bytes, not hashes
 if $CC -std=c11 -O1 -w -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fingerprint" "$T/fingerprint.c" "$HERE/src/cmc_spec.c"; then

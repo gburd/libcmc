@@ -197,7 +197,12 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   `b2eab84`, as did the refused, rstwrite and rstignore modes of
   `test/proc/unmodelled.c`.  The fix exposed two examples whose
   results came from the old model: raft's planted bug and all of hc
-  (4.7, 4.8).
+  (4.7, 4.8).  An independent review then found four gaps against
+  Linux, each now matched: a write after the peer's FIN (EPIPE, not
+  ECONNRESET), an RST that kept the bytes sent before it, an exited
+  listener's backlog, and a socket dialled again after a refusal.
+  `test/proc/tcpsem.c` runs each natively on loopback and under cmc,
+  and requires the same result.
 - **3.8 Threads.**  Until the scheduler explores every order in which
   runnable threads may proceed at the modelled preemption points (a
   futex wake, a thread birth, each intercepted syscall), a run in which a
