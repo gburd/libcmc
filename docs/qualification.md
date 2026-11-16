@@ -82,8 +82,9 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `clone`, `clone3` (threads), `futex` wait and wake, `exit` | approximate | one order of a node's threads is run, not every order | proc_gate twothread, twothread_join |
-| a multi-threaded search that would pass | refused | INCOMPLETE ("thread schedules not explored"); a violation still counts | proc_gate twothread |
+| the order of threads' visible operations (`futex`, calls on owned fds, state-hook writes, `clone`) | exact | every order is a search choice (RUN); one thread of a node runs at a time | proc_gate twothread, racewake, raceemit, raceborn |
+| `clone`, `clone3` (threads), `futex` wait and wake, `exit`, `pthread_join` | exact | a newborn and its parent are both held at the clone's return until the search runs each | proc_gate twothread_join, raceborn |
+| memory accesses between two visible operations | not explored | a data race with no system call between the racing accesses is not found | (boundary; no fixture) |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |
 | `fork`, `vfork`, `clone` without `CLONE_THREAD` | refused | exit 3, before the child exists | proc_gate "a fork is refused" |
 | a `FUTEX_WAKE` of a strict subset of several waiters | refused | exit 1 | (code; no fixture yet) |

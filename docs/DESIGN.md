@@ -55,16 +55,43 @@ exit) is blocked, exactly like one parked in `recv`, `poll` or
 world is a search state only when every thread of every node is blocked
 or has exited.  A `FUTEX_WAKE` wakes waiters only when the program
 issues one, as a step of the waking thread; the checker invents no
-wakes, and runs woken threads one at a time to their next syscall so the
-kernel's atomic futex and mutex handoffs are never torn by concurrent
-execution.  A single-threaded node reduces to exactly one slot, the
+wakes.  A single-threaded node reduces to exactly one slot, the
 pre-thread behaviour.
 
-That is one order of a node's threads, not every order: which woken or
-runnable thread proceeds is not a search choice yet.  A violation found
-is a real schedule, but a search in which any node ran a second thread
-ends INCOMPLETE ("thread schedules not explored"), never a pass.  Making
-the choice of thread a search action is item 3.8 of the soundness plan.
+In a node with more than one thread, the order of the threads' visible
+operations is a search choice.  A visible operation is a `futex` call,
+any call on a checker-owned fd, a write to fd 3 or fd 193, or a
+`clone`.  When a thread reaches one, the checker carries it out (bytes
+are queued, a futex waiter is woken) but holds its answer, and the
+thread parks (`BK_DONE`).  A call the kernel performs, a state-hook
+write, is held before it runs.  The answer to a parked recv, accept,
+poll or futex wait is held the same way when the search or another
+thread supplies it.  At a quiescent point the action RUN(node, thread)
+sends one held answer and lets that thread alone run to its next
+visible operation, so at most one thread of a node runs at a time and a
+replay is deterministic.  Other calls (the clock, `getrandom`, `mmap`,
+kernel fds) are answered at once.
+
+A birth is held the same way.  Nodes are seized with
+`PTRACE_O_TRACECLONE`, so a `clone` stops the parent at
+`PTRACE_EVENT_CLONE` and starts the newborn in a ptrace stop.  Both stay
+stopped (`BK_CLONED`, `BK_NEWBORN`) until a RUN releases each with
+`PTRACE_CONT`, so the newborn's first visible operation can come before
+or after the parent's next one.  Every traced thread is reaped by its
+own tid (`waitpid(tid, __WALL)`): an exited thread at once, and a killed
+node's threads from `/proc/PID/task` before the leader, whose exit the
+kernel withholds until they are reaped.
+
+A thread's record in the world encoding holds its held answer (the
+result and every byte the call wrote into its memory, or the record a
+held state-hook write will emit) and, in a multi-threaded node, the call
+it is parked in, with its arguments and instruction and stack pointers,
+since two threads can hold the same answer at different points of their
+code.  Records are sorted, so the key is the multiset of thread states,
+not which tid holds which.
+
+The boundary is the system call: interleavings of plain memory accesses
+between two visible operations of different threads are not explored.
 
 The seccomp *filter* is classic BPF -- the bytecode `seccomp(2)` has
 always taken -- but there is no eBPF program, no `bpf(2)`, no kernel

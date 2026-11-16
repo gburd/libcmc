@@ -9,9 +9,8 @@ lede: >-
 
 # Plan: soundness remediation
 
-Status: Phases 0 to 4 done, except the thread scheduler of 3.8 (the
-INCOMPLETE rule stands in for it) and Phase 5's randomised fingerprint
-tests.  Audited commit: `b2eab84` (1.3.0).  Branch: `pr/soundness`.
+Status: Phases 0 to 4 done, the thread scheduler of 3.8 included,
+except Phase 5's randomised fingerprint tests.  Audited commit: `b2eab84` (1.3.0).  Branch: `pr/soundness`.
 
 ## Why
 
@@ -242,9 +241,20 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   - The boundary stays system calls: interleavings of plain memory
     accesses between two calls are not explored, and cmc(7) must say so.
 
-  Until all of that lands, the INCOMPLETE rule is the honest answer.
+  Status: done (`wip/threads-sched`), as designed below, and the
+  INCOMPLETE rule is removed.  One change from the design: a clone holds
+  the parent as well as the newborn (BK_CLONED), since the parent's next
+  call is carried out when it is reached and would otherwise always
+  come first.  A thread's record also names the call it is parked in
+  (its arguments and instruction and stack pointers), since two threads
+  can hold the same answer at different points of their code.  Fixtures:
+  `racewake.c` (a wake before the store), `raceemit.c` (an unlocked
+  increment loses an update), `raceborn.c` (a newborn sends before its
+  parent).  Each bug build was missed on the previous engine (INCOMPLETE
+  in every run) and is caught now; each correct build and both twothread
+  fixtures pass.  Single-threaded state counts are unchanged.
 
-  The design being built (`wip/threads-sched`):
+  The design:
 
   - **Visible operations.**  In a node with more than one thread (or a
     birth in flight), a thread's step ends at a visible operation: a

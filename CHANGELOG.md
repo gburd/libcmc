@@ -46,9 +46,13 @@ Process engine (`cmc --model-file`):
   the durable record, every polled fd, epoll user data, the futex word,
   and a recv's requested length.  Nodes run without ASLR, so addresses
   repeat across replays.
-- A search in which any node ran a second thread ends INCOMPLETE,
-  since only one thread schedule is explored.  A violation still
-  counts.
+- Threads are scheduled by the search.  In a node with more than one
+  thread, each `futex` call, call on a checker-owned fd, state-hook
+  write and `clone` ends the thread's step, and the search chooses which
+  thread runs next (`run n1 t1`), births included: a new thread and its
+  parent are held at the clone's return.  Interleavings of memory
+  accesses between two such calls are not explored.  A single-threaded
+  node is unchanged.
 - These are refused (exit 3): a finite `poll`, `ppoll` or `epoll_wait`
   timeout; a timed futex wait; `EPOLLET`, `EPOLLONESHOT` and other epoll
   flags; `EFD_SEMAPHORE`; a state record longer than 64 bytes or left

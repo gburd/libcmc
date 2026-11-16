@@ -118,12 +118,37 @@ A
 .Dv FUTEX_WAKE
 wakes the waiters only when the program issues it, as part of the waking
 thread's step; the checker invents no wakes.
-Woken threads run one at a time, each to its next system call, so the
-kernel's atomic futex and mutex handoffs are never torn.
-This runs one order of a node's threads, not every order: a woken thread
-waits until the others park, and a new thread runs alongside its parent.
-A violation found is a real schedule, but a search in which any node ran
-a second thread ends INCOMPLETE (exit 2), never a pass.
+.Pp
+In a node with more than one thread, each thread's step ends at a
+.Em visible operation :
+a
+.Fn futex
+call, any call on a socket, eventfd or epoll instance the checker owns,
+a write to the state hook (fd 3 or fd 193), or a
+.Fn clone .
+The operation is carried out when the thread reaches it, so its effect
+(bytes queued, a waiter woken) is in the world at once, but its answer is
+held and the thread parks.
+A call the kernel performs, a state-hook write, is held before it runs.
+A new thread and its parent are both held at the clone's return, the new
+thread before its first instruction.
+When every thread is parked, RUN gives one held thread its answer, and
+which thread runs next is the search's choice, so every order of the
+threads' visible operations is explored.
+Only one thread of a node runs at a time, so a replay is deterministic
+and the kernel's futex and mutex handoffs are never torn.
+Other calls (the clock,
+.Fn getrandom ,
+.Fn mmap ,
+the kernel's own descriptors) are answered at once and the thread runs
+on.
+A node with one thread behaves as if threads did not exist.
+.Pp
+The boundary is the system call.
+Interleavings of plain memory accesses between two visible operations
+of different threads are not explored: a data race on a shared variable
+with no system call between the racing accesses is not found.
+.Pp
 When every thread of every node is blocked or has exited the world is
 .Em quiescent :
 the checker reads each node's state, checks the invariants, and the
@@ -180,6 +205,10 @@ It takes no message: the node then
 .Fn accept Ns s
 or reads that fd and blocks again, which ACCEPT, DELIVER or TIMEOUT
 services, so readiness stays a search decision.
+.It RUN
+A thread of a node with more than one thread holds an answer: it gets
+it and runs to its next visible operation
+.Pq Ql run n1 t2 .
 .El
 .Pp
 A node's state is what it reports.
