@@ -112,7 +112,10 @@ Each budget counts over the whole run, from 0 (the default) to 255.
 The checker reads a node's state from what the node reports.  After
 each change the program writes a record, a length byte and then that
 many bytes, to descriptor 3; what it has made durable (its `fsync`
-point) it writes the same way to descriptor 193.  About eight lines:
+point) it writes the same way to descriptor 193.  The checker keeps the
+last record of each, up to 64 bytes; a longer record, or one the node
+has not finished writing when it next blocks, ends the check with an
+error rather than a truncated state.  About eight lines:
 
 ```c
 static void

@@ -141,6 +141,10 @@ than checked, since a permuted successor folds into a self-loop.
   participant partway through a 3-byte read).
 - **3.3 Hook records are exact.**  A canonical record longer than `SNAP`
   is a model error; a partial record is kept or rejected, never dropped.
+  Status: done.  `drain_pipe()` reads every record, refuses one longer
+  than `SNAP`, and refuses bytes left after the last complete record.
+  The longrec and partrec modes of `test/proc/unmodelled.c` were a
+  truncated state and a pass on `b2eab84`.
 - **3.4 Remote memory errors propagate.**  A short `process_vm_readv` or
   `process_vm_writev` is a modelled `EFAULT` or an engine error, never
   zero-filled data reported as success.

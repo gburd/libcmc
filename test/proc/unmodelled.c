@@ -11,6 +11,8 @@
  *   pollto     poll() with a finite timeout       (refused: exit 3)
  *   epollet    an edge-triggered epoll registration (refused: exit 3)
  *   semaphore  an EFD_SEMAPHORE eventfd           (refused: exit 3)
+ *   longrec    a 65-byte state record, past the 64 stored (refused)
+ *   partrec    a state record cut short before it parks  (refused)
  *
  *   cc -O1 -no-pie -o unmodelled test/proc/unmodelled.c
  */
@@ -83,6 +85,22 @@ main(int argc, char **argv)
 	if (!strcmp(mode, "semaphore"))
 	{
 		(void) eventfd(2, EFD_SEMAPHORE);
+		return 0;
+	}
+	if (!strcmp(mode, "longrec") || !strcmp(mode, "partrec"))
+	{
+		/* a record whose count byte promises 65 bytes: written whole, or
+		 * cut to its first ten bytes, then the node parks in accept() */
+		unsigned char rec[66];
+		int s = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in a = addr(BASE + 0);
+
+		memset(rec, 1, sizeof rec);
+		rec[0] = 65;
+		(void) !write(3, rec, !strcmp(mode, "longrec") ? sizeof rec : 10);
+		bind(s, (struct sockaddr *) &a, sizeof a);
+		listen(s, 8);
+		(void) accept(s, NULL, NULL);
 		return 0;
 	}
 	return 0;

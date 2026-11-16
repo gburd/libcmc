@@ -868,17 +868,36 @@ launch(Node *nd)
 	return 0;
 }
 
-/* drain a canonical-emit pipe non-blocking; copy the LAST complete record
- * into out/outlen (records are [count][count bytes]) */
+/* Drain a canonical-emit pipe non-blocking and copy the LAST complete
+ * record into out/outlen (records are [count][count bytes]).  The record
+ * is the node's state, so it must be exact: one longer than SNAP bytes
+ * cannot be stored whole, and bytes left after the last complete record
+ * are a record the node has not finished writing.  Either ends the check
+ * (exit 3) rather than truncating or dropping state.  Records are read
+ * through a carry buffer, so a node that writes many records between two
+ * quiescent points is drained whole. */
 static void
-drain_pipe(int fd, unsigned char *out, int *outlen)
+drain_pipe(const Node *nd, int fd, unsigned char *out, int *outlen, const char *which)
 {
-	unsigned char all[4096]; int tot = 0, r;
+	unsigned char all[4096 + 1 + 255]; int tot = 0, r;
 	int fl = fcntl(fd, F_GETFL); fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-	while (tot < (int) sizeof all && (r = (int) read(fd, all + tot, sizeof all - tot)) > 0) tot += r;
-	int off = 0, rec = -1, rl = 0;
-	while (off < tot) { int cnt = all[off]; if (off + 1 + cnt > tot) break; rec = off + 1; rl = cnt; off += 1 + cnt; }
-	if (rec >= 0) { *outlen = rl > SNAP ? SNAP : rl; memcpy(out, all + rec, *outlen); }
+	for (;;)
+	{
+		r = (int) read(fd, all + tot, sizeof all - (size_t) tot);
+		if (r <= 0) break;
+		tot += r;
+		/* consume every complete record; keep a trailing partial one */
+		int off = 0;
+		while (off < tot && off + 1 + all[off] <= tot)
+		{
+			int cnt = all[off];
+			if (cnt > SNAP) die(3, "node %d: a %s state record of %d bytes is longer than the %d the checker stores", nd->id, which, cnt, SNAP);
+			memcpy(out, all + off + 1, (size_t) cnt); *outlen = cnt;
+			off += 1 + cnt;
+		}
+		memmove(all, all + off, (size_t) (tot - off)); tot -= off;
+	}
+	if (tot > 0) die(3, "node %d: a partial %s state record (%d bytes) was left unfinished", nd->id, which, tot);
 }
 
 /* read any canonical-emit records this node wrote; keep the last of each
@@ -886,8 +905,8 @@ drain_pipe(int fd, unsigned char *out, int *outlen)
 static void
 drain_canon(Node *nd)
 {
-	drain_pipe(nd->fd3[0], nd->canon, &nd->canon_len);
-	drain_pipe(nd->fd4[0], nd->durable, &nd->durable_len);
+	drain_pipe(nd, nd->fd3[0], nd->canon, &nd->canon_len, "volatile");
+	drain_pipe(nd, nd->fd4[0], nd->durable, &nd->durable_len, "durable");
 }
 
 /* bag helpers.  A message joins its channel (src, dst) behind every
