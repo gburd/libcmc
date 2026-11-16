@@ -131,7 +131,9 @@ event, and the engine compares them before and after.
 `CRASH(n, j)` applies the first j pending records, discards their
 outputs (the process is dead), zeroes the volatile bytes and timers,
 wakes and pending persists, empties every channel to and from n, marks
-`CONN_RESET` pending at each peer, and delivers `RESTART`.  Branching over
+`CONN_RESET` pending at each peer, and delivers `RESTART`.  In bag mode it
+drops only the messages n sent itself, which never left the process, and
+marks no resets.  Branching over
 j covers a write that reached disk before its completion was observed.
 
 ## Network

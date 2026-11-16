@@ -1165,6 +1165,73 @@ test_min4_negative_bounds(void)
 	}
 }
 
+/* ---- soundness plan, phase 2 (docs/plans/soundness-remediation.md) ---- */
+
+/* Every client request has a reply: false while one is outstanding. */
+static bool
+replied_all(const CmcWorld *w, CmcWhy *why)
+{
+	if (cmc_nreplies(w) != cmc_requests(w, 0))
+	{
+		cmc_why(why, "%d request(s), %d reply(ies)", cmc_requests(w, 0), cmc_nreplies(w));
+		return false;
+	}
+	return true;
+}
+
+static const CmcProp replied_qui[] = {CMC_QUIESCENT_PROP(Replied, replied_all)};
+
+/* 2.1: CLIENT makes the node send the request to itself; RECV replies. */
+static void
+self_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = (uint8_t) node;
+	else if (ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_REPLY)->arg = 1;
+}
+
+static const CmcCore self_core = {
+	.name = "self", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = self_step,
+};
+static const CmcModel self_model = {"self", &self_core, replied_qui, 1, 0};
+
+/* 2.1: what a node sent itself never left the process, so a crash loses
+ * it in either network (the bag keeps only the messages between nodes,
+ * test_b5): the restarted process must not receive it. */
+static void
+test_p21_crash_clears_self_channel(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	uint8_t    *w;
+	CmcAction	a[CMC_MAX_ACTIONS];
+	char		prop[64];
+
+	cmc_options_default(&o);
+	o.crash_budget = 1;
+	for (int net = 0; net < 2; net++)
+	{
+		o.net = net ? CMC_NET_BAG : CMC_NET_FIFO;
+		CHECK(verdict_of(&self_model, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) ==
+			  CMC_VIOLATION);
+		CHECK(strcmp(prop, "Replied") == 0);
+	}
+	o.net = CMC_NET_FIFO;
+	r = mkc(&self_model, CMC_BFS, "", NULL, &o);
+	w = malloc(cmc_world_size(r));
+	cmc_world_init(r, w);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) == 0);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CRASH, 0, 0, 0, 0)) == 0);
+	CHECK(cmc_enabled(r, w, a, CMC_MAX_ACTIONS) == 0);
+	free(w);
+	cmc_run_free(r);
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1198,6 +1265,7 @@ main(void)
 	test_min1_dfs_witness();
 	test_min3_quiescent_depth();
 	test_min4_negative_bounds();
+	test_p21_crash_clears_self_channel();
 	test_version();
 	if (failures)
 	{

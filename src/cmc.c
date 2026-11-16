@@ -1315,6 +1315,9 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 				for (int k = 0; k < r->o.persist_cap; k++)
 					memset(PERS(r, w, n, k), 0, PERS_ENT);
 				NPERS(r, w, n) = 0;
+				/* what the node sent itself never left the process, so it dies
+				 * with the process in either network */
+				chan_clear(r, w, n, n);
 				/* docs/research/02 B5: its connections die with it */
 				if (FIFO(r))
 				{
