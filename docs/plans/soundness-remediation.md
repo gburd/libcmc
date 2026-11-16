@@ -167,6 +167,10 @@ than checked, since a permuted successor folds into a self-loop.
   explored"), never PASS.  Then make the choice of which runnable or
   woken thread proceeds a search action, and state the preemption
   boundary in cmc(7).
+  Status: the interim rule is done.  Any `CLONE_THREAD` sets a flag that
+  turns a would-be pass or unmet `eventually` into INCOMPLETE; the
+  twothread rows in `test/proc_gate.sh` now expect exit 2, and the
+  planted bug is still caught.  The search action is still open.
 - **3.9 A root with no enabled action.**  The no-progress guard also
   reports a safety-only model whose initial state enables no action,
   instead of a pass.  (An unmet `eventually` there already fails, on

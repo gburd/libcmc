@@ -255,17 +255,19 @@ echo "-- threads: per-thread scheduling, futex handoff"
 # was handed; the -DBUG build drops it across the handoff, which the
 # invariant catches.  Before threads were modelled the worker's futex hit
 # LULL_MS (or worse, a racy unmodelled pass).
-expect "twothread: the handoff holds"                   0 "No error has been found" $(run twothread twothread)
+# A pass with threads is INCOMPLETE (soundness plan 3.8): one order of a
+# node's threads is run, not every order, so only a violation is final.
+expect "twothread: the handoff is not a pass (schedules)" 2 "thread schedules not explored" $(run twothread twothread)
 expect "twothread: a dropped handoff is caught"         1 "handoff is violated" $(run twothread twothread-bug)
 expect "twothread: the counterexample is the 2-action handoff" 1 "deliver n0->n1" $(run twothread twothread-bug)
 # the data genuinely crosses the handoff: a reachability check the racy
 # pre-thread engine could only satisfy by luck is now search-driven.
 printf '[target]\nnodes = 2\n[fields]\nrecvd = 0\nstored = 1\n[invariants]\nprocessed = "eventually node[1].stored == 120"\n' > "$OUT/tt-reach.model"
-expect "twothread: the worker reaches the stored value"  0 "No error has been found" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread"
+expect "twothread: the worker reaches the stored value"  2 "thread schedules not explored" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread"
 # a worker that exits after one job, joined by the main thread: exercises
 # the thread-exit slot-free and the pthread_join futex on the worker's
 # clear-tid word (woken by the checker's SYS_exit CLONE_CHILD_CLEARTID).
-expect "twothread_join: exit + join holds"              0 "No error has been found" $(run twothread_join twothread_join)
+expect "twothread_join: exit + join is not a pass"       2 "thread schedules not explored" $(run twothread_join twothread_join)
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

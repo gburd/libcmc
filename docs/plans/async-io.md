@@ -1,11 +1,13 @@
 # Plan: async-I/O support in libcmc for event-loop runtimes (libxtc)
 
-Status: in progress.  Target release: v1.1.0.  The libcmc side is
-done: `poll`/`ppoll`, `fcntl(F_GETFL/F_SETFL)` for `O_NONBLOCK`, and
-`eventfd2` are intercepted with complete virtual-fd semantics; a `BK_POLL`
-quiescence point and a WAKE search action drive the poll loop without
-auto-delivering (M5); the fingerprint carries the poll set, the nonblock
-flags and the eventfd counters; and `test/proc/pollloop.c` is gated in
+Status: shipped in 1.1.0 and 1.2.0, then corrected by the soundness
+plan (`docs/plans/soundness-remediation.md`).  `poll`/`ppoll`,
+`fcntl(F_GETFL/F_SETFL)` for `O_NONBLOCK`, and `eventfd2` are
+intercepted for the level-triggered, untimed subset: a finite timeout,
+`EPOLLET`, `EPOLLONESHOT` and `EFD_SEMAPHORE` are refused (3.6), and
+until 3.2 the fingerprint kept only five entries of a poll set.  A
+`BK_POLL` quiescence point and a WAKE search action drive the poll loop
+without auto-delivering (M5), and `test/proc/pollloop.c` is gated in
 `proc_gate` with a `-DBUG` the checker catches.  `epoll` (item 5) is
 modelled as of v1.2.x (davros eval ask 9), the epoll twin of the poll
 path, with `test/proc/epollloop.c` gated alongside `pollloop`.  The

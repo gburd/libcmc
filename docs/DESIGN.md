@@ -60,6 +60,12 @@ kernel's atomic futex and mutex handoffs are never torn by concurrent
 execution.  A single-threaded node reduces to exactly one slot, the
 pre-thread behaviour.
 
+That is one order of a node's threads, not every order: which woken or
+runnable thread proceeds is not a search choice yet.  A violation found
+is a real schedule, but a search in which any node ran a second thread
+ends INCOMPLETE ("thread schedules not explored"), never a pass.  Making
+the choice of thread a search action is item 3.8 of the soundness plan.
+
 The seccomp *filter* is classic BPF -- the bytecode `seccomp(2)` has
 always taken -- but there is no eBPF program, no `bpf(2)`, no kernel
 probe.  Observation tools built on eBPF uprobes/kprobes can watch

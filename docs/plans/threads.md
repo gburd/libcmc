@@ -1,6 +1,9 @@
 # Plan: per-thread scheduling in libcmc process mode (Tier 3, ask 8)
 
-Status: in progress.  Branch `pr/threads`, off `main` (v1.2.0).
+Status: shipped in 1.3.0 as a single schedule.  The engine runs one
+order of a node's threads, so the soundness plan (item 3.8) makes any
+multi-threaded search end INCOMPLETE until the choice of thread is a
+search action.
 
 ## The problem
 

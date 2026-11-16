@@ -120,6 +120,10 @@ wakes the waiters only when the program issues it, as part of the waking
 thread's step; the checker invents no wakes.
 Woken threads run one at a time, each to its next system call, so the
 kernel's atomic futex and mutex handoffs are never torn.
+This runs one order of a node's threads, not every order: a woken thread
+waits until the others park, and a new thread runs alongside its parent.
+A violation found is a real schedule, but a search in which any node ran
+a second thread ends INCOMPLETE (exit 2), never a pass.
 When every thread of every node is blocked or has exited the world is
 .Em quiescent :
 the checker reads each node's state, checks the invariants, and the

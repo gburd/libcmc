@@ -623,6 +623,12 @@ typedef struct {
 } Node;
 
 static Node N[MAXNODES];
+/* Some node created a second thread in this search.  The engine runs
+ * one order of a node's threads (a woken thread waits until the others
+ * park, and a newborn runs alongside its parent), not every order, so a
+ * violation it finds is a real schedule but a pass is not a proof: the
+ * search ends INCOMPLETE instead (soundness plan 3.8). */
+static int g_threads_seen;
 enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5 };	/* what a blocked thread waits in (3 marks a running node in the fingerprint) */
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
@@ -1417,6 +1423,7 @@ try_pending_for(Node *nd)
 			}
 			if (flags & CLONE_THREAD)
 			{
+				g_threads_seen = 1;
 				if (nd->nth + nd->th_pending >= MAXTHREAD)
 					die(1, "node %d creates more than %d threads", nd->id, MAXTHREAD);
 				nd->th_pending++;
@@ -2700,6 +2707,14 @@ cmc_proc_main(const CmcProcOptions *po)
 	{
 		printf("INCOMPLETE (no violation found): %s; %zu distinct states, %zu left on queue, %zu cut at depth %ld, %.1f s\n",
 			   why, distinct, qt - qh, cut, depth, dt);
+		return 2;
+	}
+	/* threads ran in one order only, so neither a pass nor an unmet
+	 * `eventually` (which another order might reach) is established */
+	if (g_threads_seen)
+	{
+		printf("INCOMPLETE (no violation found): thread schedules not explored -- a node ran more than one thread, and the checker runs one order of a node's threads, not every order.  %zu distinct states, %.1f s\n",
+			   distinct, dt);
 		return 2;
 	}
 	/* the search was exhaustive: an `eventually` property that no state
