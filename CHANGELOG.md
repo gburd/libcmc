@@ -5,6 +5,88 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A soundness release, from an audit of 1.3.0
+([docs/plans/soundness-remediation.md](docs/plans/soundness-remediation.md)).
+The audit found ways for every engine to report a pass where a bug
+existed, gates that passed after their tool failed, and documentation
+that claimed more than the gates showed.  Each fix below has a test that
+fails on 1.3.0.  [docs/qualification.md](docs/qualification.md) now
+lists what each engine answers exactly, approximates, or refuses.
+
+Some results change.  A model that passed on 1.3.0 may now fail, end
+INCOMPLETE, or be refused (exit 3), and state counts move.  Where an
+example's 1.3.0 result was an artifact of a bug, its README says so.
+
+Abstract checker (`cmc --spec`):
+
+- Liveness follows TLA+ semantics.  Stuttering counts as a behaviour,
+  every fair bad component is checked, and the backward search for
+  `A ~> B` stops at B.  The verdicts now agree with TLC on five probes
+  where 1.3.0 disagreed.
+- Model errors are errors.  These used to change the model silently and
+  now exit 3: text that overflows a buffer; a non-set domain; a value
+  outside its declared domain; integer overflow; `/` or `mod` on a
+  negative; a primed variable read; an init that reads an unset
+  variable; a variable assigned twice; a bound name that shadows another.
+- Liveness under `symmetry` is refused.
+- `--refine-steps` (C2) checks the first state against init, skips
+  actions gated off by `--define`, and compares states exactly.
+
+Process engine (`cmc --model-file`):
+
+- Each TCP connection has its own queues.  On 1.3.0, two connections
+  between the same two nodes shared bytes.
+- `close()` sends a FIN, or an RST when bytes are left unread.  After a
+  reset, the next call reports `ECONNRESET`, then writes fail with
+  `EPIPE` and the `SIGPIPE` the node's disposition decides.
+- A `connect()` to a node that is down is refused.
+- A node starts with every signal at its default and none blocked,
+  whatever cmc inherited.
+- Worlds are deduplicated by their exact encoding.  The encoding gains
+  the durable record, every polled fd, epoll user data, the futex word,
+  and a recv's requested length.  Nodes run without ASLR, so addresses
+  repeat across replays.
+- A search in which any node ran a second thread ends INCOMPLETE,
+  since only one thread schedule is explored.  A violation still
+  counts.
+- These are refused (exit 3): a finite `poll`, `ppoll` or `epoll_wait`
+  timeout; a timed futex wait; `EPOLLET`, `EPOLLONESHOT` and other epoll
+  flags; `EFD_SEMAPHORE`; a state record longer than 64 bytes or left
+  unfinished; a `SIGPIPE` handler or blocked `SIGPIPE` on a write into
+  a reset connection.
+- A write from a buffer the node does not own gets `EFAULT`.  On 1.3.0
+  it was a zero-filled success.  The preload allocator checks sizes
+  and copies exactly on `realloc`.
+- A safety-only model whose initial state enables no action is
+  INCOMPLETE, not a pass.
+
+In-process engine (`cmc --model`, `libcmc(3)`):
+
+- A crash clears the node's messages to itself.
+- Simulation and replay check every state, including the last.
+- `cmc_run_new()` refuses more than 64 properties of one kind, and a
+  property of an unknown kind.
+- The fair schedule cannot postpone an armed timer forever.
+
+Examples:
+
+- raft.c and hc.c served no requests while waiting on their own.  Under
+  1.3.0's shared channels, a waiting node was handed its peer's request
+  as the reply.  Both now serve while they wait.  raft's double-vote bug
+  is caught again, through real schedules.
+- hc's pass on 1.3.0 was vacuous: no participant ever adopted.  Now a
+  participant adopts, and the model requires it.
+- paxos2 decides, and its planted bug breaks the shared spec's
+  agreement.
+
+Gates and release:
+
+- The Apalache gate fails on a tool error.  A missing tool fails the
+  gate under `CMC_REQUIRE_TOOLS=1`.
+- CI runs the TLA+ bridge gates (TLC and Apalache), the spec gate under
+  ASan and UBSan (`make check-asan`), and the slow example rows (`make
+  check-examples-slow`) before a tag.
+
 ## 1.3.0 (2026-11-14)
 
 Tier 3 of the davros evaluation: the process front end now models the
