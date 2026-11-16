@@ -324,7 +324,7 @@ CMC_PRELOAD=$OUT/no-such-preload.so expect "a missing preload is an error" 3 "pr
 # constructs the engine answered wrongly (soundness plan 3.4, 3.6): a
 # write from an unmapped buffer gets EFAULT, not a zero-filled success,
 # and a finite poll timeout, EPOLLET and EFD_SEMAPHORE are refused
-for m in none badptr pollto epollet semaphore longrec partrec refused rstwrite rstignore rsthandler; do
+for m in none badptr pollto epollet semaphore longrec partrec refused rstwrite rstignore rsthandler fork; do
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nuntouched = "node[0][0] != 1"\n' "$B/proc/unmodelled" "$m" > "$OUT/u-$m.model"
 done
 printf 'faulted = "eventually node[0][0] == 2"\n' >> "$OUT/u-badptr.model"
@@ -338,6 +338,8 @@ expect "noprogress: a root with no action is not a pass" 2 "no action was ever e
 expect "unmodelled: a finite poll timeout is refused"    3 "timeout is not modelled" --model-file "$OUT/u-pollto.model"
 expect "unmodelled: EPOLLET is refused"                  3 "are not modelled" --model-file "$OUT/u-epollet.model"
 expect "unmodelled: EFD_SEMAPHORE is refused"            3 "EFD_SEMAPHORE" --model-file "$OUT/u-semaphore.model"
+# a node that forks is two processes the model cannot tell apart
+expect "unmodelled: a fork is refused"                   3 "forks a second process" --model-file "$OUT/u-fork.model"
 # 3.3: a state record the checker cannot store whole is an error, never
 # a truncated or dropped state
 # 3.7: a connect() to a node that is gone is refused, as on Linux

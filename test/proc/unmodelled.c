@@ -20,6 +20,7 @@
  *              EPIPE, and the default SIGPIPE ends it before it records
  *   rstignore  the same with SIGPIPE ignored: node 0 records 2
  *   rsthandler the same with a SIGPIPE handler (refused)
+ *   fork       node 0 forks; the child exits at once (refused)
  *
  *   cc -O1 -no-pie -o unmodelled test/proc/unmodelled.c
  */
@@ -152,6 +153,15 @@ main(int argc, char **argv)
 		int e1 = write(s, "z", 1) < 0 ? errno : 0;
 
 		emit(e0 == ECONNRESET && e1 == EPIPE ? 2 : 1);
+		return 0;
+	}
+	if (!strcmp(mode, "fork"))
+	{
+		/* the child exits at once, so even an unrefused fork leaves no
+		 * process behind */
+		if (fork() == 0)
+			_exit(0);
+		emit(1);
 		return 0;
 	}
 	if (!strcmp(mode, "longrec") || !strcmp(mode, "partrec"))

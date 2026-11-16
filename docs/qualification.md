@@ -80,6 +80,7 @@ call runs in the kernel, untouched.
 | `clone`, `clone3` (threads), `futex` wait and wake, `exit` | approximate | one order of a node's threads is run, not every order | proc_gate twothread, twothread_join |
 | a multi-threaded search that would pass | refused | INCOMPLETE ("thread schedules not explored"); a violation still counts | proc_gate twothread |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |
+| `fork`, `vfork`, `clone` without `CLONE_THREAD` | refused | exit 3, before the child exists | proc_gate "a fork is refused" |
 | a `FUTEX_WAKE` of a strict subset of several waiters | refused | exit 1 | (code; no fixture yet) |
 
 ### State, search and verdicts

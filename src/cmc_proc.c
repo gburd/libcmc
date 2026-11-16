@@ -820,6 +820,7 @@ install_filter(void)
 		OWN(SYS_epoll_create1), OWN(SYS_epoll_create), OWN(SYS_epoll_ctl),
 		OWN(SYS_epoll_wait), OWN(SYS_epoll_pwait),
 		OWN(SYS_clone), OWN(SYS_clone3), OWN(SYS_futex), OWN(SYS_exit),
+		OWN(SYS_fork), OWN(SYS_vfork),
 #undef OWN
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
@@ -1074,6 +1075,16 @@ ep_slot(Node *nd, int epfd)
 
 static struct seccomp_notif *g_req;
 static struct seccomp_notif_resp *g_resp;
+
+/* A node that forks becomes two processes the model cannot tell apart,
+ * sharing one listener and its connections, and the child survives the
+ * check.  End the check before the fork happens (the call is never
+ * answered, so no child is created). */
+static void
+refuse_fork(const Node *nd)
+{
+	die(3, "node %d forks a second process; a node is one process (threads are modelled, fork is not)", nd->id);
+}
 /* answer()'s own response buffer: it may run while a handler is still
  * filling g_resp for its own notification (a close() whose RST answers
  * the peer's parked recv), and must not overwrite it */
@@ -1625,6 +1636,9 @@ try_pending_for(Node *nd)
 			for (int i = 0; i < nfds; i++) { th->pollfds[i] = pfs[i].fd; th->pollevents[i] = pfs[i].events; }
 			return 1;				/* do NOT answer */
 		}
+		case SYS_fork: case SYS_vfork:
+			refuse_fork(nd);
+			break;
 		case SYS_clone: case SYS_clone3:
 		{
 			/* A new thread shares the address space and the seccomp filter,
@@ -1635,10 +1649,10 @@ try_pending_for(Node *nd)
 			 * newborn is still computing toward its first blocking point)
 			 * and captures the CLONE_CHILD_CLEARTID word, which the kernel
 			 * zeroes and wakes on the thread's exit (what pthread_join waits
-			 * on).  A clone without CLONE_THREAD (a fork) is not a thread of
-			 * this node; let it run but do not track it (it would be its own
-			 * process, outside the node model -- a target that forks is out
-			 * of scope and will trip LULL_MS if that child blocks owned). */
+			 * on).  A clone without CLONE_THREAD is a fork: a second process
+			 * in the node that shares its listener and connections but that
+			 * the model does not track, and that outlives the check.  It is
+			 * refused before the child exists (see refuse_fork). */
 			uint64_t flags, ctid = 0;
 			if (nr == SYS_clone3)
 			{
@@ -1654,6 +1668,7 @@ try_pending_for(Node *nd)
 				/* clone(flags, stack, parent_tid, child_tid, tls) */
 				flags = a[0]; ctid = a[3];
 			}
+			if (!(flags & CLONE_THREAD)) refuse_fork(nd);
 			if (flags & CLONE_THREAD)
 			{
 				g_threads_seen = 1;
