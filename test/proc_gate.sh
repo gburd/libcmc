@@ -54,6 +54,10 @@ $CC -O1 -no-pie -w -DNEGFD -o "$B/proc/noprogress-stuck" "$HERE/test/proc/noprog
 $CC -O1 -no-pie -w -o "$B/proc/twothread" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/twothread-bug" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/twothread_join" "$HERE/test/proc/twothread_join.c" -lpthread || { echo "proc_gate: twothread_join.c does not build"; fail=1; }
+for f in racewake; do
+	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
+	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
+done
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -287,6 +291,13 @@ expect "twothread: the worker reaches the stored value"  2 "thread schedules not
 # the thread-exit slot-free and the pthread_join futex on the worker's
 # clear-tid word (woken by the checker's SYS_exit CLONE_CHILD_CLEARTID).
 expect "twothread_join: exit + join is not a pass"       2 "thread schedules not explored" $(run twothread_join twothread_join)
+# the order of two threads' system calls is a search choice (soundness
+# plan 3.8): a worker woken before the data it reads is stored runs
+# before the waker's next call in some schedule, which the search finds.
+# An engine that runs a woken thread only after the waker parks misses it.
+expect "racewake: a wake before the store is caught"      1 "stored_first is violated" $(run racewake racewake-bug)
+expect "racewake: the woken worker runs first"            1 "run n0 t1" $(run racewake racewake-bug)
+expect "racewake: storing first holds (births not yet explored)" 2 "thread schedules not explored" $(run racewake racewake)
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

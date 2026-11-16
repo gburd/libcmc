@@ -596,7 +596,17 @@ typedef struct {
 	int epoll_fd; int poll_maxevents; uint64_t polldata[MAXPOLL];
 	int poll_woke_fd;			/* -1, or the channel fd a poll wake marked ready: its next read delivers (not EAGAIN) */
 	uint64_t futex_addr;		/* BK_FUTEX: the futex word this thread waits on */
-	int woken;					/* a FUTEX_WAKE marked this BK_FUTEX thread runnable; it is released (its futex answered) only once every other thread of the node is parked, so threads run one at a time and the kernel's atomic futex semantics are never torn by concurrent execution */
+	/* the thread's latest notification: the call, its arguments and the
+	 * address of its syscall instruction.  A parked thread makes no other
+	 * call, so they name where it is parked. */
+	long nr; uint64_t args[6]; uint64_t ip;
+	/* BK_DONE: the answer to call nr, already carried out and held until
+	 * the search runs the thread (A_RUN).  data is every byte the call
+	 * wrote into the thread's memory (a recv's message, poll's revents),
+	 * which the world encoding cannot otherwise see once the call is
+	 * done; held_len counts them from the call's notification. */
+	long long held_val; int held_err; unsigned held_flags;
+	int held_len; unsigned char held_data[MSGLEN];
 } Thread;
 
 typedef struct {
@@ -632,7 +642,9 @@ static Node N[MAXNODES];
  * violation it finds is a real schedule but a pass is not a proof: the
  * search ends INCOMPLETE instead (soundness plan 3.8). */
 static int g_threads_seen;
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5 };	/* what a blocked thread waits in (3 marks a running node in the fingerprint) */
+/* What a parked thread waits in (3 marks a running thread in the
+ * fingerprint).  BK_DONE holds an answer the search has yet to send. */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6 };
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
 
@@ -667,11 +679,8 @@ th_for(Node *nd, pid_t tid)
 	return t;
 }
 
-/* a thread of nd is genuinely running (between syscalls): block_kind 0 and
- * not a merely-woken futex waiter.  Such a node will produce a
- * notification, so drive_quiescent RECVs it; a node whose only non-parked
- * thread is woken is advanced by release_one_woken, not by a RECV (which
- * would block, nothing being about to notify). */
+/* a thread of nd is running (between syscalls): block_kind 0.  Such a
+ * node will produce a notification, so drive_quiescent RECVs it. */
 static int
 node_has_running(const Node *nd)
 {
@@ -683,7 +692,47 @@ node_has_running(const Node *nd)
 	return 0;
 }
 
+/* Does nd run more than one thread, counting a birth in flight?  Only
+ * then is the order of its threads' calls a search choice; a node with
+ * one thread is answered inline, as if threads did not exist. */
+static int
+node_multi(const Node *nd)
+{
+	int n = nd->th_pending;
+	for (int i = 0; i < nd->nth; i++) n += nd->th[i].inuse;
+	return n > 1;
+}
+
 static void kill_all(void);
+static void die(int code, const char *fmt, ...);
+
+/* The thread whose call is being answered, or NULL.  Every byte the
+ * checker writes into a node's memory while it is set is kept in the
+ * thread's held_data: once the call is carried out those bytes are the
+ * call's result, and a held result must be part of the world.  A call
+ * that answers another thread (a close whose RST ends a parked recv)
+ * retargets it for that answer with cap_begin and restores it after. */
+static Thread *g_cap;
+
+static Thread *
+cap_begin(Thread *th)
+{
+	Thread	   *old = g_cap;
+
+	g_cap = th;
+	if (th) th->held_len = 0;
+	return old;
+}
+
+static void
+capture(const void *buf, size_t n)
+{
+	if (!g_cap) return;
+	if ((size_t) g_cap->held_len + n > sizeof g_cap->held_data)
+		die(1, "a held answer writes more than %zu bytes into a thread", sizeof g_cap->held_data);
+	memcpy(g_cap->held_data + g_cap->held_len, buf, n);
+	g_cap->held_len += (int) n;
+}
 
 /* Limits are errors (docs/steering/project.md, rule 4): where the checker
  * would otherwise truncate or guess, it stops.  Exit 1 = an engine rule
@@ -788,6 +837,7 @@ static size_t
 cr_write(pid_t pid, uint64_t addr, const void *buf, size_t n)
 { struct iovec l = {(void*)(uintptr_t)buf, n}, r = {(void*)(uintptr_t)addr, n};
   ssize_t k = n ? process_vm_writev(pid, &l, 1, &r, 1, 0) : 0;
+  if (k > 0) capture(buf, (size_t) k);
   return k > 0 ? (size_t) k : 0; }
 static size_t
 cr_read(pid_t pid, uint64_t addr, void *buf, size_t n)
@@ -1075,12 +1125,6 @@ conn_maybe_free(int conn)
 	if (conns[conn].closed[0] && conns[conn].closed[1]) { conn_discard(conn); conns[conn].used = 0; }
 }
 
-/*
- * Service one ready notification on node nd without blocking the search.
- * Returns 1 if it did something, 0 if nd had no pending notification.
- * A recv on an empty channel is DEFERRED (the thread's slot set, not
- * answered).
- */
 /* an eventfd's slot index on this node, or -1.  eventfds are virtual
  * channels: a write adds to the counter, a read drains it, and a
  * non-zero counter is poll-ready, so an event loop's self-wakeup path
@@ -1270,6 +1314,49 @@ sigpipe_kills(Node *nd, Thread *th)
 
 static int futex_wake(Node *nd, uint64_t uaddr, int n);
 
+/* Is call nr a visible operation: one whose effect another thread of the
+ * node can see other than through memory?  Those are the futex calls and
+ * every call on a checker-owned fd (a socket, eventfd or epoll instance,
+ * numbered from 500), on the state hook (fd 3) or on the durable record
+ * (fd 193), and the calls that create one.  In a node with more than one
+ * thread each visible operation ends the thread's step, and the search
+ * picks which thread runs next.  Everything else (the clock, getrandom,
+ * the kernel's own fds) is answered at once, since nothing another thread
+ * does between two calls is explored.  clone and exit are visible too,
+ * but are not held here: a clone parks both threads itself, and an
+ * exiting thread has nothing left to run. */
+static int
+visible(long nr, const __u64 *a)
+{
+	switch (nr)
+	{
+		case SYS_futex: case SYS_socket: case SYS_eventfd2:
+		case SYS_epoll_create1: case SYS_epoll_create: case SYS_epoll_ctl:
+		case SYS_epoll_wait: case SYS_epoll_pwait: case SYS_poll: case SYS_ppoll:
+		case SYS_accept: case SYS_accept4:
+			return 1;
+		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
+		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
+		case SYS_close: case SYS_fcntl:
+		{
+			int fd = (int) a[0];
+			return fd >= 500 || fd == 3 || fd == DURABLE_FD;
+		}
+		default:
+			return 0;
+	}
+}
+
+static int serve(Node *nd, Thread *th);
+
+/* Service one ready notification on node nd without blocking the search.
+ * Returns 1 if it did something, 0 if nd had no pending notification.
+ * serve() carries the call out.  In a node with one thread its answer is
+ * sent at once.  In a node with more than one, a visible operation's
+ * answer is held instead (BK_DONE) and the thread parks, until the
+ * search runs it (A_RUN): a call the checker answers has its effect now
+ * and returns later, and a call the kernel performs (CONTINUE: a write to
+ * the state hook) is held before it runs. */
 static int
 try_pending_for(Node *nd)
 {
@@ -1287,6 +1374,42 @@ try_pending_for(Node *nd)
 	Thread *th = th_for(nd, g_req->pid);
 	if (!th) die(1, "node %d has more than %d threads", nd->id, MAXTHREAD);
 	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
+	th->nr = nr; th->ip = g_req->data.instruction_pointer;
+	memcpy(th->args, a, sizeof th->args);
+	/* decided before the call is served, which may add or end a thread */
+	int hold = node_multi(nd) && visible(nr, a);
+	cap_begin(th);
+	int parked = serve(nd, th);
+	g_cap = NULL;
+	if (parked) return 1;
+	if (!hold)
+	{
+		if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_resp) != 0 && errno != ENOENT) {}
+		return 1;
+	}
+	th->block_kind = BK_DONE; th->block_id = g_req->id;
+	th->held_val = g_resp->val; th->held_err = g_resp->error; th->held_flags = g_resp->flags;
+	/* a held write to the state hook has not run yet: keep the record it
+	 * will write, since worlds about to emit different states differ */
+	if ((th->held_flags & SECCOMP_USER_NOTIF_FLAG_CONTINUE) && (nr == SYS_write || nr == SYS_sendto) &&
+		((int) a[0] == 3 || (int) a[0] == DURABLE_FD))
+	{
+		unsigned char rec[MSGLEN];
+		size_t len = (size_t) a[2];
+		if (len > sizeof rec) die(3, "node %d writes %zu bytes to its state hook in one call; the limit is %zu", nd->id, len, sizeof rec);
+		size_t got = cr_read(nd->pid, a[1], rec, len);
+		cap_begin(th); capture(rec, got); g_cap = NULL;
+	}
+	return 1;
+}
+
+/* Carry out notification g_req of thread th on node nd.  Returns 1 if the
+ * call parked (a deferred recv, accept, poll or futex wait) or ended the
+ * node, and 0 if g_resp holds its answer. */
+static int
+serve(Node *nd, Thread *th)
+{
+	long nr = g_req->data.nr; __u64 *a = g_req->data.args;
 
 	switch (nr)
 	{
@@ -1869,8 +1992,7 @@ try_pending_for(Node *nd)
 		}
 		default: g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
 	}
-	if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_resp) != 0 && errno != ENOENT) {}
-	return 1;
+	return 0;
 }
 
 static void node_gone(Node *nd);
@@ -1886,66 +2008,68 @@ reap(Node *nd)
 }
 
 /* answer a thread's deferred syscall with return value val (a negative
- * val is an errno), clearing its slot (the thread resumes running) */
+ * val is an errno), clearing its slot (the thread resumes running).  In a
+ * node with more than one thread the answer is held instead (BK_DONE),
+ * with whatever the call wrote into the thread's memory, and the thread
+ * stays parked until the search runs it (A_RUN): that a parked call
+ * completes and that its thread runs on are two steps, and another
+ * thread may act between them. */
 static void
 answer(Node *nd, Thread *th, long val)
 {
+	if (node_multi(nd))
+	{
+		if (g_cap != th) th->held_len = 0;
+		th->block_kind = BK_DONE; th->held_flags = 0;
+		th->held_val = val < 0 ? 0 : val; th->held_err = val < 0 ? (int) val : 0;
+		return;
+	}
 	memset(g_ans, 0, g_sz.seccomp_notif_resp); g_ans->id = th->block_id;
 	if (val < 0) g_ans->error = (int) val; else g_ans->val = val;
 	ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_ans);
 	th->block_kind = 0;
 }
 
-/* wake up to n threads parked in BK_FUTEX on uaddr: answer each woken
- * futex with 0 and return how many woke.  A FUTEX_WAKE from the waker's
- * step; it invents no wakes.  When n would wake a strict subset of
+/* A_RUN: send thread th its held answer, so it runs to its next visible
+ * operation.  Every other thread of the node is parked, so it runs alone. */
+static void
+run_held(Node *nd, Thread *th)
+{
+	memset(g_ans, 0, g_sz.seccomp_notif_resp); g_ans->id = th->block_id;
+	g_ans->val = th->held_val; g_ans->error = th->held_err; g_ans->flags = th->held_flags;
+	ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_ans);
+	th->block_kind = 0; th->held_len = 0;
+}
+
+/* Wake up to n threads parked in BK_FUTEX on uaddr, and return how
+ * many.  A FUTEX_WAKE from the waker's step; it invents no wakes.  Each
+ * woken wait is answered 0, which in a node with more than one thread
+ * holds the answer (BK_DONE): whether the woken thread or the waker runs
+ * first is the search's choice (A_RUN), so a wake sent before the data it
+ * announces is stored is caught.  When n would wake a strict subset of
  * several same-address waiters, which subset wakes is a schedule this
  * model does not enumerate, so rather than pick one silently (and risk
  * hiding a bug) the checker errors.  waiters == 1 and n >= waiters (the
- * condvar-signal and broadcast cases, and the loop-plus-one-worker shape
- * the eval asks for) are unambiguous. */
-/* Mark up to n threads parked in BK_FUTEX on uaddr as runnable (woken),
- * and return how many.  A FUTEX_WAKE from the waker's step; it invents no
- * wakes.  The woken threads are NOT resumed here: drive_quiescent
- * releases them one at a time only once every other thread of the node is
- * parked, so threads run serially and the kernel's atomic futex and mutex
- * semantics are never torn by two threads running at once.  When n would
- * wake a strict subset of several same-address waiters, which subset
- * wakes is a schedule this model does not enumerate, so rather than pick
- * one silently (and risk hiding a bug) the checker errors.  waiters == 1
- * and n >= waiters (the condvar-signal and broadcast cases, and the
- * loop-plus-one-worker shape the eval asks for) are unambiguous. */
+ * condvar-signal and broadcast cases) are unambiguous. */
 static int
 futex_wake(Node *nd, uint64_t uaddr, int n)
 {
 	int waiters = 0;
 	for (int i = 0; i < nd->nth; i++)
-		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr && !nd->th[i].woken) waiters++;
+		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr) waiters++;
 	if (waiters == 0) return 0;
 	if (n < waiters && n < 0x7fffffff)
 		die(1, "node %d: FUTEX_WAKE of %d would wake a subset of %d waiters on one word; the thread model does not enumerate which (a lock contended by a pool is out of scope)", nd->id, n, waiters);
 	int woke = 0;
 	for (int i = 0; i < nd->nth && woke < n; i++)
-		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr && !nd->th[i].woken)
-		{ nd->th[i].woken = 1; woke++; }
-	return woke;
-}
-
-/* Release one woken thread on node nd: answer its parked futex with 0 so
- * it resumes and runs to its next owned syscall.  Called by
- * drive_quiescent only when the node has no other running or pending-wake
- * thread, so execution stays serial.  Returns 1 if it released one. */
-static int
-release_one_woken(Node *nd)
-{
-	for (int i = 0; i < nd->nth; i++)
-		if (nd->th[i].inuse && nd->th[i].woken)
+		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr)
 		{
-			nd->th[i].woken = 0;
+			Thread *old = cap_begin(&nd->th[i]);
 			answer(nd, &nd->th[i], 0);
-			return 1;
+			g_cap = old;
+			woke++;
 		}
-	return 0;
+	return woke;
 }
 
 /* answer a thread's deferred recv with up to len bytes (0 = EOF);
@@ -1954,8 +2078,10 @@ static int
 deliver(Node *nd, Thread *th, const unsigned char *body, int len)
 {
 	int k = len < th->block_want ? len : th->block_want;
+	Thread *old = cap_begin(th);
 	if (k > 0 && cr_write(nd->pid, th->block_bufaddr, body, (size_t) k) != (size_t) k) cr_fail(nd->id, "a recv buffer");
 	answer(nd, th, k);
+	g_cap = old;
 	return k;
 }
 
@@ -2092,25 +2218,14 @@ drive_quiescent(void)
 		for (int i = 0; i < M.nodes; i++) reap(&N[i]);
 		/* service a notification from each node with a running thread (or a
 		 * birth in flight).  The RECV ioctl waits for the running thread's
-		 * next owned syscall, which drives the node forward.  A node whose
-		 * only non-parked thread is merely woken is NOT serviced here (no
-		 * thread of it is about to notify; it is advanced by release below),
-		 * and a fully quiescent node is skipped. */
+		 * next owned syscall, which drives the node forward.  A fully parked
+		 * node is skipped: a thread holding an answer runs only when the
+		 * search picks it (A_RUN). */
 		int did = 0;
 		for (int i = 0; i < M.nodes; i++)
 			if (node_has_running(&N[i]))
 				did |= try_pending_for(&N[i]);
 		if (did) continue;
-		/* release a woken thread (one marked runnable by a FUTEX_WAKE) on
-		 * any node that has no thread currently running: this keeps
-		 * execution serial (one thread runs to its next syscall at a time),
-		 * so the real kernel's atomic futex/mutex semantics are never torn
-		 * by two threads of a node running concurrently. */
-		int released = 0;
-		for (int i = 0; i < M.nodes; i++)
-			if (N[i].alive && !node_has_running(&N[i]))
-				released |= release_one_woken(&N[i]);
-		if (released) continue;
 		/* wait for a node that still has a running thread to make a syscall */
 		struct pollfd pf[MAXNODES]; int np = 0;
 		for (int i = 0; i < M.nodes; i++)
@@ -2236,14 +2351,17 @@ fd_class(const Node *nd, int fd, unsigned char *r)
  * which tid holds which.  A record carries everything the thread's
  * future depends on: a recv's peer and length, every polled fd with its
  * requested events and (for epoll) its user data, a pending poll wake,
- * and a futex wait's word by address (stable, since nodes run without
- * address randomisation).  Returns the number of bytes written, or -1
- * if out is too small. */
-#define THREC (16 + MAXPOLL * 12)		/* fixed width of one thread's record */
+ * a futex wait's word by address (stable, since nodes run without
+ * address randomisation), and a held answer: the call, its result, and
+ * the bytes it wrote into the thread's memory, after a fixed-width head.
+ * Returns the number of bytes written, or -1 if out is too small. */
+#define THREC (16 + MAXPOLL * 12)		/* fixed width of one thread's record, before a held answer's bytes */
+#define THREC_MAX (THREC + 60 + 18 + MSGLEN)	/* the widest record: a head, the call, a held answer and its bytes */
 static int
 encode_threads(const Node *nd, unsigned char *out, int cap)
 {
-	unsigned char rec[MAXTHREAD][THREC]; int nrec = 0;
+	static unsigned char rec[MAXTHREAD][THREC_MAX]; int len[MAXTHREAD], nrec = 0;
+	int multi = node_multi(nd);
 	for (int i = 0; i < nd->nth; i++)
 	{
 		const Thread *th = &nd->th[i];
@@ -2281,17 +2399,53 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 			}
 		}
 		if (p > THREC) die(1, "thread record overflow on node %d", nd->id);
-		nrec++;
+		p = THREC;
+		/* In a node with more than one thread, a thread's position is part
+		 * of the world: two threads may be parked with the same kind of
+		 * wait at different points of their code (a woken condition wait
+		 * and the mutex unlock after it both hold a futex answer of 0).
+		 * The call, its arguments and its instruction pointer name the
+		 * point; they are fixed across replays, since nodes run without
+		 * address randomisation. */
+		if (multi)
+		{
+			for (int b = 0; b < 4; b++) r[p++] = (unsigned char) (th->nr >> (8 * b));
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->ip >> (8 * b));
+			for (int k = 0; k < 6; k++)
+				for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->args[k] >> (8 * b));
+		}
+		if (th->block_kind == BK_DONE)
+		{
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) ((uint64_t) th->held_val >> (8 * b));
+			for (int b = 0; b < 4; b++) r[p++] = (unsigned char) ((uint32_t) th->held_err >> (8 * b));
+			for (int b = 0; b < 4; b++) r[p++] = (unsigned char) (th->held_flags >> (8 * b));
+			r[p++] = (unsigned char) th->held_len; r[p++] = (unsigned char) (th->held_len >> 8);
+			memcpy(r + p, th->held_data, (size_t) th->held_len); p += th->held_len;
+		}
+		len[nrec++] = p;
 	}
-	/* sort the records so the multiset, not thread order, is the key */
+	/* sort the records so the multiset, not thread order, is the key: by
+	 * the fixed head, then by length, then by the held bytes */
+	int ord[MAXTHREAD];
+	for (int i = 0; i < nrec; i++) ord[i] = i;
 	for (int i = 0; i < nrec; i++)
 		for (int j = i + 1; j < nrec; j++)
-			if (memcmp(rec[j], rec[i], THREC) < 0)
-			{ unsigned char t[THREC]; memcpy(t, rec[i], THREC); memcpy(rec[i], rec[j], THREC); memcpy(rec[j], t, THREC); }
+		{
+			int a = ord[i], b = ord[j];
+			int c = memcmp(rec[b], rec[a], THREC);
+			if (!c) c = len[b] != len[a] ? len[b] - len[a] : memcmp(rec[b], rec[a], (size_t) len[a]);
+			if (c < 0) { ord[i] = b; ord[j] = a; }
+		}
 	int n = 0;
-	if (1 + nrec * THREC > cap) return -1;
+	if (1 + nrec * 2 > cap) return -1;
 	out[n++] = (unsigned char) nrec;
-	for (int i = 0; i < nrec; i++) { memcpy(out + n, rec[i], THREC); n += THREC; }
+	for (int i = 0; i < nrec; i++)
+	{
+		int k = ord[i];
+		if (n + 2 + len[k] > cap) return -1;
+		out[n++] = (unsigned char) len[k]; out[n++] = (unsigned char) (len[k] >> 8);
+		memcpy(out + n, rec[k], (size_t) len[k]); n += len[k];
+	}
 	return n;
 }
 
@@ -2351,7 +2505,7 @@ world_fp(uint64_t fp[2])
 		for (int k = 0; k < nd->durable_len; k++) PUT(nd->durable[k]);
 		PUT(nd->durable_read_off);
 		if (!nd->alive) { PUT(0); continue; }
-		unsigned char tb[1 + MAXTHREAD * THREC];
+		static unsigned char tb[1 + MAXTHREAD * (2 + THREC_MAX)];
 		int tl = encode_threads(nd, tb, (int) sizeof tb);
 		if (tl < 0) die(1, "thread encoding overflow on node %d", i);
 		for (int k = 0; k < tl; k++) PUT(tb[k]);
@@ -2435,7 +2589,7 @@ reset_world(void)
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -2455,11 +2609,14 @@ typedef struct { int kind, node, peer, thr, arg; } Act;
  *     accept()s or read()s that fd and defers again (BK_ACCEPT/BK_RECV),
  *     which the existing ACCEPT/DELIVER/TIMEOUT actions service, so poll
  *     readiness stays a search decision like a deferred recv (M5).
+ *   - RUN: a thread holding an answer (BK_DONE) gets it and runs to its
+ *     next visible operation.  Only threads of a node with more than one
+ *     thread hold answers, so which of them runs next is a search choice.
  * A futex wait (BK_FUTEX) has no environment action: it is woken only by
- * another thread's FUTEX_WAKE, which the search already drives by
- * servicing that other thread.  Each per-thread action carries the
- * thread's slot index (thr), stable across replay because threads are
- * allocated in notification order.  Every environment action is bounded
+ * another thread's FUTEX_WAKE, which then holds the waiter's answer for a
+ * RUN.  Each per-thread action carries the thread's slot index (thr),
+ * stable across replay because threads are allocated in notification
+ * order.  Every environment action is bounded
  * so the search stays finite. */
 static int
 enum_actions(Act *out)
@@ -2531,6 +2688,7 @@ enum_actions(Act *out)
 				continue;
 			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
+			if (th->block_kind == BK_DONE) { ADD(A_RUN, d, -1, ti); continue; }
 			int p = th->block_peer;
 			if (conn_head(th->block_conn, th->block_end) >= 0) ADD(A_DELIVER, d, p, ti);
 			else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, p, ti);
@@ -2585,6 +2743,7 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 		if (match && hit < 0) hit = k;
 	}
 	if (hit < 0) die(1, "poll wake on node %d found no polled fd for target %d", nd->id, target);
+	Thread *old = cap_begin(th);
 	if (th->epoll_fd >= 0)
 	{
 		/* return one ready struct epoll_event (packed on x86-64) carrying
@@ -2609,6 +2768,7 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 	 * wake is serviced by the timer-'T' read path, not a message */
 	th->poll_woke_fd = (target >= -1) ? th->pollfds[hit] : -1;
 	answer(nd, th, 1);
+	g_cap = old;
 }
 
 /* Reset connection conn (a DROP): discard every queued message in both
@@ -2707,6 +2867,7 @@ apply(const Act *a)
 			break;
 		}
 		case A_WAKE: poll_wake(nd, th, a->peer, a->arg); break;
+		case A_RUN: run_held(nd, th); break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
 		case A_RESTART:
@@ -2835,8 +2996,9 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
 	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);

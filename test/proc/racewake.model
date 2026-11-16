@@ -1,0 +1,15 @@
+# A model file for test/proc/racewake.c: one node whose main thread wakes
+# a worker, and must have stored the data the worker reads before it does.
+
+[target]
+nodes = 1
+
+[fields]
+phase = 0
+seen = 1
+
+[invariants]
+# once the worker has read (phase 1), it read the stored 7
+stored_first = "node[0].phase == 0 or node[0].seen == 7"
+# the worker does run and read, so a pass is not vacuous
+worker_reads = "eventually node[0].phase == 1"
