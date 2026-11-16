@@ -1,87 +1,134 @@
 # examples/spec/fastpaxos.cml: Fast Paxos as an abstract model,
-# extending the shared consensus base.  Fast Paxos lets clients send
-# values directly to acceptors in a "fast round", saving a message
-# delay, at the cost that a fast round may COLLIDE (acceptors accept
-# different values).  Its distinctive safety result is the fast-quorum
-# size bound: a fast round is safe only if the fast quorum F exceeds
-# 3N/4, so that a recovery coordinator reading a classic quorum can
-# always resolve a collision unambiguously.
+# extending the shared consensus base.  It inherits Agreement (at most
+# one value chosen) unchanged.
 #
 # Reference: Leslie Lamport, "Fast Paxos", Distributed Computing 19(2),
-#   2006.  The bound F > 3N/4 comes from requiring every classic quorum
-#   to intersect every pair of fast quorums (the triple intersection
-#   that resolves a collision across rounds).
+#   2006 (MSR-TR-2005-112): the coordinator's rule in Figure 2, the
+#   Quorum Requirement of section 3.1, and the TLA+ specification in the
+#   appendix (Phase1b, Phase2a with IsPickableVal, Phase2b).
 #
-# The model has two rounds.  Round 0 is fast: each acceptor accepts one
-# value directly (a collision is allowed).  A value is "fast-chosen" if
-# a fast quorum of F acceptors accepted it.  Round 1 is a classic
-# recovery: a coordinator reads a classic quorum (majority) of the
-# fast-round state and re-proposes.  The recovery rule must carry
-# forward any value that could have been fast-chosen: it proposes value
-# v if v appears often enough in its read quorum that v might hold a
-# fast quorum (the read quorum cannot rule it out).  A value is chosen
-# if it is fast-chosen OR the recovery commits it.
+# In a fast round acceptors vote for values clients send them directly,
+# so different acceptors can vote for different values (a collision).
+# A later classic round recovers: its coordinator reads the promises of
+# a classic quorum Q, and with k the highest round any member voted in
+# and VS the values voted in round k, it proposes
+#   - any proposed value, if no member voted (k = 0);
+#   - the one value in VS, if there is one;
+#   - else a value w in VS for which O4(w) holds: some fast quorum R
+#     has every member of R and Q voting w in round k;
+#   - else any proposed value.
+# This is safe under the Quorum Requirement: (a) any two quorums
+# intersect, and (b) any classic quorum and any two fast quorums
+# intersect.  With quorums defined by size, Qc classic and Qf fast out
+# of N acceptors, (b) is Qc + 2*Qf > 2*N, and it makes O4 hold for at
+# most one value.
 #
-# Safety (Agreement, inherited) requires that recovery never commits a
-# value different from one that was fast-chosen.  With F > 3N/4 the read
-# quorum always intersects a fast quorum in a majority of that fast
-# quorum, so a fast-chosen value is unambiguous and recovery preserves
-# it.  Here A = 5: a classic majority is 3, and 3N/4 = 3.75, so a
-# correct fast quorum is F = 4.
+# The instance: N = 3, round 1 fast and round 2 classic, values 1 and 2,
+# QC = 2 and QF = 3.  That is the paper's section 3.4.1 choice that
+# tolerates the most classic failures at N = 3 (F = 1, E = 0); Qc + 2*Qf
+# = 8 > 6.  Every phase 1b message reports a vote from round 1 or none,
+# so the coordinator's rule depends only on how many members of Q
+# reported each value, and phase2a(v, n0, n1, n2) picks the quorum by
+# those counts: n0 members reported no vote, n1 a vote for 1 and n2 a
+# vote for 2, each at most the number of such promises received, with
+# n0 + n1 + n2 >= QC.  O4(w) for a quorum of size s with n_w votes for w
+# holds iff (N - s) + n_w >= qf: the largest fast quorum whose members
+# in Q all voted w is everyone outside Q plus Q's votes for w.
 #
-# -DBUG: the fast quorum is shrunk to a plain majority (F = 3 <= 3N/4),
-# so a collided fast round (value 1 on three acceptors, value 2 on two)
-# lets recovery commit value 2 while value 1 was fast-chosen by its
-# three -- two values chosen.
+# Messages: vote1[a] is acceptor a's round 1 vote (0 = none), cnt1b[w]
+# counts the round 2 promises that reported w (0 = no vote), val2a is
+# round 2's proposal, and vrnd[a] == 2 marks a's round 2 vote.  A
+# promise closes round 1 for that acceptor: rnd[a] = 2 disables its fast
+# vote.  What is abstracted away: two rounds, one coordinator, no 1a
+# messages (round 1 needs no phase 1; a round 2 promise needs no
+# trigger), no coordinated or uncoordinated recovery from 2b messages
+# (the paper shows it equivalent to phase 1b), no loss or duplication,
+# and both values always proposed.  In the BUG case two values can
+# satisfy O4, and the rule may pick either; the paper's TLA+ uses CHOOSE
+# there, which picks one.
+#
+# -DBUG: shrink_fast_quorum, enabled before any acceptor acts, sets the
+# fast quorum size qf to QFBUG = 2, so the whole protocol (learning and
+# the coordinator's O4) runs with Qc + 2*Qf = 6, not more than 2*N.  A
+# classic and a fast quorum still intersect; two fast quorums and a
+# classic quorum need not.  A value fast-chosen by two acceptors can
+# then be overridden by recovery.
 #
 #   cmc --spec examples/spec/fastpaxos.cml
-#   cmc --spec examples/spec/fastpaxos.cml --define BUG   (fast quorum shrunk)
+#   cmc --spec examples/spec/fastpaxos.cml --define BUG   (Qc + 2*Qf <= 2*N)
 
 module fastpaxos
 extends consensus
 
-const A = 5                     # acceptors 0 .. A-1
-const QC = 3                    # classic quorum (majority of A)
-const F = 4                     # fast quorum, > 3A/4 for safety
+const N = 3                     # acceptors 0 .. N-1
+const QC = 2                    # classic quorum size
+const QF = 3                    # fast quorum size: QC + 2*QF > 2*N
+const QFBUG = 2                 # the BUG's fast quorum: QC + 2*QFBUG = 2*N
 
-# acc[a] = the value acceptor a accepted in the fast round (0 = none).
-var acc : [0 .. A-1 -> 0 .. V]
-# committed = the value the recovery round committed (0 = none yet).
-var committed : 0 .. V
+# the fast quorum size in force (QF unless the BUG shrinks it at start)
+var qf : QFBUG .. QF
 
-init acc == [a in 0 .. A-1 -> 0]
-init committed == 0
+# acceptor state: the highest round promised or voted in, and the round
+# and value of its last vote (0 = none)
+var rnd : [0 .. N-1 -> 0 .. 2]
+var vrnd : [0 .. N-1 -> 0 .. 2]
+var vval : [0 .. N-1 -> 0 .. V]
 
-# fast round: an acceptor accepts a value directly from a client.
-action fast(a in 0 .. A-1, v in 1 .. V):
-  when acc[a] == 0
-  acc' = [acc except [a] = v]
+# messages: round 1 votes, round 2 promises by reported value, round 2's
+# proposal
+var vote1 : [0 .. N-1 -> 0 .. V]
+var cnt1b : [0 .. V -> 0 .. N]
+var val2a : 0 .. V
 
-# a value is chosen if a fast quorum accepted it in the fast round.
-action choose_fast(v in 1 .. V):
-  when (count a in 0 .. A-1 : acc[a] == v) >= F
+init qf == QF
+init rnd == [a in 0 .. N-1 -> 0]
+init vrnd == [a in 0 .. N-1 -> 0]
+init vval == [a in 0 .. N-1 -> 0]
+init vote1 == [a in 0 .. N-1 -> 0]
+init cnt1b == [w in 0 .. V -> 0]
+init val2a == 0
+
+# round 1 (fast): acceptor a votes for a client's value v.
+action fastvote(a in 0 .. N-1, v in 1 .. V):
+  when rnd[a] == 0
+  rnd' = [rnd except [a] = 1]
+  vrnd' = [vrnd except [a] = 1]
+  vval' = [vval except [a] = v]
+  vote1' = [vote1 except [a] = v]
+
+# v is chosen in round 1 once a fast quorum voted for it.
+action learn_fast(v in 1 .. V):
+  when (count a in 0 .. N-1 : vote1[a] == v) >= qf
   chosen' = [chosen except [v] = 1]
 
-# recovery round: a coordinator reads a classic quorum and commits a
-# value v only if v COULD still be fast-chosen as far as its read can
-# tell -- that is, v's acceptances plus the acceptors it did not read
-# could reach a fast quorum: (count acc==v) + (A - QC) >= F.  With a
-# correct fast quorum F > 3A/4 this holds for at most one value once the
-# round is settled, so recovery cannot pick a value different from a
-# fast-chosen one.  Committing is recorded both in `committed` and in
-# `chosen` (a committed value is chosen).
-action recover(v in 1 .. V):
-  when committed == 0 and (count a in 0 .. A-1 : acc[a] == v) + (A - QC) >= F
-  committed' = v
+# round 2 phase 1b: acceptor a promises round 2, which closes round 1
+# for it, and reports its last vote.
+action phase1b(a in 0 .. N-1):
+  when rnd[a] < 2
+  rnd' = [rnd except [a] = 2]
+  cnt1b' = [cnt1b except [vval[a]] = cnt1b[vval[a]] + 1]
+
+# round 2 phase 2a: the coordinator's rule (Figure 2) over a classic
+# quorum of promises with n0, n1 and n2 members reporting no vote, a
+# vote for 1 and a vote for 2.
+action phase2a(v in 1 .. V, n0 in 0 .. N, n1 in 0 .. N, n2 in 0 .. N):
+  when val2a == 0 and n0 <= cnt1b[0] and n1 <= cnt1b[1] and n2 <= cnt1b[2] and n0 + n1 + n2 >= QC and (n1 + n2 == 0 or (n2 == 0 and v == 1) or (n1 == 0 and v == 2) or (n1 > 0 and n2 > 0 and ((v == 1 and N - (n0 + n1 + n2) + n1 >= qf) or (v == 2 and N - (n0 + n1 + n2) + n2 >= qf) or (N - (n0 + n1 + n2) + n1 < qf and N - (n0 + n1 + n2) + n2 < qf))))
+  val2a' = v
+
+# round 2 phase 2b: acceptor a votes for round 2's proposal.
+action phase2b(a in 0 .. N-1):
+  when val2a != 0 and vrnd[a] < 2
+  rnd' = [rnd except [a] = 2]
+  vrnd' = [vrnd except [a] = 2]
+  vval' = [vval except [a] = val2a]
+
+# v is chosen in round 2 once a classic quorum voted for it.
+action learn_classic(v in 1 .. V):
+  when val2a == v and (count a in 0 .. N-1 : vrnd[a] == 2) >= QC
   chosen' = [chosen except [v] = 1]
 
-# the planted bug: recovery treats the fast round as if a classic
-# majority (QC) sufficed to choose, rather than a fast quorum (F).  With
-# the smaller threshold a collided fast round lets recovery commit a
-# value different from the one a fast quorum actually holds -- two values
-# chosen.  (This is the "used a plain majority for the fast round"
-# mistake the F > 3A/4 bound exists to prevent.)
-action recover_bug(v in 1 .. V) [BUG]:
-  when committed == 0 and (count a in 0 .. A-1 : acc[a] == v) + (A - QC) >= QC
-  committed' = v
-  chosen' = [chosen except [v] = 1]
+# the planted bug: before anything happens, run with fast quorums of
+# QFBUG acceptors.
+action shrink_fast_quorum [BUG]:
+  when qf == QF and (all a in 0 .. N-1 : rnd[a] == 0)
+  qf' = QFBUG

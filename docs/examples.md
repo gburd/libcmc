@@ -59,10 +59,12 @@ checked three ways that agree -- `cmc --spec`, TLC
   quorum `Q2`.  Agreement holds at `A = 4`, `Q1 = 3`, `Q2 = 2`, where
   two phase 2 quorums can be disjoint but `Q1 + Q2 > A`.  Reference:
   Howard, Malkhi, Spiegelman, OPODIS 2016.
-- `fastpaxos.cml` -- Fast Paxos, extending `consensus`; a fast round may
-  collide, so its quorum must exceed `3A/4` for a classic recovery round
-  to resolve the collision (two rounds modelled).  Reference: Lamport,
-  Fast Paxos, 2006.
+- `fastpaxos.cml` -- Fast Paxos, extending `consensus`: a fast round,
+  then a classic round whose coordinator reads a classic quorum of
+  promises and applies the paper's rule for a collision.  Agreement
+  holds when the Quorum Requirement `Qc + 2*Qf > 2*N` does (here N = 3,
+  Qc = 2, Qf = 3), and the BUG build's `Qf = 2` breaks it.  Reference:
+  Lamport, Fast Paxos, 2006.
 - `raft.cml` -- Raft leader election; Election Safety (at most one
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,
@@ -87,12 +89,16 @@ Each also ships a `--define BUG` build that breaks the safety rule (a
 leader that ignores its promises, a revote, an overwrite), and the
 checker finds the shortest counterexample.
 
-These models are small safety demonstrations, each a few guarded
-actions over a tally.  `cmc --spec`, TLC and Apalache agreeing on one
-shows the encoded rules were executed as written; it does not show the
-rules are the named protocol.  Fast Paxos recovery does not read a
-quorum.  The remediation plan (Phase 4) either makes each a closer
-abstraction or renames it.
+These models are small instances (three or four processes, two
+ballots, rounds or epochs at most) with no message loss and no crashes.
+`cmc --spec`, TLC and Apalache agreeing on one shows the encoded rules
+were executed as written, at that instance; it is not a proof of the
+protocol.  Each file's header names the phases it encodes and what it
+leaves out, and the remediation plan (Phase 4) records what each engine
+reported.  `raft.cml` and `hc.cml` were not part of that rework: they
+remain one-term and one-epoch vote tallies, which state Election Safety
+and per-epoch Agreement but do not model elections across terms or
+epochs.
 
 ## The failure, animated
 

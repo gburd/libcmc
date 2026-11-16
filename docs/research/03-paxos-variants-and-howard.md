@@ -136,10 +136,12 @@ spec exists.
   Complex" (CSUR 2015).  Invariant: State-Machine Safety.  Knob: the
   leader's recovery of already-chosen slots in Phase 1.  TLA+: yes.
 - **Fast Paxos.**  Lamport (Distributed Computing 2006).  Invariant:
-  Agreement under fast rounds.  Knob: the fast-quorum size (fast rounds
-  need |Qfast| > 3N/4); a plain majority for a fast round lets a collided
-  round choose two values.  TLA+: yes.  Needs N >= 5 for the bug to be
-  reachable.
+  Agreement under fast rounds.  Knob: the quorum sizes.  The Quorum
+  Requirement asks that any two quorums intersect and that any classic
+  quorum and any two fast quorums intersect, which for sizes is
+  `Qc + 2*Qf > 2*N` (with a classic majority, `|Qfast| > 3N/4`); a fast
+  quorum that is too small lets recovery override a fast-chosen value.
+  TLA+: yes, in the paper's appendix.
 - **Cheap Paxos.**  Lamport, Massa (DSN 2004).  Invariant: Agreement with
   auxiliary acceptors used only on reconfiguration.  Knob: counting an
   auxiliary in a steady-state quorum.  TLA+: no well-known standalone.
@@ -212,13 +214,14 @@ or N=5 for the quorum-split variants.
 | Matchmaker Paxos (two configs) | 2 configs, 3 matchmakers | drop a prior config |
 | WPaxos (one steal) | 5 nodes, 1 object, 1 steal | disjoint phase quorums, or a steal that drops the value |
 | Mencius (two slots) | 3 servers, 2 slots | skip a slot without the quorum |
-| Fast Paxos (collision) | 5 acceptors, 2 values, 1 fast round | plain majority for the fast round |
+| Fast Paxos (collision, done) | 3 acceptors, 2 values, a fast and a classic round | `Qf = 2` with `Qc = 2`, so `Qc + 2*Qf = 2*N` |
 
-Fast Paxos needs N >= 5 for the bug to be reachable (a majority must be
-strictly smaller than the quorum the protocol actually requires); at
-N=3 the bug cannot appear.  FPaxos does not: its quorums need not be
-majorities, and `fpaxos.cml` uses N=4 so that two phase 2 quorums of 2
-can be disjoint.
+Neither needs N >= 5 once the quorum sizes are parameters rather than
+"a majority".  At N=3, Fast Paxos with `Qc = 2` and `Qf = 3` meets the
+Quorum Requirement and `Qf = 2` does not, and `fastpaxos.cml` uses that
+instance.  FPaxos quorums need not be majorities either, and
+`fpaxos.cml` uses N=4 so that two phase 2 quorums of 2 can be
+disjoint.
 
 ### Partial fit (a reduction that loses something)
 

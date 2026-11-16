@@ -115,7 +115,7 @@ examples/spec|caspaxos|caspaxosb|descends|VIOLATION|12|--define BUG
 examples/spec|twophase|twophase|consistency|PASS|10|
 examples/spec|twophase|twophaseb|consistency|VIOLATION|10|--define BUG
 examples/spec|fastpaxos|fastpaxos|agreement|PASS|10|
-examples/spec|fastpaxos|fastpaxosb|agreement|VIOLATION|10|--define BUG
+examples/spec|fastpaxos|fastpaxosb|agreement|VIOLATION|11|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 inv=$4 want=$5 len=$6 def=$7

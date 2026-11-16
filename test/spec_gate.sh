@@ -97,13 +97,16 @@ expect "caspaxos: depth matches TLC (17)"     0 "complete state graph search is 
 expect "caspaxos: accepting below a promise forks" 1 "descends is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
 expect "caspaxos: shortest trace is 12 actions" 1 "is (12 actions)" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
 
-# Fast Paxos (Lamport 2006): a fast round may collide, so its quorum F
-# must exceed 3A/4 for a classic recovery round to resolve the collision
-# unambiguously.  With A=5, F=4 (> 3.75) it holds; the --define BUG lets
-# recovery use a classic majority threshold where a fast quorum is
-# needed, so a collided round chooses two values.
-expect "fastpaxos: safe when F>3A/4"         0 "No error has been found" --spec "$HERE/examples/spec/fastpaxos.cml"
-expect "fastpaxos: the small-fast-quorum bug collides" 1 "agreement is violated" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
+# Fast Paxos (Lamport 2006): a fast round, then a classic round whose
+# coordinator applies Figure 2's rule to a classic quorum of promises.
+# With N=3, Qc=2, Qf=3 the Quorum Requirement Qc + 2*Qf > 2*N holds and
+# so does agreement; counts and depth match single-worker TLC on the
+# emitted module.  The --define BUG runs with Qf=2 (2 + 4 = 2*N), so a
+# fast-chosen value is overridden.
+expect "fastpaxos: safe when Qc+2Qf>2N"      0 "1976 distinct states found" --spec "$HERE/examples/spec/fastpaxos.cml"
+expect "fastpaxos: depth matches TLC (12)"   0 "complete state graph search is 12" --spec "$HERE/examples/spec/fastpaxos.cml"
+expect "fastpaxos: Qc+2Qf<=2N breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
+expect "fastpaxos: shortest trace is 11 actions" 1 "is (11 actions)" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
 
 # Two-phase commit (Lamport's TwoPhase.tla): the canonical non-consensus
 # example.  Consistency (atomicity) -- a committed and an aborted

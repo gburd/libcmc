@@ -235,6 +235,19 @@ demonstration it is.
   choose a fresh value.  The experiment varies the quorum inequality
   that the paper states (`Qc + 2Qf > 2N` with pairwise intersection),
   not a recovery threshold.
+  Status: done.  `fastpaxos.cml` has a fast round 1 and a classic
+  round 2.  A round 2 promise closes round 1 for its acceptor and
+  reports its vote; the coordinator picks a value by Figure 2's rule
+  over a classic quorum of promises, including O4 for a collision and a
+  fresh value when the quorum reports no vote.  Quorums are sizes QC and
+  QF.  With N = 3, QC = 2 and QF = 3 (2 + 6 > 6) it has 1,976 distinct
+  states and depth 12 in cmc and in TLC; Apalache reports no error up to
+  length 10.  The `BUG` sets the fast quorum to 2 before any acceptor
+  acts, so 2 + 4 = 2N; all three engines find a fast-chosen value
+  overridden, cmc and TLC in 11 steps.  Still abstracted: two rounds,
+  one coordinator, no 1a messages, no recovery from 2b messages, no
+  loss, and both values always proposed.  At N = 5 the same model has
+  222,460 states, too many for the per-push gate.
 - **4.3 Flexible Paxos.**  Ballots, phase 1 promises and
   highest-ballot value selection, with Q1 and Q2 as parameters.
   Status: done.  `fpaxos.cml` is the Paxos of 4.6 with the quorum split:
