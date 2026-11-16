@@ -202,7 +202,7 @@ or N=5 for the quorum-split variants.
 
 | Variant | Minimal instance | Planted-bug knob |
 |---|---|---|
-| Single-decree Paxos (done) | 3 acceptors, 2 ballots, 2 values | double vote without the safety guard |
+| Single-decree Paxos (done) | 3 acceptors, 2 ballots, 2 values | a 2a that ignores the votes its promises report |
 | Flexible Paxos | 5 acceptors, 2 values | set `Q1 + Q2 <= A` |
 | Raft election (done) | 3 servers, one term | grant without spending the one vote |
 | ZAB commit-durability (done) | 3 participants | commit without a quorum (early ack) |

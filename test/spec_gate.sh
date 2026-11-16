@@ -41,9 +41,15 @@ expect "mutex: the bug is caught"            1 "mutual_exclusion is violated" --
 expect "mutex: shortest trace is 4 actions"  1 "is (4 actions)" --spec "$HERE/test/spec/mutex.cml" --define BUG
 
 echo "-- modules: a protocol spec extends a shared base"
-expect "paxos: extends consensus, agreement holds" 0 "117 distinct states found" --spec "$HERE/examples/spec/paxos.cml"
-expect "paxos: depth matches TLC (5)"         0 "complete state graph search is 5" --spec "$HERE/examples/spec/paxos.cml"
-expect "paxos: the double-vote bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
+# Single-decree Paxos (Lamport's Paxos.tla): promises, highest-ballot
+# value selection in phase 2a, votes in more than one ballot.  Counts,
+# depth and the 12-action trace match single-worker TLC on the emitted
+# module and on the hand-written paxos.tla; the bug's 2a ignores the
+# votes the promises report.
+expect "paxos: extends consensus, agreement holds" 0 "6144 distinct states found" --spec "$HERE/examples/spec/paxos.cml"
+expect "paxos: depth matches TLC (16)"        0 "complete state graph search is 16" --spec "$HERE/examples/spec/paxos.cml"
+expect "paxos: a 2a that ignores the promises breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
+expect "paxos: shortest trace is 12 actions"  1 "is (12 actions)" --spec "$HERE/examples/spec/paxos.cml" --define BUG
 
 # Raft leader election (Ongaro's raft.tla): Election Safety, at most one
 # leader per term.  Counts and depth match single-worker TLC (checked by

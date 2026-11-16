@@ -245,6 +245,19 @@ demonstration it is.
   guarded counter it is.
 - **4.6 Single-decree Paxos.**  Acceptors vote in more than one ballot,
   and safety rests on phase 1 value selection, not on write-once votes.
+  Status: done.  `paxos.cml` has Paxos.tla's maxBal, maxVBal and maxVal
+  per acceptor, the 1b, 2a and 2b messages as function variables, and
+  Phase1b, Phase2a (the highest-ballot vote among a quorum's promises,
+  or any value if none) and Phase2b.  With 3 acceptors, 2 ballots and 2
+  values it has 6,144 distinct states and depth 16 in cmc and in TLC,
+  both on the emitted module and on a hand-written twin (`paxos.tla`)
+  that quantifies over quorums and keeps a message set as Paxos.tla
+  does.  Apalache reports no error up to length 10.  The `BUG` 2a
+  ignores the votes the promises report; all three engines find the
+  violation, cmc and TLC in 12 steps.  Still abstracted: no 1a messages
+  (a promise may name any higher ballot), no loss or duplication, two
+  ballots, and an explicit learn action.  The process engine's refine
+  rows for paxos.c and paxos2.c still bind only `chosen`, and pass.
 - **4.7 Raft election.**  raft.c campaigns by blocking on each peer's
   reply while it is outside `accept()`, so two concurrent candidates
   deadlock.  Up to 1.3.0 the double-vote bug was reported only because

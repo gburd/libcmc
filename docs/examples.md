@@ -48,8 +48,12 @@ checked three ways that agree -- `cmc --spec`, TLC
 (`make check-emit-tla`) and Apalache (`make check-emit-apalache`):
 
 - `paxos.cml` -- single-decree Paxos, extending the shared `consensus`
-  base; Agreement (at most one value chosen).  Reference: Lamport's
-  `Paxos.tla`.
+  base; Agreement (at most one value chosen).  Acceptors promise and vote
+  in more than one ballot, and a leader must propose the value of the
+  highest-ballot vote its quorum of promises reports.  Reference:
+  Lamport's `Paxos.tla`, whose variables and actions it follows; a
+  hand-written twin in that style (`paxos.tla`) gives TLC the same
+  6,144 distinct states.
 - `fpaxos.cml` -- Flexible Paxos, extending `consensus`; Agreement holds
   iff every Phase 1 quorum intersects every Phase 2 quorum, for which
   `Q1 + Q2 > A` suffices (Howard's theorem).  Reference: Howard, Malkhi,
@@ -73,8 +77,8 @@ checked three ways that agree -- `cmc --spec`, TLC
   manager never coexist.  Reference: Lamport's `TwoPhase.tla`.
 
 Each also ships a `--define BUG` build that breaks the safety rule (a
-double vote, a revote, an overwrite), and the checker finds the shortest
-counterexample.
+leader that ignores its promises, a revote, an overwrite), and the
+checker finds the shortest counterexample.
 
 These models are small safety demonstrations, each a few guarded
 actions over a tally.  `cmc --spec`, TLC and Apalache agreeing on one
