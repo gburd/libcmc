@@ -208,7 +208,28 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   Status: the interim rule is done.  Any `CLONE_THREAD` sets a flag that
   turns a would-be pass or unmet `eventually` into INCOMPLETE; the
   twothread rows in `test/proc_gate.sh` now expect exit 2, and the
-  planted bug is still caught.  The search action is still open.
+  planted bug is still caught.  The search action is still open, and is
+  deferred to its own milestone, because it is a rewrite of how the
+  process engine answers system calls rather than a local fix:
+
+  - Every owned system call of a thread in a multi-threaded node becomes
+    a preemption point: the call is deferred, the thread parks, and when
+    every thread is parked the search chooses which one to answer next.
+    `try_pending_for()` answers most calls inline today, so each case
+    must learn to defer.
+  - `FUTEX_WAKE` defers the waker as well as marking the waiters, so the
+    search can run a woken thread before the waker's next call (the
+    wake-before-store race) as well as after it.
+  - A birth must be serialised.  `clone` returns in both threads at
+    once, and the parent and the newborn run user code concurrently
+    until each reaches an owned call, which is a race in the checker,
+    not only an unexplored schedule.  The newborn has to be held at its
+    first instruction (a ptrace stop on `PTRACE_EVENT_CLONE`) until the
+    search releases it.
+  - The boundary stays system calls: interleavings of plain memory
+    accesses between two calls are not explored, and cmc(7) must say so.
+
+  Until all of that lands, the INCOMPLETE rule is the honest answer.
 - **3.9 A root with no enabled action.**  The no-progress guard also
   reports a safety-only model whose initial state enables no action,
   instead of a pass.  (An unmet `eventually` there already fails, on
