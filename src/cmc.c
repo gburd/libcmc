@@ -92,14 +92,12 @@ struct CmcRun
 			   *actp[CMC_MAX_PROPS],
 			   *wit[CMC_MAX_PROPS],
 			   *qui[CMC_MAX_PROPS],
-			   *ev[CMC_MAX_PROPS],
-			   *sel[CMC_MAX_PROPS];	/* the named (not always) props */
+			   *ev[CMC_MAX_PROPS];
 	int			ninv,
 				nactp,
 				nwit,
 				nqui,
-				nev,
-				nsel;
+				nev;
 	int			wit_depth[CMC_MAX_PROPS];
 	Table		t;
 	/* scratch, sized per run (docs/research/02 M1) */
@@ -111,11 +109,12 @@ struct CmcRun
 	 * of states known to reach the goal (Ent.depth = fair steps to it) */
 	Table		live;
 	uint8_t    *fw,
-			   *fw0;			/* fw0: spare world */
+			   *fw0;			/* fw0: the world at a drain generation's start */
 	CmcAction   *fsuf;			/* the fair suffix of the last failure */
 	int			nfsuf;
-	CmcAction   *facts;			/* enabled actions inside the fair run */
-	uint64_t   *ffp;			/* round-start fingerprints of the fair run */
+	CmcAction   *facts;			/* actions enabled at a generation's start */
+	uint64_t   *ffp,			/* round-start fingerprints of the fair run */
+			   *dfp;			/* generation-start fingerprints of a drain */
 	int		   *fstep;			/* fair steps taken at each round start */
 	int			fair_from;		/* of the last result, for traces */
 	/* bound/gate error from the last apply */
@@ -548,27 +547,51 @@ parse_cfg(CmcRun *r, const char *cfg, char *err, size_t errlen)
 	return cfg_parse_into(r->core, r->cfg, cfg, err, errlen);
 }
 
+/*
+ * Files property p under its kind.  Returns 0, or -1 with the reason in err
+ * when p has no known kind (it would never be checked) or its kind already
+ * holds CMC_MAX_PROPS properties.  Both are checked before anything is
+ * written.
+ */
 static int
-add_prop(CmcRun *r, const CmcProp *p)
+add_prop(CmcRun *r, const CmcProp *p, char *err, size_t errlen)
 {
+	const CmcProp **arr;
+	int		   *n;
+
 	switch (p->kind)
 	{
 		case CMC_INV:
-			r->inv[r->ninv++] = p;
+			arr = r->inv;
+			n = &r->ninv;
 			break;
 		case CMC_ACTION_PROP:
-			r->actp[r->nactp++] = p;
+			arr = r->actp;
+			n = &r->nactp;
 			break;
 		case CMC_WITNESS:
-			r->wit[r->nwit++] = p;
+			arr = r->wit;
+			n = &r->nwit;
 			break;
 		case CMC_QUIESCENT:
-			r->qui[r->nqui++] = p;
+			arr = r->qui;
+			n = &r->nqui;
 			break;
 		case CMC_EVENTUALLY:
-			r->ev[r->nev++] = p;
+			arr = r->ev;
+			n = &r->nev;
 			break;
+		default:
+			snprintf(err, errlen, "property %s has unknown kind %d", p->name, (int) p->kind);
+			return -1;
 	}
+	if (*n >= CMC_MAX_PROPS)
+	{
+		snprintf(err, errlen, "too many properties of one kind (at most %d): %s",
+				 CMC_MAX_PROPS, p->name);
+		return -1;
+	}
+	arr[(*n)++] = p;
 	return 0;
 }
 
@@ -646,10 +669,12 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 	r->fsuf = xmalloc(sizeof(CmcAction) * ((size_t) r->o.live_steps + 1));
 	r->facts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
 	r->ffp = xmalloc(sizeof(uint64_t) * 2 * ((size_t) r->o.live_steps + 2));
+	r->dfp = xmalloc(sizeof(uint64_t) * 2 * ((size_t) r->o.live_steps + 2));
 	r->fstep = xmalloc(sizeof(int) * ((size_t) r->o.live_steps + 2));
 
 	for (int j = 0; j < m->nalways; j++)
-		add_prop(r, &m->props[j]);
+		if (add_prop(r, &m->props[j], err, errlen) != 0)
+			goto bad_prop;
 	if (props)
 	{
 		for (int i = 0; props[i]; i++)
@@ -665,22 +690,24 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 				cmc_run_free(r);
 				return NULL;
 			}
-			add_prop(r, p);
-			r->sel[r->nsel++] = p;
+			if (add_prop(r, p, err, errlen) != 0)
+				goto bad_prop;
 		}
 	}
 	else
 		for (int j = m->nalways; j < m->nprops; j++)
-		{
-			add_prop(r, &m->props[j]);
-			r->sel[r->nsel++] = &m->props[j];
-		}
+			if (add_prop(r, &m->props[j], err, errlen) != 0)
+				goto bad_prop;
 	if (r->nev && r->direct)
 		return run_reject(r, err, errlen, "CMC_EVENTUALLY needs actor mode");
 	if (r->core->durable_size && !r->core->apply_persist)
 		return run_reject(r, err, errlen,
 						  "durable_size > 0 needs apply_persist (the engine owns durable)");
 	return r;
+
+bad_prop:
+	cmc_run_free(r);
+	return NULL;
 }
 
 void
@@ -699,6 +726,7 @@ cmc_run_free(CmcRun *r)
 	free(r->fsuf);
 	free(r->facts);
 	free(r->ffp);
+	free(r->dfp);
 	free(r->fstep);
 	free(r);
 }
@@ -1315,6 +1343,9 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 				for (int k = 0; k < r->o.persist_cap; k++)
 					memset(PERS(r, w, n, k), 0, PERS_ENT);
 				NPERS(r, w, n) = 0;
+				/* what the node sent itself never left the process, so it dies
+				 * with the process in either network */
+				chan_clear(r, w, n, n);
 				/* docs/research/02 B5: its connections die with it */
 				if (FIFO(r))
 				{
@@ -1428,10 +1459,15 @@ is_quiescent(CmcRun *r, const uint8_t *s, const CmcAction *acts, int na)
  *
  * From a state s the fair schedule runs: no faults and no new clients;
  * each round first drains everything the environment owes the cores
- * (every deliverable message in channel order, every pending persist,
- * wake and connection reset, in cmc_enabled order), then fires each timer
- * armed at that point once, draining after each.  It is deterministic and
- * every round is a function of the world at its start.  The check passes
+ * (every deliverable message, every pending persist, wake and connection
+ * reset), then fires each timer armed at that point once, draining after
+ * each, so messages arrive before timeouts.  A drain runs in generations
+ * (fair_drain), so no channel waits behind another.  The world is finite
+ * and each generation a function of the world at its start, so a drain
+ * that would never empty comes back to a generation-start world, and ends
+ * there: cores that keep messaging each other cannot postpone an armed
+ * timer forever.  It is deterministic and every round is a function of
+ * the world at its start.  The check passes
  * when all CMC_EVENTUALLY properties hold together at some state within
  * live_steps steps; it fails when the schedule stops, when a round-start
  * world repeats (it cycles forever), or when the steps run out.
@@ -1474,27 +1510,73 @@ fair_step(CmcRun *r, CmcAction a)
 	return ev_goal(r, r->fw) ? 1 : 0;
 }
 
-/* drains r->fw; same returns as fair_step, 0 = drained */
+/*
+ * Returns delivery a, enabled on r->fw0, pointed at the same message in
+ * r->fw, where its index may have moved as other messages came and went.
+ * Only its own delivery removes a message during a drain; were it gone,
+ * the index would be past the last entry and cmc_apply() would refuse it.
+ */
+static CmcAction
+fair_redirect(CmcRun *r, CmcAction a)
+{
+	const uint8_t *key = MSG(r, r->fw0, CMC_ACT_D(a));
+	int			j;
+
+	for (j = 0; j < NMSG(r, r->fw); j++)
+		if (memcmp(MSG(r, r->fw, j), key, MSG_KEY) == 0)
+			break;
+	return CMC_ACT(CMC_A_DELIVER, key[0], key[1], 0, j);
+}
+
+/*
+ * Drains r->fw in generations.  A generation takes once each, in
+ * cmc_enabled order, the deliveries, flushes, wakes and resets enabled at
+ * its start; what they enable waits for the next generation, so a
+ * message is never postponed behind an endless stream on another channel.
+ * The drain ends when a generation has nothing to take, or when a
+ * generation's start world repeats an earlier one in this drain: the
+ * cores then keep each other busy forever, and stopping is what lets the
+ * timers that follow fire.  Same returns as fair_step, 0 = drained.
+ */
 static int
 fair_drain(CmcRun *r)
 {
-	for (;;)
+	for (int ng = 0;; ng++)
 	{
-		int			na = cmc_enabled(r, r->fw, r->facts, CMC_MAX_ACTIONS),
-					i,
-					rc;
+		uint64_t	fp[2];
+		int			na;
+		bool		took = false;
 
+		/* every generation but the last takes a step, so ng <= live_steps */
+		cmc_fingerprint(r->fw, r->ws, fp);
+		for (int g = 0; g < ng; g++)
+			if (r->dfp[2 * g] == fp[0] && r->dfp[2 * g + 1] == fp[1])
+				return 0;
+		r->dfp[2 * ng] = fp[0];
+		r->dfp[2 * ng + 1] = fp[1];
+
+		memcpy(r->fw0, r->fw, r->ws);
+		na = cmc_enabled(r, r->fw0, r->facts, CMC_MAX_ACTIONS);
 		if (na < 0)
 		{
 			snprintf(r->err, sizeof(r->err), "too many enabled actions in the fair run");
 			return -1;
 		}
-		for (i = 0; i < na && !fair_kind(CMC_ACT_KIND(r->facts[i])); i++)
-			;
-		if (i == na)
+		for (int i = 0; i < na; i++)
+		{
+			CmcAction	a = r->facts[i];
+			int			rc;
+
+			if (!fair_kind(CMC_ACT_KIND(a)))
+				continue;
+			if (CMC_ACT_KIND(a) == CMC_A_DELIVER)
+				a = fair_redirect(r, a);
+			if ((rc = fair_step(r, a)) != 0)
+				return rc;
+			took = true;
+		}
+		if (!took)
 			return 0;
-		if ((rc = fair_step(r, r->facts[i])) != 0)
-			return rc;
 	}
 }
 
@@ -1812,6 +1894,15 @@ set_violation(CmcResult *res, const CmcProp *p, const char *why)
 	snprintf(res->why, sizeof(res->why), "%s", why);
 }
 
+/* The engine error for a negative cmc_enabled() result, the same in every
+ * search and in replay. */
+static const char *
+enabled_error(int na)
+{
+	return na == -2 ? "determinism gate: action list differs on a repeat" :
+		"too many enabled actions (raise CMC_MAX_ACTIONS)";
+}
+
 /* ------------------------------------------------------------------ */
 /* BFS */
 
@@ -1873,9 +1964,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 
 		if (na < 0)
 		{
-			set_violation(res, NULL, na == -2 ?
-						  "determinism gate: action list differs on a repeat" :
-						  "too many enabled actions (raise CMC_MAX_ACTIONS)");
+			set_violation(res, NULL, enabled_error(na));
 			goto fail_at_s;
 		}
 		if (r->nqui && is_quiescent(r, s, acts, na) && (bad = check_qui(r, s, &why)))
@@ -2049,7 +2138,7 @@ run_dfs(CmcRun *r, CmcResult *res)
 
 		if (f->na < 0)
 		{
-			set_violation(res, NULL, "too many enabled actions");
+			set_violation(res, NULL, enabled_error(f->na));
 			res->trace_len = sp + 1;
 			goto copy_path;
 		}
@@ -2210,13 +2299,13 @@ run_simulate(CmcRun *r, CmcResult *res)
 		if ((bad = check_inv(r, s, &why)))
 			goto viol;
 		check_wit(r, s, 1);
-		for (len = 0; len < D - 1; len++)
+		for (len = 0;; len++)
 		{
 			int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
 
 			if (na < 0)
 			{
-				snprintf(why.msg, sizeof(why.msg), "too many enabled actions");
+				snprintf(why.msg, sizeof(why.msg), "%s", enabled_error(na));
 				bad = NULL;
 				goto viol;
 			}
@@ -2237,7 +2326,8 @@ run_simulate(CmcRun *r, CmcResult *res)
 					goto viol;
 				}
 			}
-			if (na == 0)
+			/* the walk ends here only after this state, its last, was checked */
+			if (na == 0 || len == D - 1)
 				break;
 			path[len] = acts[rng_next(rs) % (uint64_t) na];
 			memcpy(t, s, r->ws);
@@ -2447,19 +2537,38 @@ run_replay(CmcRun *r, CmcResult *res)
 		goto out;
 	}
 	check_wit(r, s, 1);
-	for (int i = 0; i < n; i++)
+	for (int i = 0;; i++)
 	{
 		int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS),
-					ok = 0;
+					ok = 0,
+					rc;
 
-		/* a liveness counterexample: the fair suffix follows this state */
-		if (r->nev && check_ev(r, s, &why, &bad) != 0)
+		/* each state, the last included, is checked as BFS checks it */
+		if (na < 0)
+		{
+			set_violation(res, NULL, enabled_error(na));
+			res->trace_len = i + 1;
+			break;
+		}
+		if (r->nqui && is_quiescent(r, s, acts, na) && (bad = check_qui(r, s, &why)))
 		{
 			set_violation(res, bad, why.msg);
+			res->trace_len = i + 1;
+			break;
+		}
+		/* a liveness counterexample: the fair suffix follows this state */
+		if (r->nev && (rc = check_ev(r, s, &why, &bad)) != 0)
+		{
+			set_violation(res, rc < 0 ? NULL : bad, rc < 0 ? r->err : why.msg);
 			res->fair_from = i + 1;
 			res->trace_len = i + 1 + r->nfsuf;
 			path = realloc(path, sizeof(CmcAction) * (size_t) (res->trace_len + 1));
 			memcpy(path + i, r->fsuf, sizeof(CmcAction) * (size_t) r->nfsuf);
+			break;
+		}
+		if (i == n)
+		{
+			res->trace_len = n + 1;
 			break;
 		}
 
@@ -2497,21 +2606,6 @@ run_replay(CmcRun *r, CmcResult *res)
 			break;
 		}
 		check_wit(r, s, i + 2);
-	}
-	if (res->verdict == CMC_PASS)
-	{
-		int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
-
-		/* a quiescence violation shows only at the end of the trace */
-		if (r->nqui && na >= 0 && is_quiescent(r, s, acts, na) &&
-			(bad = check_qui(r, s, &why)))
-			set_violation(res, bad, why.msg);
-		else if (r->nev && check_ev(r, s, &why, &bad) != 0)
-		{
-			set_violation(res, bad, why.msg);
-			res->fair_from = n + 1;
-		}
-		res->trace_len = n + 1;
 	}
 	res->trace = path;
 	path = NULL;

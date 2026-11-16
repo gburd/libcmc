@@ -303,6 +303,8 @@ CRASH(n, j) applies the first j pending records, zeroes the volatile
 bytes, the timers, the wakes and the remaining persists, empties every
 channel to and from n, marks a reset pending at each peer, and delivers
 .Dv CMC_EV_RESTART .
+In bag mode it drops only the messages n sent itself, which never left
+the process, and marks no resets.
 Branching over j covers a write that reached disk before its completion
 was observed.
 .Ss Network

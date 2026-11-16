@@ -1165,6 +1165,308 @@ test_min4_negative_bounds(void)
 	}
 }
 
+/* ---- soundness plan, phase 2 (docs/plans/soundness-remediation.md) ---- */
+
+/* Every client request has a reply: false while one is outstanding. */
+static bool
+replied_all(const CmcWorld *w, CmcWhy *why)
+{
+	if (cmc_nreplies(w) != cmc_requests(w, 0))
+	{
+		cmc_why(why, "%d request(s), %d reply(ies)", cmc_requests(w, 0), cmc_nreplies(w));
+		return false;
+	}
+	return true;
+}
+
+static const CmcProp replied_qui[] = {CMC_QUIESCENT_PROP(Replied, replied_all)};
+static const CmcProp replied_ev[] = {CMC_EVENTUALLY_PROP(EventuallyReplied, replied_all)};
+
+/* 2.1: CLIENT makes the node send the request to itself; RECV replies. */
+static void
+self_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = (uint8_t) node;
+	else if (ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_REPLY)->arg = 1;
+}
+
+static const CmcCore self_core = {
+	.name = "self", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = self_step,
+};
+static const CmcModel self_model = {"self", &self_core, replied_qui, 1, 0};
+
+/* 2.1: what a node sent itself never left the process, so a crash loses
+ * it in either network (the bag keeps only the messages between nodes,
+ * test_b5): the restarted process must not receive it. */
+static void
+test_p21_crash_clears_self_channel(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	uint8_t    *w;
+	CmcAction	a[CMC_MAX_ACTIONS];
+	char		prop[64];
+
+	cmc_options_default(&o);
+	o.crash_budget = 1;
+	for (int net = 0; net < 2; net++)
+	{
+		o.net = net ? CMC_NET_BAG : CMC_NET_FIFO;
+		CHECK(verdict_of(&self_model, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) ==
+			  CMC_VIOLATION);
+		CHECK(strcmp(prop, "Replied") == 0);
+	}
+	o.net = CMC_NET_FIFO;
+	r = mkc(&self_model, CMC_BFS, "", NULL, &o);
+	w = malloc(cmc_world_size(r));
+	cmc_world_init(r, w);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) == 0);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CRASH, 0, 0, 0, 0)) == 0);
+	CHECK(cmc_enabled(r, w, a, CMC_MAX_ACTIONS) == 0);
+	free(w);
+	cmc_run_free(r);
+}
+
+/* 2.2: a core that never answers.  CLIENT leads to a quiescent state with
+ * the request outstanding, the last state of a walk of depth 2. */
+static void
+mute_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	(void) sv;
+	(void) ev;
+	out->n = 0;
+}
+
+static const CmcCore mute_core = {
+	.name = "mute", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = mute_step,
+};
+
+/* 2.2: a walk checks its last state too, for quiescence and eventuality */
+static void
+test_p22_simulate_checks_last_state(void)
+{
+	CmcModel	mq = {"mute", &mute_core, replied_qui, 1, 0},
+				me = {"mute", &mute_core, replied_ev, 1, 0};
+	CmcOptions	o;
+	char		prop[64];
+
+	cmc_options_default(&o);
+	o.search = CMC_SIMULATE;
+	o.walks = 1;
+	o.max_depth = 2;
+	CHECK(verdict_of(&mq, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) == CMC_VIOLATION);
+	CHECK(strcmp(prop, "Replied") == 0);
+	CHECK(verdict_of(&me, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) == CMC_VIOLATION);
+	CHECK(strcmp(prop, "EventuallyReplied") == 0);
+}
+
+/* 2.3: more properties of one kind than the engine holds are refused when
+ * the run is set up, whether listed in the model or named twice.  Run in a
+ * child: on an engine without the check this writes past the arrays. */
+static void
+test_p23_property_cap(void)
+{
+	pid_t		pid;
+	int			st = 0;
+
+	fflush(NULL);
+	pid = fork();
+	if (pid == 0)
+	{
+		CmcProp		ps[65];
+		CmcModel	m = {"many", &mute_core, ps, 64, 0};
+		CmcOptions	o;
+		char		err[256];
+		const char *names[66];
+		CmcRun	   *r;
+		int			ok = 1;
+
+		for (int i = 0; i < 65; i++)
+			ps[i] = (CmcProp) CMC_INVARIANT(True, always_true);
+		cmc_options_default(&o);
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		ok &= r != NULL;
+		cmc_run_free(r);
+		m.nprops = 65;
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		ok &= r == NULL && strstr(err, "properties") != NULL;
+		cmc_run_free(r);
+		m.nprops = 1;
+		for (int i = 0; i < 65; i++)
+			names[i] = "True";
+		names[65] = NULL;
+		r = cmc_run_new(&m, "", names, &o, err, sizeof(err));
+		ok &= r == NULL && strstr(err, "properties") != NULL;
+		cmc_run_free(r);
+		/* a property of no known kind would never be checked */
+		ps[0].kind = (CmcPropKind) 0;
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		ok &= r == NULL && strstr(err, "kind") != NULL;
+		cmc_run_free(r);
+		_exit(ok ? 0 : 1);
+	}
+	CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+}
+
+/* 2.4: a direct core with one action from its initial state, after which
+ * its action list overflows (cmc_enabled() returns -1) */
+static int
+cap_actions(const void *cfg, const void *sv, CmcAction *a, int max)
+{
+	(void) cfg;
+	if (((const uint8_t *) sv)[0] != 0 || max < 1)
+		return -1;
+	a[0] = 1;
+	return 1;
+}
+
+static void
+cap_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	(void) ev;
+	out->n = 0;
+	((uint8_t *) sv)[0] = 1;
+}
+
+static const CmcCore cap_core = {
+	.name = "cap", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = cap_step,
+	.direct_actions = cap_actions,
+};
+static const CmcModel cap_model = {"cap", &cap_core, nd_props, 1, 0};
+
+/* 2.4: the replay of an engine error at the last state gives BFS's verdict */
+static void
+test_p24_replay_enabled_error(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	CmcResult	res;
+	char		path[512],
+				why[sizeof(res.why)];
+	int			len;
+
+	snprintf(path, sizeof(path), "%s/p24.replay",
+			 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
+	cmc_options_default(&o);
+	r = mkc(&cap_model, CMC_BFS, "", NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "cmc:engine"));
+	CHECK(res.trace_len == 2);
+	CHECK(cmc_write_replay(r, path, res.trace, res.trace_len - 1) == 0);
+	snprintf(why, sizeof(why), "%s", res.why);
+	len = res.trace_len;
+	cmc_result_free(&res);
+	cmc_run_free(r);
+	o.replay_in = path;
+	r = mkc(&cap_model, CMC_REPLAY, "", NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "cmc:engine"));
+	CHECK(strcmp(res.why, why) == 0 && res.trace_len == len);
+	cmc_result_free(&res);
+	cmc_run_free(r);
+}
+
+/* 2.5: CLIENT arms timer 0 and starts a message the node sends itself
+ * forever; the timer ends the wait.  The goal holds once it fires. */
+static void
+pingpong_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	uint8_t    *s = sv;
+
+	(void) cfg;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		s[0] = 1;
+		cmc_out_push(out, CMC_OUT_SEND)->dst = (uint8_t) node;
+		cmc_out_push(out, CMC_OUT_SET_TIMER)->arg = 0;
+	}
+	else if (ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = (uint8_t) node;
+	else if (ev->kind == CMC_EV_TIMER)
+		s[0] = 2;
+}
+
+static bool
+not_waiting(const CmcWorld *w, CmcWhy *why)
+{
+	if (((const uint8_t *) cmc_node(w, 0))[0] == 1)
+	{
+		cmc_why(why, "timer 0 never fired");
+		return false;
+	}
+	return true;
+}
+
+static const CmcProp pingpong_props[] = {CMC_EVENTUALLY_PROP(TimerDone, not_waiting)};
+static const CmcCore pingpong_core = {
+	.name = "pingpong", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = pingpong_step,
+};
+static const CmcModel pingpong_model = {"pingpong", &pingpong_core, pingpong_props, 1, 0};
+
+/* 2.5: node 0's CLIENT starts the same endless self-message and sends a
+ * request to node 1, which replies on RECV */
+static void
+relay_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) sv;
+	out->n = 0;
+	if (node == 1 && ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_REPLY)->arg = 1;
+	else if (node == 0 && (ev->kind == CMC_EV_CLIENT || ev->kind == CMC_EV_RECV))
+		cmc_out_push(out, CMC_OUT_SEND)->dst = 0;
+	if (node == 0 && ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = 1;
+}
+
+static int
+first_only(const void *c, int n)
+{
+	(void) c;
+	return n == 0;
+}
+
+static const CmcCore relay_core = {
+	.name = "relay", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = two, .init = zero8, .step = relay_step,
+	.clients = first_only,
+};
+static const CmcModel relay_model = {"relay", &relay_core, replied_ev, 1, 0};
+
+/* 2.5: endless deliveries cannot postpone an armed timer, or a message on
+ * another channel, forever */
+static void
+test_p25_fair_schedule_fires_timers(void)
+{
+	CmcOptions	o;
+	char		why[512];
+
+	cmc_options_default(&o);
+	o.det = true;
+	CHECK(verdict_of(&pingpong_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+	for (int net = 0; net < 2; net++)
+	{
+		cmc_options_default(&o);
+		o.net = net ? CMC_NET_BAG : CMC_NET_FIFO;
+		CHECK(verdict_of(&relay_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+	}
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1198,6 +1500,11 @@ main(void)
 	test_min1_dfs_witness();
 	test_min3_quiescent_depth();
 	test_min4_negative_bounds();
+	test_p21_crash_clears_self_channel();
+	test_p22_simulate_checks_last_state();
+	test_p23_property_cap();
+	test_p24_replay_enabled_error();
+	test_p25_fair_schedule_fires_timers();
 	test_version();
 	if (failures)
 	{
