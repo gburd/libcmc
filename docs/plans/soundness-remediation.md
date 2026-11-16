@@ -414,8 +414,11 @@ is the emit gate, which now covers every `.cml` model and the five
 liveness probes, and runs in CI before a tag.  The process engine's
 differential test against Linux covers close and reset
 (`test/proc/tcpsem.c`, run natively and under cmc by proc_gate).
-`test/proc/fingerprint.c` checks named pairs of worlds, not random
-ones; randomised fingerprint tests are still open.  An independent
+`test/proc/fingerprint.c` checks named pairs of worlds, and
+`test/proc/fpfuzz.c` random ones: 3,000 seeded worlds, each with 22
+kinds of mutation that must change the encoding and three changes
+(thread order and tids, bag slots, connection slots) that must not.
+Dropping any of three encoded fields, or leaking a tid, fails it.  An independent
 review of the engine changes at `21fd57d` found six process-engine
 false passes and a hash-only seen set in the abstract checker; each has
 a fix and a red test (`f9e5370`, `eebaaa9`, `ce59d01`, `1c3ae30`).  The
