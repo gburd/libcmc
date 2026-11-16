@@ -136,10 +136,12 @@ spec exists.
   Complex" (CSUR 2015).  Invariant: State-Machine Safety.  Knob: the
   leader's recovery of already-chosen slots in Phase 1.  TLA+: yes.
 - **Fast Paxos.**  Lamport (Distributed Computing 2006).  Invariant:
-  Agreement under fast rounds.  Knob: the fast-quorum size (fast rounds
-  need |Qfast| > 3N/4); a plain majority for a fast round lets a collided
-  round choose two values.  TLA+: yes.  Needs N >= 5 for the bug to be
-  reachable.
+  Agreement under fast rounds.  Knob: the quorum sizes.  The Quorum
+  Requirement asks that any two quorums intersect and that any classic
+  quorum and any two fast quorums intersect, which for sizes is
+  `Qc + 2*Qf > 2*N` (with a classic majority, `|Qfast| > 3N/4`); a fast
+  quorum that is too small lets recovery override a fast-chosen value.
+  TLA+: yes, in the paper's appendix.
 - **Cheap Paxos.**  Lamport, Massa (DSN 2004).  Invariant: Agreement with
   auxiliary acceptors used only on reconfiguration.  Knob: counting an
   auxiliary in a steady-state quorum.  TLA+: no well-known standalone.
@@ -202,21 +204,24 @@ or N=5 for the quorum-split variants.
 
 | Variant | Minimal instance | Planted-bug knob |
 |---|---|---|
-| Single-decree Paxos (done) | 3 acceptors, 2 ballots, 2 values | double vote without the safety guard |
-| Flexible Paxos | 5 acceptors, 2 values | set `Q1 + Q2 <= A` |
+| Single-decree Paxos (done) | 3 acceptors, 2 ballots, 2 values | a 2a that ignores the votes its promises report |
+| Flexible Paxos (done) | 4 acceptors, 2 ballots, 2 values | phase 1 on `Q1` promises with `Q1 + Q2 <= A` |
 | Raft election (done) | 3 servers, one term | grant without spending the one vote |
-| ZAB commit-durability (done) | 3 participants | commit without a quorum (early ack) |
+| ZAB epochs and committed prefix (done) | 3 servers, 2 epochs, 2 transactions | discovery takes a stale history |
 | Humming Consensus (done) | 3 participants, 2 values | overwrite a write-once register |
-| CASPaxos | 3 acceptors, 1-2 CAS steps | apply on a non-quorum read |
+| CASPaxos (done) | 3 acceptors, 2 rounds | accept below a promise |
 | Vertical Paxos (two configs) | old + new, 3+3 overlap | activate new config before old read quorum |
 | Matchmaker Paxos (two configs) | 2 configs, 3 matchmakers | drop a prior config |
 | WPaxos (one steal) | 5 nodes, 1 object, 1 steal | disjoint phase quorums, or a steal that drops the value |
 | Mencius (two slots) | 3 servers, 2 slots | skip a slot without the quorum |
-| Fast Paxos (collision) | 5 acceptors, 2 values, 1 fast round | plain majority for the fast round |
+| Fast Paxos (collision, done) | 3 acceptors, 2 values, a fast and a classic round | `Qf = 2` with `Qc = 2`, so `Qc + 2*Qf = 2*N` |
 
-Fast Paxos and FPaxos both need N >= 5 for the bug to be reachable (a
-majority must be strictly smaller than the quorum the protocol actually
-requires); at N=3 the bug cannot appear.
+Neither needs N >= 5 once the quorum sizes are parameters rather than
+"a majority".  At N=3, Fast Paxos with `Qc = 2` and `Qf = 3` meets the
+Quorum Requirement and `Qf = 2` does not, and `fastpaxos.cml` uses that
+instance.  FPaxos quorums need not be majorities either, and
+`fpaxos.cml` uses N=4 so that two phase 2 quorums of 2 can be
+disjoint.
 
 ### Partial fit (a reduction that loses something)
 
@@ -224,12 +229,15 @@ Multi-Paxos / Raft-log / Generalized-Paxos as multi-slot logs: the
 distinctive safety (a committed prefix survives arbitrary leader changes
 across many slots) is not directly expressible in the bounded DSL.  The
 proven reduction is the single-contested-slot / single-transaction
-collapse (the `raftlog.c` and `zab.cml` approach): model one slot and its
+collapse (the `raftlog.c` approach): model one slot and its
 quorum-intersection guarantee, which is genuinely distinct from plain
 Agreement (it is durability: committed implies quorum-backed).  This
 catches "stale leader overwrites a committed entry" at the one slot but
 does not check log matching across slots, contiguity, or commit-index
-monotonicity.  State that limit.
+monotonicity.  State that limit.  `zab.cml` goes one step further: a
+history of at most two transactions, encoded as one integer, so the
+committed prefix and its order across two epochs are checked, though
+not at the lengths a real log reaches.
 
 ### Poor fit (wrong tool)
 

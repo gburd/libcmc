@@ -267,16 +267,80 @@ demonstration it is.
   choose a fresh value.  The experiment varies the quorum inequality
   that the paper states (`Qc + 2Qf > 2N` with pairwise intersection),
   not a recovery threshold.
+  Status: done.  `fastpaxos.cml` has a fast round 1 and a classic
+  round 2.  A round 2 promise closes round 1 for its acceptor and
+  reports its vote; the coordinator picks a value by Figure 2's rule
+  over a classic quorum of promises, including O4 for a collision and a
+  fresh value when the quorum reports no vote.  Quorums are sizes QC and
+  QF.  With N = 3, QC = 2 and QF = 3 (2 + 6 > 6) it has 1,976 distinct
+  states and depth 12 in cmc and in TLC; Apalache reports no error up to
+  length 10.  The `BUG` sets the fast quorum to 2 before any acceptor
+  acts, so 2 + 4 = 2N; all three engines find a fast-chosen value
+  overridden, cmc and TLC in 11 steps.  Still abstracted: two rounds,
+  one coordinator, no 1a messages, no recovery from 2b messages, no
+  loss, and both values always proposed.  At N = 5 the same model has
+  222,460 states, too many for the per-push gate.
 - **4.3 Flexible Paxos.**  Ballots, phase 1 promises and
   highest-ballot value selection, with Q1 and Q2 as parameters.
+  Status: done.  `fpaxos.cml` is the Paxos of 4.6 with the quorum split:
+  Phase2a needs Q1 promises, a value is chosen by Q2 votes at one
+  ballot.  With 4 acceptors, Q1 = 3 and Q2 = 2 (two phase 2 quorums can
+  be disjoint) it has 36,756 distinct states and depth 20 in cmc and in
+  TLC; Apalache reports no error up to length 10.  The `BUG` Phase2a
+  runs on 2 promises, so Q1 + Q2 = A; all three engines find the
+  violation, cmc and TLC in 12 steps.  The abstractions are those of
+  4.6.  There is no hand-written TLA+ twin; TLC checks the emitted
+  module.
 - **4.4 CASPaxos.**  A mutable register with a change function and
   versions; the safety property is that confirmed states descend from
   earlier confirmed states.
+  Status: done.  `caspaxos.cml` runs prepare, propose (increment the
+  highest-ballot state a quorum of promises reports), accept and
+  confirm per ballot, with a ghost parent per round; the invariant is
+  that of two confirmed rounds the earlier is the later's parent.  It
+  no longer extends `consensus`, since a register takes many values.
+  With 3 acceptors and 2 rounds it has 3,280 distinct states and depth
+  17 in cmc and in TLC; Apalache reports no error up to length 10.  The
+  `BUG` accept ignores the acceptor's promise; all three engines find
+  the fork, cmc and TLC in 12 steps.  Still abstracted: two rounds (so
+  the ancestor check is one step), one change function, no 1a messages,
+  no conflict replies, and no membership change or deletion.
 - **4.5 ZAB.**  Epochs, leader election, synchronisation from a quorum
   and a committed prefix, or the model and its docs are narrowed to the
   guarded counter it is.
+  Status: done, as a model of the protocol.  `zab.cml` has accepted and
+  current epochs and a history per server, discovery (ACKEPOCH from a
+  quorum, the leader taking the most up-to-date member's history),
+  synchronisation (NEWLEADER, ACK-LD, a quorum establishes the epoch),
+  broadcast and commit of a quorum-acknowledged prefix.  A history of
+  at most two transactions is one integer.  The invariants are
+  committed_prefix (of two epochs' committed prefixes one extends the
+  other) and initial_history (a new leader's initial history extends
+  every earlier committed prefix).  With 3 servers and 2 epochs it has
+  27,913 distinct states and depth 26 in cmc and in TLC; Apalache
+  reports no error for either invariant up to length 10.  The `BUG`
+  discovery takes any quorum member's history; cmc and TLC find
+  initial_history violated in 13 steps (committed_prefix in 20), and
+  Apalache finds it at length 13 in about 17 minutes, the slowest row
+  in the gate.  Still abstracted: no leader election messages (at most
+  one leader per epoch, by construction), no crashes or restarts, no
+  loss, synchronisation as one step, and no delivery to the
+  application.
 - **4.6 Single-decree Paxos.**  Acceptors vote in more than one ballot,
   and safety rests on phase 1 value selection, not on write-once votes.
+  Status: done.  `paxos.cml` has Paxos.tla's maxBal, maxVBal and maxVal
+  per acceptor, the 1b, 2a and 2b messages as function variables, and
+  Phase1b, Phase2a (the highest-ballot vote among a quorum's promises,
+  or any value if none) and Phase2b.  With 3 acceptors, 2 ballots and 2
+  values it has 6,144 distinct states and depth 16 in cmc and in TLC,
+  both on the emitted module and on a hand-written twin (`paxos.tla`)
+  that quantifies over quorums and keeps a message set as Paxos.tla
+  does.  Apalache reports no error up to length 10.  The `BUG` 2a
+  ignores the votes the promises report; all three engines find the
+  violation, cmc and TLC in 12 steps.  Still abstracted: no 1a messages
+  (a promise may name any higher ballot), no loss or duplication, two
+  ballots, and an explicit learn action.  The process engine's refine
+  rows for paxos.c and paxos2.c still bind only `chosen`, and pass.
 - **4.7 Raft election.**  raft.c campaigns by blocking on each peer's
   reply while it is outside `accept()`, so two concurrent candidates
   deadlock.  Up to 1.3.0 the double-vote bug was reported only because

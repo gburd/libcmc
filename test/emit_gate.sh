@@ -20,16 +20,16 @@ examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|PASS|
 examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|VIOLATION|--define BUG
 examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|PASS|
 examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|VIOLATION|--define BUG
-examples/spec|zab|zab|CONSTANTS P = 3  Q = 2|durable|PASS|
-examples/spec|zab|zab|CONSTANTS P = 3  Q = 2|durable|VIOLATION|--define BUG
-examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 5  Q1 = 4  Q2 = 2|agreement|PASS|
-examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 5  Q1 = 4  Q2 = 2|agreement|VIOLATION|--define BUG
-examples/spec|caspaxos|caspaxos|CONSTANTS V = 2  A = 3  Q = 2|agreement|PASS|
-examples/spec|caspaxos|caspaxos|CONSTANTS V = 2  A = 3  Q = 2|agreement|VIOLATION|--define BUG
+examples/spec|zab|zab|CONSTANTS S = 3  E = 2  Q = 2  K = 3|committed_prefix initial_history|PASS|
+examples/spec|zab|zab|CONSTANTS S = 3  E = 2  Q = 2  K = 3|committed_prefix initial_history|VIOLATION|--define BUG
+examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 4  B = 2  Q1 = 3  Q2 = 2  Q1BUG = 2|agreement|PASS|
+examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 4  B = 2  Q1 = 3  Q2 = 2  Q1BUG = 2|agreement|VIOLATION|--define BUG
+examples/spec|caspaxos|caspaxos|CONSTANTS A = 3  B = 2  Q = 2|descends|PASS|
+examples/spec|caspaxos|caspaxos|CONSTANTS A = 3  B = 2  Q = 2|descends|VIOLATION|--define BUG
 examples/spec|twophase|twophase|CONSTANT N = 3|consistency|PASS|
 examples/spec|twophase|twophase|CONSTANT N = 3|consistency|VIOLATION|--define BUG
-examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  A = 5  QC = 3  F = 4|agreement|PASS|
-examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  A = 5  QC = 3  F = 4|agreement|VIOLATION|--define BUG
+examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|PASS|
+examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7

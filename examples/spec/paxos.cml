@@ -1,45 +1,110 @@
 # examples/spec/paxos.cml: single-decree Paxos as an abstract model,
 # extending the shared consensus base.  It inherits Agreement (at most
-# one value chosen) unchanged; its own actions drive `chosen` the Paxos
-# way -- a value is chosen once a QUORUM of acceptors has voted for it at
-# one ballot.
+# one value chosen) unchanged; its own actions drive `chosen`.
 #
-# Voting style (Lamport, Paxos.tla / the Voting refinement): each
-# acceptor, at each ballot, may vote for one value, and only for a value
-# that is "safe" at that ballot.  Here, kept small (3 acceptors, 2
-# ballots, 2 values), the safety is enforced by the guard on `vote`.
+# Reference: Leslie Lamport, Paxos.tla and Voting.tla in the TLA+
+#   examples repository (github.com/tlaplus/Examples,
+#   specifications/Paxos).  The variables and actions follow Paxos.tla:
+#   each acceptor keeps maxBal (the highest ballot it has promised or
+#   voted in) and maxVBal and maxVal (its last vote), and the actions are
+#   Phase1b (promise), Phase2a (the ballot's leader picks a value) and
+#   Phase2b (vote).  An acceptor may vote in several ballots, so safety
+#   does not come from write-once votes.  It comes from the Phase2a rule:
+#   a leader at ballot b that has the ballot b promises of a quorum must
+#   propose the value of the highest-ballot vote those promises report,
+#   or any value if they report none.
+#
+# Messages.  Paxos.tla keeps the set of every message sent.  Here each
+# kind of message is a function variable keyed by what identifies it:
+#   - a 1b message from acceptor a for ballot b, at key (b-1)*A + a, is
+#     sent1b (1 once sent) with the fields bal1b and val1b (the
+#     acceptor's maxVBal and maxVal when it promised);
+#   - the 2a message of ballot b is val2a[b] (0 until the leader sends
+#     it; Paxos.tla also allows one 2a per ballot);
+#   - a 2b message is sent2b at the same key as the 1b; its value is
+#     val2a[b], since an acceptor votes only for its ballot's 2a value.
+# Ballots are 1 .. B and 0 stands for Paxos.tla's -1 (none), so values
+# stay non-negative.
+#
+# What is abstracted away.  There are no 1a messages: a 1a can be sent
+# for any ballot at any time and only enables Phase1b, so phase1b(a, b)
+# takes b > maxBal[a] directly.  There is no message loss or duplication;
+# as in Paxos.tla, safety only says what may be received.  Learning is an
+# explicit action (learn) that sets chosen[v] once a quorum has sent 2b
+# messages for v at one ballot; Paxos.tla defines chosen as a state
+# function of the votes instead.  The instance is 3 acceptors, 2 ballots
+# and 2 values.
+#
+# -DBUG: phase2a_bug lets a leader send a 2a for any value once a quorum
+# has promised, ignoring the votes the promises report.  A value chosen
+# at ballot 1 can then be overridden at ballot 2.
 #
 #   cmc --spec examples/spec/paxos.cml
-#   cmc --spec examples/spec/paxos.cml --define BUG     (unsafe: double vote)
+#   cmc --spec examples/spec/paxos.cml --define BUG   (2a ignores promises)
 
 module paxos
 extends consensus
 
 const A = 3                     # acceptors 0 .. A-1
-const B = 2                     # ballots 1 .. B
-const Q = 2                     # a quorum majority of A
+const B = 2                     # ballots 1 .. B (0 = none)
+const Q = 2                     # quorum size, a majority of A
 
-# voted[a] encodes acceptor a's vote: 0 = none, else value*10 + ballot
-# (so value v at ballot b is v*10 + b; decoded by / 10 and mod 10)
-var voted : [0 .. A-1 -> 0 .. 99]
+# acceptor state, as in Paxos.tla
+var maxBal : [0 .. A-1 -> 0 .. B]
+var maxVBal : [0 .. A-1 -> 0 .. B]
+var maxVal : [0 .. A-1 -> 0 .. V]
 
-init voted == [a in 0 .. A-1 -> 0]
+# messages sent, keyed (b-1)*A + a for acceptor a and ballot b
+var sent1b : [0 .. A*B-1 -> 0 .. 1]
+var bal1b : [0 .. A*B-1 -> 0 .. B]
+var val1b : [0 .. A*B-1 -> 0 .. V]
+var val2a : [1 .. B -> 0 .. V]
+var sent2b : [0 .. A*B-1 -> 0 .. 1]
 
-# an acceptor with no vote casts one for value v at ballot b, but only if
-# v is safe: no acceptor has already voted for a DIFFERENT value at a
-# ballot >= b (the Paxos safety condition, simplified to this bound)
-action vote(a in 0 .. A-1, v in 1 .. V, b in 1 .. B):
-  when voted[a] == 0 and (count c in 0 .. A-1 : voted[c] != 0 and (voted[c] mod 10) >= b and ((voted[c] - (voted[c] mod 10)) / 10) != v) == 0
-  voted' = [voted except [a] = v * 10 + b]
+init maxBal == [a in 0 .. A-1 -> 0]
+init maxVBal == [a in 0 .. A-1 -> 0]
+init maxVal == [a in 0 .. A-1 -> 0]
+init sent1b == [k in 0 .. A*B-1 -> 0]
+init bal1b == [k in 0 .. A*B-1 -> 0]
+init val1b == [k in 0 .. A*B-1 -> 0]
+init val2a == [b in 1 .. B -> 0]
+init sent2b == [k in 0 .. A*B-1 -> 0]
 
-# the planted bug: an acceptor votes again, for a different value, with
-# no safety check -- two values can then each reach a quorum
-action vote_bug(a in 0 .. A-1, v in 1 .. V, b in 1 .. B) [BUG]:
-  when (voted[a] mod 10) != b
-  voted' = [voted except [a] = v * 10 + b]
+# Phase1b: acceptor a promises ballot b, which must exceed every ballot
+# it has promised or voted in, and reports its last vote.
+action phase1b(a in 0 .. A-1, b in 1 .. B):
+  when b > maxBal[a]
+  maxBal' = [maxBal except [a] = b]
+  sent1b' = [sent1b except [(b-1)*A + a] = 1]
+  bal1b' = [bal1b except [(b-1)*A + a] = maxVBal[a]]
+  val1b' = [val1b except [(b-1)*A + a] = maxVal[a]]
 
-# a value v is chosen once a quorum of acceptors voted for it at some
-# common ballot b
-action choose(v in 1 .. V, b in 1 .. B):
-  when (count a in 0 .. A-1 : voted[a] == v * 10 + b) >= Q
+# Phase2a: the leader of ballot b, which has sent no 2a yet, proposes v.
+# It needs the ballot b promises of a quorum such that either no member
+# reported a vote, or the highest-ballot vote reported (at ballot c) was
+# for v.  "Some quorum of promisers whose highest reported vote is at
+# most c" is the set of promisers with bal1b <= c, so the existential
+# over quorums in Paxos.tla becomes a count over that set.
+action phase2a(b in 1 .. B, v in 1 .. V):
+  when val2a[b] == 0 and (some c in 0 .. B-1 : c < b and (count a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] <= c) >= Q and (c == 0 or (some a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] == c and val1b[(b-1)*A + a] == v)))
+  val2a' = [val2a except [b] = v]
+
+# Phase2b: acceptor a votes for ballot b's value, unless it has promised
+# a higher ballot.
+action phase2b(a in 0 .. A-1, b in 1 .. B):
+  when val2a[b] != 0 and b >= maxBal[a]
+  maxBal' = [maxBal except [a] = b]
+  maxVBal' = [maxVBal except [a] = b]
+  maxVal' = [maxVal except [a] = val2a[b]]
+  sent2b' = [sent2b except [(b-1)*A + a] = 1]
+
+# learn: v is chosen once a quorum has voted for it at one ballot.
+action learn(v in 1 .. V, b in 1 .. B):
+  when val2a[b] == v and (count a in 0 .. A-1 : sent2b[(b-1)*A + a] == 1) >= Q
   chosen' = [chosen except [v] = 1]
+
+# the planted bug: the leader waits for a quorum of promises but then
+# proposes any value, ignoring the votes they report.
+action phase2a_bug(b in 1 .. B, v in 1 .. V) [BUG]:
+  when val2a[b] == 0 and (count a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1) >= Q
+  val2a' = [val2a except [b] = v]

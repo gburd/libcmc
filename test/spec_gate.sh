@@ -41,9 +41,15 @@ expect "mutex: the bug is caught"            1 "mutual_exclusion is violated" --
 expect "mutex: shortest trace is 4 actions"  1 "is (4 actions)" --spec "$HERE/test/spec/mutex.cml" --define BUG
 
 echo "-- modules: a protocol spec extends a shared base"
-expect "paxos: extends consensus, agreement holds" 0 "117 distinct states found" --spec "$HERE/examples/spec/paxos.cml"
-expect "paxos: depth matches TLC (5)"         0 "complete state graph search is 5" --spec "$HERE/examples/spec/paxos.cml"
-expect "paxos: the double-vote bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
+# Single-decree Paxos (Lamport's Paxos.tla): promises, highest-ballot
+# value selection in phase 2a, votes in more than one ballot.  Counts,
+# depth and the 12-action trace match single-worker TLC on the emitted
+# module and on the hand-written paxos.tla; the bug's 2a ignores the
+# votes the promises report.
+expect "paxos: extends consensus, agreement holds" 0 "6144 distinct states found" --spec "$HERE/examples/spec/paxos.cml"
+expect "paxos: depth matches TLC (16)"        0 "complete state graph search is 16" --spec "$HERE/examples/spec/paxos.cml"
+expect "paxos: a 2a that ignores the promises breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/paxos.cml" --define BUG
+expect "paxos: shortest trace is 12 actions"  1 "is (12 actions)" --spec "$HERE/examples/spec/paxos.cml" --define BUG
 
 # Raft leader election (Ongaro's raft.tla): Election Safety, at most one
 # leader per term.  Counts and depth match single-worker TLC (checked by
@@ -60,36 +66,47 @@ expect "hc: agreement holds under write-once" 0 "41 distinct states found" --spe
 expect "hc: depth matches TLC (5)"            0 "complete state graph search is 5" --spec "$HERE/examples/spec/hc.cml"
 expect "hc: the overwrite bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/hc.cml" --define BUG
 
-# ZAB (Apache ZooKeeper's Zab.tla): commit-durability, a committed
-# transaction is held by a quorum so it survives a leader change.
-# Counts and depth match single-worker TLC; the early-ack bug commits
-# before a quorum stored, so a committed transaction can be lost.
-expect "zab: commit-durability holds"         0 "20 distinct states found" --spec "$HERE/examples/spec/zab.cml"
-expect "zab: depth matches TLC (6)"           0 "complete state graph search is 6" --spec "$HERE/examples/spec/zab.cml"
-expect "zab: the early-ack bug loses a commit" 1 "durable is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
+# Zab (Junqueira, Reed, Serafini 2011; ZooKeeper's Zab.tla): epochs,
+# discovery from a quorum, synchronisation, broadcast and a committed
+# prefix per epoch.  Of two epochs' committed prefixes one extends the
+# other; counts and depth match single-worker TLC on the emitted module.
+# The --define BUG starts an epoch from a stale history: initial_history
+# fails first, in 13 steps (TLC finds committed_prefix fail in 20).
+expect "zab: committed prefixes agree"        0 "27913 distinct states found" --spec "$HERE/examples/spec/zab.cml"
+expect "zab: depth matches TLC (26)"          0 "complete state graph search is 26" --spec "$HERE/examples/spec/zab.cml"
+expect "zab: a stale initial history misses a commit" 1 "initial_history is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
+expect "zab: shortest trace is 13 actions"    1 "is (13 actions)" --spec "$HERE/examples/spec/zab.cml" --define BUG
 
-# Flexible Paxos (Howard, Malkhi, Spiegelman 2016): Agreement holds iff
-# every Phase 1 quorum intersects every Phase 2 quorum, for which
-# Q1 + Q2 > A suffices.  With Q1=4, Q2=2, A=5 (sum 6 > 5) it holds; the
-# --define BUG uses the Phase 2 size for the Phase 1 guard, breaking the
-# cross-phase intersection so two values are chosen.
-expect "fpaxos: safe when Q1+Q2>A"           0 "No error has been found" --spec "$HERE/examples/spec/fpaxos.cml"
-expect "fpaxos: the shrunk-Q1 bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
+# Flexible Paxos (Howard, Malkhi, Spiegelman 2016): the Paxos ballots of
+# paxos.cml with a phase 1 quorum Q1 and a phase 2 quorum Q2.  With A=4,
+# Q1=3, Q2=2 (sum 5 > 4) agreement holds; counts and depth match
+# single-worker TLC on the emitted module.  The --define BUG runs phase 2a
+# on 2 promises (2 + 2 = A), so a leader can miss a chosen value.
+expect "fpaxos: safe when Q1+Q2>A"           0 "36756 distinct states found" --spec "$HERE/examples/spec/fpaxos.cml"
+expect "fpaxos: depth matches TLC (20)"      0 "complete state graph search is 20" --spec "$HERE/examples/spec/fpaxos.cml"
+expect "fpaxos: Q1+Q2<=A breaks agreement"   1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
+expect "fpaxos: shortest trace is 12 actions" 1 "is (12 actions)" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
 
-# CASPaxos (Rystsov 2018): single-decree Paxos on a register via a
-# client change function; Agreement (one value per register version)
-# holds because a client reads from a quorum before committing.  The
-# --define BUG stale read overwrites an acceptor, so two values commit.
-expect "caspaxos: register agreement holds"   0 "No error has been found" --spec "$HERE/examples/spec/caspaxos.cml"
-expect "caspaxos: the stale-read bug loses an update" 1 "agreement is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
+# CASPaxos (Rystsov 2018): Paxos rounds on a rewritable register, each
+# applying a change function to the highest-ballot state a quorum
+# reports.  Confirmed states descend from earlier confirmed states;
+# counts and depth match single-worker TLC on the emitted module.  The
+# --define BUG accepts below a promise, so two confirmed states fork.
+expect "caspaxos: confirmed states descend"   0 "3280 distinct states found" --spec "$HERE/examples/spec/caspaxos.cml"
+expect "caspaxos: depth matches TLC (17)"     0 "complete state graph search is 17" --spec "$HERE/examples/spec/caspaxos.cml"
+expect "caspaxos: accepting below a promise forks" 1 "descends is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
+expect "caspaxos: shortest trace is 12 actions" 1 "is (12 actions)" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
 
-# Fast Paxos (Lamport 2006): a fast round may collide, so its quorum F
-# must exceed 3A/4 for a classic recovery round to resolve the collision
-# unambiguously.  With A=5, F=4 (> 3.75) it holds; the --define BUG lets
-# recovery use a classic majority threshold where a fast quorum is
-# needed, so a collided round chooses two values.
-expect "fastpaxos: safe when F>3A/4"         0 "No error has been found" --spec "$HERE/examples/spec/fastpaxos.cml"
-expect "fastpaxos: the small-fast-quorum bug collides" 1 "agreement is violated" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
+# Fast Paxos (Lamport 2006): a fast round, then a classic round whose
+# coordinator applies Figure 2's rule to a classic quorum of promises.
+# With N=3, Qc=2, Qf=3 the Quorum Requirement Qc + 2*Qf > 2*N holds and
+# so does agreement; counts and depth match single-worker TLC on the
+# emitted module.  The --define BUG runs with Qf=2 (2 + 4 = 2*N), so a
+# fast-chosen value is overridden.
+expect "fastpaxos: safe when Qc+2Qf>2N"      0 "1976 distinct states found" --spec "$HERE/examples/spec/fastpaxos.cml"
+expect "fastpaxos: depth matches TLC (12)"   0 "complete state graph search is 12" --spec "$HERE/examples/spec/fastpaxos.cml"
+expect "fastpaxos: Qc+2Qf<=2N breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
+expect "fastpaxos: shortest trace is 11 actions" 1 "is (11 actions)" --spec "$HERE/examples/spec/fastpaxos.cml" --define BUG
 
 # Two-phase commit (Lamport's TwoPhase.tla): the canonical non-consensus
 # example.  Consistency (atomicity) -- a committed and an aborted

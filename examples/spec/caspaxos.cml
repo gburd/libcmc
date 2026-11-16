@@ -1,62 +1,124 @@
-# examples/spec/caspaxos.cml: CASPaxos as an abstract model, extending
-# the shared consensus base.  CASPaxos is single-decree Paxos applied to
-# a register: a client reads the register from a quorum, applies a
-# change function, and writes the new value to a quorum.  Repeated, it is
-# a replicated state machine with no log.  It inherits Agreement: the
-# register's value at any version is unique (no two clients commit
-# different values for the same version).
+# examples/spec/caspaxos.cml: CASPaxos as an abstract model.  CASPaxos
+# runs single-decree Paxos rounds on a rewritable register: each round
+# reads the register's state from a quorum, applies the client's change
+# function f to it, and writes the new state to a quorum.
 #
 # Reference: Denis Rystsov, "CASPaxos: Replicated State Machines without
-#   logs", 2018, arXiv:1802.07000.
+#   logs", 2018, arXiv:1802.07000, section 2.2 and the proof in its
+#   appendix.
 #
-# The safety hinges on the SAME quorum intersection as Paxos, but framed
-# as a register compare-and-swap: a client may commit a new register
-# value only after reading the current value from a QUORUM, so its read
-# intersects the quorum of any prior commit and it sees the latest
-# value.  Because two quorums of A acceptors overlap, a client cannot
-# miss a committed value and overwrite it with a stale-based update.
+# The protocol, per round with ballot b:
+#   - prepare: an acceptor that has seen no greater ballot promises b and
+#     returns its accepted (ballot, state), or nothing if it has none;
+#   - the proposer, with promises from a quorum, takes the state of the
+#     highest-ballot reply (the empty state 0 if none), applies f, and
+#     sends accept(b, f(state));
+#   - accept: an acceptor that has seen no greater ballot stores
+#     (b, f(state)) as its accepted value;
+#   - confirm: once a quorum accepted, the proposer returns the new state
+#     to the client.
+# Here f is increment, so a state counts the changes behind it.
 #
-# Kept small: 3 acceptors (0 .. A-1), a quorum of 2, values 1 .. V.  The
-# single contested register version is modelled: each acceptor stores at
-# most one committed value for it.
+# The safety property, from the paper: once a client gets a confirmation
+# of a change, all future confirmed states are its descendants.  The
+# ghost parent[b] records the ballot whose state round b read (0: the
+# empty initial state), and `descends` requires that of two confirmed
+# rounds the earlier one is an ancestor of the later.  With B = 2 the
+# only chain is one step, parent[2] == 1; a larger B needs the
+# invariant to follow parent[] further.
 #
-# -DBUG: a client commits a value after reading from fewer than a quorum
-# (a stale read), so it can miss a prior commit and two different values
-# are committed for the same version -- a lost update.
+# Messages are function variables keyed by acceptor and ballot, as in
+# paxos.cml: sent1b, bal1b and val1b are a promise and the accepted
+# value it reports, new2a[b] is the state round b proposes, sent2b an
+# accept.  What is abstracted away: one register, 3 acceptors, 2 ballots
+# (so 2 rounds), one change function, no 1a messages (a prepare may name
+# any higher ballot), no loss, and no conflict replies (a proposer that
+# cannot get a quorum just never proceeds).  Rystsov's one-round-trip
+# optimisation, membership change and deletion are not modelled.
+#
+# -DBUG: accept_bug lets an acceptor accept a ballot lower than one it
+# has promised.  Round 1 can then be confirmed by a quorum that round 2
+# also read, before round 1's accept arrived, so round 2 is built on the
+# empty state and the two confirmed states fork.
 #
 #   cmc --spec examples/spec/caspaxos.cml
-#   cmc --spec examples/spec/caspaxos.cml --define BUG   (stale read)
+#   cmc --spec examples/spec/caspaxos.cml --define BUG   (accept below a promise)
 
 module caspaxos
-extends consensus
 
 const A = 3                     # acceptors 0 .. A-1
-const Q = 2                     # a quorum majority of A
+const B = 2                     # ballots 1 .. B (0 = none)
+const Q = 2                     # quorum size, a majority of A
 
-# store[a] = the value acceptor a holds for the contested register
-# version (0 = none yet).
-var store : [0 .. A-1 -> 0 .. V]
+# acceptor state: the highest ballot promised, and the accepted
+# (ballot, state) (0, 0 = none)
+var promised : [0 .. A-1 -> 0 .. B]
+var accBal : [0 .. A-1 -> 0 .. B]
+var accVal : [0 .. A-1 -> 0 .. B]
 
-init store == [a in 0 .. A-1 -> 0]
+# messages sent, keyed (b-1)*A + a for acceptor a and ballot b
+var sent1b : [0 .. A*B-1 -> 0 .. 1]
+var bal1b : [0 .. A*B-1 -> 0 .. B]
+var val1b : [0 .. A*B-1 -> 0 .. B]
+var new2a : [1 .. B -> 0 .. B]
+var sent2b : [0 .. A*B-1 -> 0 .. 1]
 
-# a client commits value v at an acceptor a, but only if v is safe: no
-# DIFFERENT value w is already present at a quorum of acceptors (which a
-# quorum read would have seen).  Because the client's read quorum
-# intersects any prior commit's write quorum, a committed value is
-# always observed, so only one value is ever committed.
-action commit(a in 0 .. A-1, v in 1 .. V):
-  when store[a] == 0 and (all w in 1 .. V : w == v or (count c in 0 .. A-1 : store[c] == w) < Q)
-  store' = [store except [a] = v]
+# proposed[b] = 1 once round b sent its accept; confirmed[b] = 1 once a
+# quorum accepted it
+var proposed : [1 .. B -> 0 .. 1]
+var confirmed : [1 .. B -> 0 .. 1]
+# ghost: the ballot whose state round b read (0 = the empty state)
+var parent : [0 .. B -> 0 .. B]
 
-# the planted bug: the client reads from fewer than a quorum, so a
-# committed value can be missed AND an acceptor's value overwritten on
-# the stale basis.  Dropping both guards lets two different values each
-# reach a quorum -- a lost update.
-action commit_bug(a in 0 .. A-1, v in 1 .. V) [BUG]:
-  when store[a] != v
-  store' = [store except [a] = v]
+init promised == [a in 0 .. A-1 -> 0]
+init accBal == [a in 0 .. A-1 -> 0]
+init accVal == [a in 0 .. A-1 -> 0]
+init sent1b == [k in 0 .. A*B-1 -> 0]
+init bal1b == [k in 0 .. A*B-1 -> 0]
+init val1b == [k in 0 .. A*B-1 -> 0]
+init new2a == [b in 1 .. B -> 0]
+init sent2b == [k in 0 .. A*B-1 -> 0]
+init proposed == [b in 1 .. B -> 0]
+init confirmed == [b in 1 .. B -> 0]
+init parent == [b in 0 .. B -> 0]
 
-# a value v is chosen (committed for this version) once a quorum holds it.
-action choose(v in 1 .. V):
-  when (count a in 0 .. A-1 : store[a] == v) >= Q
-  chosen' = [chosen except [v] = 1]
+# prepare: acceptor a promises ballot b and reports its accepted value.
+action prepare(a in 0 .. A-1, b in 1 .. B):
+  when b > promised[a]
+  promised' = [promised except [a] = b]
+  sent1b' = [sent1b except [(b-1)*A + a] = 1]
+  bal1b' = [bal1b except [(b-1)*A + a] = accBal[a]]
+  val1b' = [val1b except [(b-1)*A + a] = accVal[a]]
+
+# propose: round b has promises from a quorum whose highest reported
+# ballot is c, with state x (c = 0: none reported, x = 0); it sends
+# accept(b, f(x)) with f(x) = x + 1.
+action propose(b in 1 .. B, c in 0 .. B-1, x in 0 .. B-1):
+  when proposed[b] == 0 and c < b and (count a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] <= c) >= Q and ((c == 0 and x == 0) or (c > 0 and (some a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] == c and val1b[(b-1)*A + a] == x)))
+  proposed' = [proposed except [b] = 1]
+  new2a' = [new2a except [b] = x + 1]
+  parent' = [parent except [b] = c]
+
+# accept: acceptor a stores round b's state, unless it promised a higher
+# ballot.
+action accept(a in 0 .. A-1, b in 1 .. B):
+  when proposed[b] == 1 and b >= promised[a]
+  promised' = [promised except [a] = b]
+  accBal' = [accBal except [a] = b]
+  accVal' = [accVal except [a] = new2a[b]]
+  sent2b' = [sent2b except [(b-1)*A + a] = 1]
+
+# confirm: round b's change is confirmed once a quorum accepted it.
+action confirm(b in 1 .. B):
+  when proposed[b] == 1 and confirmed[b] == 0 and (count a in 0 .. A-1 : sent2b[(b-1)*A + a] == 1) >= Q
+  confirmed' = [confirmed except [b] = 1]
+
+# the planted bug: an acceptor accepts a ballot below its promise.
+action accept_bug(a in 0 .. A-1, b in 1 .. B) [BUG]:
+  when proposed[b] == 1 and b < promised[a]
+  accBal' = [accBal except [a] = b]
+  accVal' = [accVal except [a] = new2a[b]]
+  sent2b' = [sent2b except [(b-1)*A + a] = 1]
+
+# of two confirmed rounds x < y, x is an ancestor of y
+invariant descends: all x in 1 .. B : all y in 1 .. B : not (x < y and confirmed[x] == 1 and confirmed[y] == 1) or parent[y] == x
