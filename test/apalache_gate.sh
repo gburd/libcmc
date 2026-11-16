@@ -109,8 +109,8 @@ examples/spec|zab|zab|durable|PASS|10|
 examples/spec|zab|zabb|durable|VIOLATION|10|--define BUG
 examples/spec|fpaxos|fpaxos|agreement|PASS|10|
 examples/spec|fpaxos|fpaxosb|agreement|VIOLATION|12|--define BUG
-examples/spec|caspaxos|caspaxos|agreement|PASS|10|
-examples/spec|caspaxos|caspaxosb|agreement|VIOLATION|10|--define BUG
+examples/spec|caspaxos|caspaxos|descends|PASS|10|
+examples/spec|caspaxos|caspaxosb|descends|VIOLATION|12|--define BUG
 examples/spec|twophase|twophase|consistency|PASS|10|
 examples/spec|twophase|twophaseb|consistency|VIOLATION|10|--define BUG
 examples/spec|fastpaxos|fastpaxos|agreement|PASS|10|

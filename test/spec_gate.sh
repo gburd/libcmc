@@ -84,12 +84,15 @@ expect "fpaxos: depth matches TLC (20)"      0 "complete state graph search is 2
 expect "fpaxos: Q1+Q2<=A breaks agreement"   1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
 expect "fpaxos: shortest trace is 12 actions" 1 "is (12 actions)" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
 
-# CASPaxos (Rystsov 2018): single-decree Paxos on a register via a
-# client change function; Agreement (one value per register version)
-# holds because a client reads from a quorum before committing.  The
-# --define BUG stale read overwrites an acceptor, so two values commit.
-expect "caspaxos: register agreement holds"   0 "No error has been found" --spec "$HERE/examples/spec/caspaxos.cml"
-expect "caspaxos: the stale-read bug loses an update" 1 "agreement is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
+# CASPaxos (Rystsov 2018): Paxos rounds on a rewritable register, each
+# applying a change function to the highest-ballot state a quorum
+# reports.  Confirmed states descend from earlier confirmed states;
+# counts and depth match single-worker TLC on the emitted module.  The
+# --define BUG accepts below a promise, so two confirmed states fork.
+expect "caspaxos: confirmed states descend"   0 "3280 distinct states found" --spec "$HERE/examples/spec/caspaxos.cml"
+expect "caspaxos: depth matches TLC (17)"     0 "complete state graph search is 17" --spec "$HERE/examples/spec/caspaxos.cml"
+expect "caspaxos: accepting below a promise forks" 1 "descends is violated" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
+expect "caspaxos: shortest trace is 12 actions" 1 "is (12 actions)" --spec "$HERE/examples/spec/caspaxos.cml" --define BUG
 
 # Fast Paxos (Lamport 2006): a fast round may collide, so its quorum F
 # must exceed 3A/4 for a classic recovery round to resolve the collision

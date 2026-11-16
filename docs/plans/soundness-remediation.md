@@ -249,6 +249,17 @@ demonstration it is.
 - **4.4 CASPaxos.**  A mutable register with a change function and
   versions; the safety property is that confirmed states descend from
   earlier confirmed states.
+  Status: done.  `caspaxos.cml` runs prepare, propose (increment the
+  highest-ballot state a quorum of promises reports), accept and
+  confirm per ballot, with a ghost parent per round; the invariant is
+  that of two confirmed rounds the earlier is the later's parent.  It
+  no longer extends `consensus`, since a register takes many values.
+  With 3 acceptors and 2 rounds it has 3,280 distinct states and depth
+  17 in cmc and in TLC; Apalache reports no error up to length 10.  The
+  `BUG` accept ignores the acceptor's promise; all three engines find
+  the fork, cmc and TLC in 12 steps.  Still abstracted: two rounds (so
+  the ancestor check is one step), one change function, no 1a messages,
+  no conflict replies, and no membership change or deletion.
 - **4.5 ZAB.**  Epochs, leader election, synchronisation from a quorum
   and a committed prefix, or the model and its docs are narrowed to the
   guarded counter it is.

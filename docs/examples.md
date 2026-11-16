@@ -67,9 +67,11 @@ checked three ways that agree -- `cmc --spec`, TLC
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,
   extending `consensus`; Agreement per epoch.  Reference: Machi.
-- `caspaxos.cml` -- CASPaxos, single-decree Paxos on a register via a
-  client change function, extending `consensus`; Agreement per register
-  version, from the client's quorum read.  Reference: Rystsov, 2018.
+- `caspaxos.cml` -- CASPaxos: Paxos rounds on a rewritable register,
+  each applying a change function to the highest-ballot state a quorum
+  of promises reports.  Its invariant is the paper's: a confirmed state
+  descends from every earlier confirmed state, tracked by a ghost parent
+  per round.  Two rounds.  Reference: Rystsov, 2018.
 - `zab.cml` -- ZAB commit-durability: a committed transaction is held by
   a quorum, so it survives a leader change.  Reference: ZooKeeper's
   `Zab.tla`.
@@ -85,8 +87,7 @@ These models are small safety demonstrations, each a few guarded
 actions over a tally.  `cmc --spec`, TLC and Apalache agreeing on one
 shows the encoded rules were executed as written; it does not show the
 rules are the named protocol.  Fast Paxos recovery does not read a
-quorum, CASPaxos models a
-write-once register rather than a mutable one, and ZAB is a guarded
+quorum, and ZAB is a guarded
 counter with no epochs or recovery.  The remediation plan (Phase 4)
 either makes each a faithful abstraction or renames it.
 

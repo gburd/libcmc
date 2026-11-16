@@ -207,7 +207,7 @@ or N=5 for the quorum-split variants.
 | Raft election (done) | 3 servers, one term | grant without spending the one vote |
 | ZAB commit-durability (done) | 3 participants | commit without a quorum (early ack) |
 | Humming Consensus (done) | 3 participants, 2 values | overwrite a write-once register |
-| CASPaxos | 3 acceptors, 1-2 CAS steps | apply on a non-quorum read |
+| CASPaxos (done) | 3 acceptors, 2 rounds | accept below a promise |
 | Vertical Paxos (two configs) | old + new, 3+3 overlap | activate new config before old read quorum |
 | Matchmaker Paxos (two configs) | 2 configs, 3 matchmakers | drop a prior config |
 | WPaxos (one steal) | 5 nodes, 1 object, 1 steal | disjoint phase quorums, or a steal that drops the value |
