@@ -364,6 +364,10 @@ never duplicates.
 is an unordered multiset that may duplicate.
 .It Fl -live-steps Ar k
 Bound, in steps of the fair schedule, for eventually-properties.
+Each round of the fair schedule drains the pending messages before it
+fires the armed timers, but nodes that keep messaging each other in a
+cycle cannot postpone a timer.
+The verdict is about this one schedule, not every fair one.
 Default 1000.
 .El
 .Pp

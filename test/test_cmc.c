@@ -1379,6 +1379,94 @@ test_p24_replay_enabled_error(void)
 	cmc_run_free(r);
 }
 
+/* 2.5: CLIENT arms timer 0 and starts a message the node sends itself
+ * forever; the timer ends the wait.  The goal holds once it fires. */
+static void
+pingpong_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	uint8_t    *s = sv;
+
+	(void) cfg;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		s[0] = 1;
+		cmc_out_push(out, CMC_OUT_SEND)->dst = (uint8_t) node;
+		cmc_out_push(out, CMC_OUT_SET_TIMER)->arg = 0;
+	}
+	else if (ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = (uint8_t) node;
+	else if (ev->kind == CMC_EV_TIMER)
+		s[0] = 2;
+}
+
+static bool
+not_waiting(const CmcWorld *w, CmcWhy *why)
+{
+	if (((const uint8_t *) cmc_node(w, 0))[0] == 1)
+	{
+		cmc_why(why, "timer 0 never fired");
+		return false;
+	}
+	return true;
+}
+
+static const CmcProp pingpong_props[] = {CMC_EVENTUALLY_PROP(TimerDone, not_waiting)};
+static const CmcCore pingpong_core = {
+	.name = "pingpong", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = pingpong_step,
+};
+static const CmcModel pingpong_model = {"pingpong", &pingpong_core, pingpong_props, 1, 0};
+
+/* 2.5: node 0's CLIENT starts the same endless self-message and sends a
+ * request to node 1, which replies on RECV */
+static void
+relay_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) sv;
+	out->n = 0;
+	if (node == 1 && ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_REPLY)->arg = 1;
+	else if (node == 0 && (ev->kind == CMC_EV_CLIENT || ev->kind == CMC_EV_RECV))
+		cmc_out_push(out, CMC_OUT_SEND)->dst = 0;
+	if (node == 0 && ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = 1;
+}
+
+static int
+first_only(const void *c, int n)
+{
+	(void) c;
+	return n == 0;
+}
+
+static const CmcCore relay_core = {
+	.name = "relay", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = two, .init = zero8, .step = relay_step,
+	.clients = first_only,
+};
+static const CmcModel relay_model = {"relay", &relay_core, replied_ev, 1, 0};
+
+/* 2.5: endless deliveries cannot postpone an armed timer, or a message on
+ * another channel, forever */
+static void
+test_p25_fair_schedule_fires_timers(void)
+{
+	CmcOptions	o;
+	char		why[512];
+
+	cmc_options_default(&o);
+	o.det = true;
+	CHECK(verdict_of(&pingpong_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+	for (int net = 0; net < 2; net++)
+	{
+		cmc_options_default(&o);
+		o.net = net ? CMC_NET_BAG : CMC_NET_FIFO;
+		CHECK(verdict_of(&relay_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+	}
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1416,6 +1504,7 @@ main(void)
 	test_p22_simulate_checks_last_state();
 	test_p23_property_cap();
 	test_p24_replay_enabled_error();
+	test_p25_fair_schedule_fires_timers();
 	test_version();
 	if (failures)
 	{

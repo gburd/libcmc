@@ -167,7 +167,7 @@ n²/2¹²⁹ is printed, as TLC does.
 | `CMC_ACTION_PROPERTY` | every transition, including transitions to already-seen states |
 | `CMC_WITNESS_PROP` | must hold in some reachable state (a vacuity check) |
 | `CMC_QUIESCENT_PROP` | every state with no enabled action, or whose only actions are timer fires that return the same world |
-| `CMC_EVENTUALLY_PROP` | bounded liveness: from every reachable state, the deterministic fair schedule (no faults, no new clients; drain deliveries, flushes, wakes and resets, then fire each armed timer once per round) reaches the goal within `--live-steps` steps.  It fails if the schedule stops, a round-start world repeats, or the steps run out.  The counterexample is the shortest prefix plus the fair suffix. |
+| `CMC_EVENTUALLY_PROP` | bounded liveness: from every reachable state, the deterministic fair schedule (no faults, no new clients; drain deliveries, flushes, wakes and resets, then fire each armed timer once per round) reaches the goal within `--live-steps` steps.  A drain runs in generations, each taking once what was enabled at its start, so no channel waits behind another; a drain that returns to a generation-start world ends there, so cores that keep messaging each other in a cycle cannot postpone an armed timer.  A drain that does not come back to a world within `--live-steps` steps (a counter in the messages, say) is reported as not reaching the goal, never as reaching it.  The verdict is about this one schedule, not every fair one.  It fails if the schedule stops, a round-start world repeats, or the steps run out.  The counterexample is the shortest prefix plus the fair suffix. |
 
 ## Gates around the cores
 

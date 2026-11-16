@@ -328,6 +328,10 @@ Bounded liveness: from every reachable state, the fair schedule (no
 faults, no new clients) reaches a state where it holds within
 .Va live_steps
 steps.
+Each round drains the pending messages before it fires the armed
+timers, but cores that keep messaging each other in a cycle cannot
+postpone a timer.
+The verdict is about this one schedule, not every fair one.
 .El
 .Pp
 Each macro fills in a
