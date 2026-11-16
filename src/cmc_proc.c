@@ -835,17 +835,21 @@ install_filter(void)
 		/* calls the model does not answer, intercepted only so that one on
 		 * a checker-owned fd is refused rather than sent to the kernel,
 		 * which has no such socket (see refuse_on_owned).  sendmsg is
-		 * not among them: the child itself sends the notify fd to the
-		 * parent with sendmsg once this filter is in, so trapping it would
-		 * stall every launch.  shortcut: a sendmsg on a checker-owned fd
-		 * reaches the kernel, which answers EBADF; intercept it with a
-		 * second filter installed after exec if a target uses it. */
+		 * matched below on its fd as well: the child itself sends the
+		 * notify fd to the parent with sendmsg on a low fd once this
+		 * filter is in, which must reach the kernel. */
 		OWN(SYS_readv), OWN(SYS_writev), OWN(SYS_preadv), OWN(SYS_pwritev),
 		OWN(SYS_pread64), OWN(SYS_pwrite64), OWN(SYS_recvmsg),
 		OWN(SYS_sendmmsg), OWN(SYS_recvmmsg), OWN(SYS_shutdown), OWN(SYS_dup),
 		OWN(SYS_dup2), OWN(SYS_dup3), OWN(SYS_getsockopt), OWN(SYS_getsockname),
 		OWN(SYS_getpeername), OWN(SYS_ioctl), OWN(SYS_splice), OWN(SYS_sendfile),
 #undef OWN
+		/* sendmsg: notify only when its fd (the low word of args[0]) is a
+		 * checker-owned one, 500 or above */
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_sendmsg, 0, 3),
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, args[0])),
+		BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K, 500, 0, 1),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_USER_NOTIF),
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
 	struct sock_fprog p = {sizeof f/sizeof*f, f};
@@ -1298,7 +1302,7 @@ try_pending_for(Node *nd)
 			g_resp->val = nd->next_fd++; break;
 		}
 		case SYS_readv: case SYS_writev: case SYS_preadv: case SYS_pwritev:
-		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg:
+		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg: case SYS_sendmsg:
 		case SYS_sendmmsg: case SYS_recvmmsg: case SYS_shutdown: case SYS_dup:
 		case SYS_dup2: case SYS_dup3: case SYS_getsockopt: case SYS_getsockname:
 		case SYS_getpeername: case SYS_ioctl: case SYS_splice: case SYS_sendfile:

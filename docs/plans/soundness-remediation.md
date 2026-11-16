@@ -182,7 +182,8 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   TCP stream, `recvfrom` and `sendto` flags, and the socket calls the
   model does not answer (`writev`, `recvmsg`, `shutdown`, `dup` and the
   rest; see docs/qualification.md) on a checker-owned fd are refused.
-  `sendmsg` is the one gap, since the launch path uses it.
+  `sendmsg` is matched in the filter on its fd, since the launch path
+  itself sends the notify fd with it on a low fd.
 - **3.7 TCP connections, not node pairs.**  Until per-connection queues,
   FIFO order and reset state exist, a second connection between the
   same two nodes, or a reconnection after a reset, is refused.  Then

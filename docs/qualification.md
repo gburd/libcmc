@@ -31,12 +31,10 @@ model gives.  None of this page makes a pass mean more than that.
 
 The engine runs each node as a real process under seccomp user
 notification and answers the system calls below.  `readv`, `writev`,
-`pread`, `pwrite`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
+`pread`, `pwrite`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
 `dup` family, `getsockopt`, `getsockname`, `getpeername`, `ioctl`,
 `splice` and `sendfile` are refused on a checker-owned fd (exit 3), and
-run in the kernel on any other.  `sendmsg` is not intercepted (the
-launch path itself uses it), so a `sendmsg` on a checker-owned fd gets
-the kernel's `EBADF`; that is a known gap.  Every other system call runs
+run in the kernel on any other.  Every other system call runs
 in the kernel, untouched.
 
 ### Sockets and connections

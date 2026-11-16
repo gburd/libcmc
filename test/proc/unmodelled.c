@@ -22,6 +22,7 @@
  *   rsthandler the same with a SIGPIPE handler (refused)
  *   fork       node 0 forks; the child exits at once (refused)
  *   writev     a writev() on a checker-owned socket (refused)
+ *   sendmsg    a sendmsg() on a checker-owned socket (refused)
  *   peek       a recv() with MSG_PEEK (refused)
  *   nbaccept   an accept4() with SOCK_NONBLOCK (refused)
  *   udp        a UDP socket (refused)
@@ -160,7 +161,7 @@ main(int argc, char **argv)
 		emit(e0 == ECONNRESET && e1 == EPIPE ? 2 : 1);
 		return 0;
 	}
-	if (!strcmp(mode, "writev") || !strcmp(mode, "peek") || !strcmp(mode, "nbaccept") || !strcmp(mode, "udp"))
+	if (!strcmp(mode, "writev") || !strcmp(mode, "sendmsg") || !strcmp(mode, "peek") || !strcmp(mode, "nbaccept") || !strcmp(mode, "udp"))
 	{
 		/* node 0 dials node 1, which serves one connection */
 		int id = atoi(argv[1]);
@@ -189,11 +190,15 @@ main(int argc, char **argv)
 
 		if (connect(s, (struct sockaddr *) &a, sizeof a) != 0)
 			return 0;
-		if (!strcmp(mode, "writev"))
+		if (!strcmp(mode, "writev") || !strcmp(mode, "sendmsg"))
 		{
 			struct iovec v = {.iov_base = "x", .iov_len = 1};
+			struct msghdr mh = {.msg_iov = &v, .msg_iovlen = 1};
 
-			(void) !writev(s, &v, 1);
+			if (!strcmp(mode, "writev"))
+				(void) !writev(s, &v, 1);
+			else
+				(void) !sendmsg(s, &mh, 0);
 		}
 		else
 			(void) !write(s, "x", 1);
