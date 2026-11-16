@@ -104,16 +104,38 @@ file holds only the environment to explore and the one invariant.  A
 pass covers the budgets given -- raise `--crashes` and `--drops` until
 your own planted bugs are caught.
 
-## One model, many implementations (withdrawn)
+## One model, many implementations
 
-`paxos2.c` was meant to show a second, structurally different Paxos
-checked against the same abstract model `examples/spec/paxos.cml`
-through its own binding.  It does not show that.  A proposer sends its
-prepare to every node, itself included, with a blocking RPC from the
-thread that alone serves requests, so it cannot answer itself and never
-decides.  Its values are 10 to 12, but the binding compares them with the
-spec's values 1 and 2, so two conflicting decisions would map to
-"nothing chosen".  And `--refine` checks the abstract invariant on the
-mapped state, not that the binary's steps are steps of the model.  The
-example stays as a fixture until the remediation plan's item 4.1 fixes
-it.
+`paxos2.c` is a second, structurally different Paxos: three symmetric
+nodes, each both proposer and acceptor, with its own wire format and
+hook layout.  It is checked against the same abstract model,
+`examples/spec/paxos.cml`, through its own binding
+(`examples/spec/paxos2.bind`); the spec does not change.
+
+```sh
+cc -no-pie -o paxos2 examples/paxos/paxos2.c
+cmc --model-file examples/spec/paxos2-refine.model --binary ./paxos2 \
+    --refine examples/spec/paxos.cml --bind examples/spec/paxos2.bind
+```
+
+```
+Model checking completed. No error has been found.
+597 states generated, 432 distinct states found, 0 states left on queue.
+```
+
+The model file requires that some node decides, so the pass is not
+vacuous.  Built with `-DBUG`, a proposer ignores the values a majority
+already accepted and an acceptor ignores its promise; two nodes then
+decide different values, and the binding reports it as a violation of
+the spec's agreement.
+
+A node answers its own prepare and accept locally.  An earlier version
+sent them to itself over TCP, from the only thread that serves
+requests, so it waited forever on itself and never decided; its values
+also fell outside the spec's domain, so a conflict would have mapped to
+"nothing chosen".
+
+`--refine` checks the spec's invariants on each reached state.  It does
+not check that each of the binary's steps is a step of the spec; that is
+`--refine-steps`, which needs every spec variable bound, and
+`paxos.bind` binds only `chosen`.

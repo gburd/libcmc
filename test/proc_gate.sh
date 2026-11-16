@@ -44,6 +44,7 @@ $CC -O1 -no-pie -w -DBUG -o "$B/proc/restart-bug" "$T/restart.c" || { echo "proc
 # the consensus examples are real, tested fixtures too
 $CC -O1 -no-pie -w -o "$B/proc/paxos" "$HERE/examples/paxos/paxos.c" || { echo "proc_gate: paxos.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/paxos2" "$HERE/examples/paxos/paxos2.c" || { echo "proc_gate: paxos2.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/paxos2-bug" "$HERE/examples/paxos/paxos2.c" || { echo "proc_gate: paxos2.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/paxos-bug" "$HERE/examples/paxos/paxos.c" || { echo "proc_gate: paxos.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/mono" "$HERE/test/proc/mono.c" || { echo "proc_gate: mono.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/mono-bug" "$HERE/test/proc/mono.c" || { echo "proc_gate: mono.c -DBUG does not build"; fail=1; }
@@ -104,8 +105,12 @@ expect "paxos: the binary refines the abstract spec" 0 "No error has been found"
 expect "paxos: the bug does NOT refine (agreement)"  1 "does not refine" $(runx "$HERE/examples/spec/paxos-refine.model" paxos-bug) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --simulate --seed 1 --walks 3000
 # one model, many implementations: a SECOND, structurally different Paxos
 # (3 symmetric nodes, different hook layout) refines the SAME paxos.cml,
-# with only its binding (paxos2.bind) changed.
+# with only its binding (paxos2.bind) changed.  Its model requires that
+# some node decides, so a pass is not vacuous, and its planted bug makes
+# two nodes decide differently, which the binding maps onto the spec's
+# agreement.
 expect "paxos2: a second impl refines the same spec" 0 "No error has been found" $(runx "$HERE/examples/spec/paxos2-refine.model" paxos2) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos2.bind"
+expect "paxos2: its bug does NOT refine (agreement)" 1 "abstract invariant agreement is violated" $(runx "$HERE/examples/spec/paxos2-refine.model" paxos2-bug) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos2.bind"
 # action-level refinement with stuttering (Milestone C2): a step the
 # abstract model forbids is caught even when every state it reaches is
 # in range -- which a state-level (C1) check cannot see.  mono.cml says

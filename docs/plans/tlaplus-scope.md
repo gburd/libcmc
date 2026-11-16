@@ -215,9 +215,10 @@ invariant.  C's "one model, many
 implementations" gate is met: a second, structurally different Paxos
 (`examples/paxos/paxos2.c` -- three symmetric nodes, a different hook
 layout) refines the *same* `examples/spec/paxos.cml` through its own
-binding (`examples/spec/paxos2.bind`), the spec unchanged.  (Withdrawn:
-paxos2 blocks on a self-RPC and its values fall outside the binding's
-domain; see the remediation plan, 4.1.)  The consensus examples
+binding (`examples/spec/paxos2.bind`), the spec unchanged.  (Withdrawn
+in the 1.3.0 audit, and restored by the remediation plan's 4.1: paxos2
+had blocked on a self-RPC and used values outside the binding's
+domain.)  The consensus examples
 (`paxos.cml`, `raft.cml`, `hc.cml`, `zab.cml`) agree across `cmc
 --spec`, TLC and Apalache, which shows the encoded rules were executed
 as written, not that they model the named protocols.

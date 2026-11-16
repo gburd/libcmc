@@ -123,4 +123,4 @@ call runs in the kernel, untouched.
 | raftlog, zab | pass and planted bug (proc_gate) |
 | raft | pass only; the planted bug was reachable only through the old pair-keyed channels (plan 4.7) |
 | hc | vacuous: no participant ever adopts (plan 4.8) |
-| paxos2 | withdrawn (plan 4.1) |
+| paxos2 | refines `paxos.cml` with a progress property; its planted bug breaks the spec's agreement (proc_gate) |

@@ -225,6 +225,11 @@ demonstration it is.
   self-RPC); bind its values 10 to 12 onto the spec's value domain; add a
   progress property that some node decides; add a negative test with two
   conflicting decisions that the binding must report.
+  Status: done.  A node serves its own requests locally, its values are
+  the spec's 1 and 2 (nodes 0 and 2 contend for 1, node 1 wants 2), the
+  refine model requires that some node decides, and the `-DBUG` build
+  breaks the spec's agreement.  The old paxos2.c fails the progress
+  property.
 - **4.2 Fast Paxos.**  Recovery reads an explicit classic quorum,
   promises close the fast round, and recovery with no candidate may
   choose a fresh value.  The experiment varies the quorum inequality

@@ -1,11 +1,9 @@
 /*
  * paxos2.c: a SECOND, deliberately different implementation of
- * single-decree Paxos, meant to show one abstract model
- * (examples/spec/paxos.cml) checking two implementations through
- * different bindings (paxos2.bind).  WITHDRAWN as that demonstration: a
- * node runs its own prepare and accept as a synchronous RPC to itself,
- * which blocks, and its values 10 to 12 fall outside the binding's
- * domain 1 .. 2 (docs/plans/soundness-remediation.md, 4.1).
+ * single-decree Paxos, to show one abstract model
+ * (examples/spec/paxos.cml) checking two implementations: only the
+ * binding (paxos2.bind) differs, because this one reports its state
+ * differently.
  *
  * Where examples/paxos/paxos.c has 2 dedicated proposers and 3 dedicated
  * acceptors, this version has 3 SYMMETRIC nodes, each of which is both a
@@ -14,11 +12,14 @@
  * reader can see the spec, not the code, is the shared artifact.
  *
  * Node i (0..2) listens on 127.0.0.1:(BASE+i).  Each node can be driven
- * to propose its own value (10 + i) for the single decree; it runs
- * Phase 1 (prepare) then Phase 2 (accept) against all three nodes
- * (itself included), picking the highest previously-accepted value seen
- * among a majority of promises, per Paxos.  A node DECIDES once a
- * majority has accepted its ballot's value.
+ * to propose its own value (1 + i % 2, so nodes 0 and 2 both want 1 and
+ * node 1 wants 2) for the single decree; it runs Phase 1 (prepare) then
+ * Phase 2 (accept) against all three acceptors, itself included,
+ * picking the highest previously-accepted value seen among a majority
+ * of promises, per Paxos.  A node DECIDES once a majority has accepted
+ * its ballot's value.  Its own acceptor answers locally, through the
+ * same code the network requests use: a node cannot serve its own
+ * request over TCP, since it is busy proposing, not in accept().
  *
  * Messages, request/reply on a fresh connection (3 bytes):
  *   PREPARE 'P' ballot _      -> 'p' accepted_ballot accepted_value (promise)
@@ -116,12 +117,62 @@ rpc(int to, const unsigned char req[3], unsigned char rep[3])
 	return r;
 }
 
+/* the acceptor: answer one prepare or accept request m into r */
+static void
+serve(const unsigned char m[3], unsigned char r[3])
+{
+	r[0] = 'n'; r[1] = 0; r[2] = 0;
+	if (m[0] == 'P')				/* prepare(ballot) */
+	{
+		unsigned char b = m[1];
+
+		if (b >= promised)
+		{
+			promised = b;
+			emit();
+			r[0] = 'p'; r[1] = acc_ballot; r[2] = acc_value;
+		}
+		/* else refuse: r stays 'n' */
+	}
+	else if (m[0] == 'A')			/* accept(ballot, value) */
+	{
+		unsigned char b = m[1], v = m[2];
+
+#ifdef BUG
+		/* accept any ballot, ignoring the promise -- unsound */
+		acc_ballot = b; acc_value = v; promised = b;
+		emit();
+		r[0] = 'a';
+#else
+		if (b >= promised)
+		{
+			promised = b; acc_ballot = b; acc_value = v;
+			emit();
+			r[0] = 'a';
+		}
+		/* else refuse */
+#endif
+	}
+}
+
+/* one request to acceptor j: over TCP, or locally for our own */
+static int
+ask(int j, const unsigned char req[3], unsigned char rep[3])
+{
+	if (j == id)
+	{
+		serve(req, rep);
+		return 0;
+	}
+	return rpc(j, req, rep);
+}
+
 /* run one proposal round for this node's own value */
 static void
 propose(void)
 {
 	unsigned char b = (unsigned char) (4 + id + 1);	/* a unique ballot for round 1 */
-	unsigned char my = (unsigned char) (10 + id);
+	unsigned char my = (unsigned char) (1 + id % 2);
 
 	/* Phase 1: prepare at all nodes */
 	int promises = 0;
@@ -131,7 +182,7 @@ propose(void)
 	{
 		unsigned char req[3] = {'P', b, 0}, rep[3];
 
-		if (rpc(j, req, rep) == 0 && rep[0] == 'p')
+		if (ask(j, req, rep) == 0 && rep[0] == 'p')
 		{
 			promises++;
 			if (rep[1] >= best_b) { best_b = rep[1]; best_v = rep[2]; }
@@ -157,7 +208,7 @@ propose(void)
 	{
 		unsigned char req[3] = {'A', b, v}, rep[3];
 
-		if (rpc(j, req, rep) == 0 && rep[0] == 'a')
+		if (ask(j, req, rep) == 0 && rep[0] == 'a')
 			accepts++;
 	}
 	if (accepts >= MAJ)
@@ -186,7 +237,7 @@ main(int argc, char **argv)
 
 		if (c < 0)
 			break;
-		unsigned char m[3], r[3] = {'n', 0, 0};
+		unsigned char m[3], r[3];
 		ssize_t n = read(c, m, 3);
 
 		if (n == 1 && m[0] == 'T')		/* a timeout drives this node to propose */
@@ -201,37 +252,7 @@ main(int argc, char **argv)
 			close(c);
 			continue;
 		}
-		if (m[0] == 'P')				/* prepare(ballot) */
-		{
-			unsigned char b = m[1];
-
-			if (b >= promised)
-			{
-				promised = b;
-				emit();
-				r[0] = 'p'; r[1] = acc_ballot; r[2] = acc_value;
-			}
-			/* else refuse: r stays 'n' */
-		}
-		else if (m[0] == 'A')			/* accept(ballot, value) */
-		{
-			unsigned char b = m[1], v = m[2];
-
-#ifdef BUG
-			/* accept any ballot, ignoring the promise -- unsound */
-			acc_ballot = b; acc_value = v; promised = b;
-			emit();
-			r[0] = 'a';
-#else
-			if (b >= promised)
-			{
-				promised = b; acc_ballot = b; acc_value = v;
-				emit();
-				r[0] = 'a';
-			}
-			/* else refuse */
-#endif
-		}
+		serve(m, r);
 		(void) !write(c, r, 3);
 		close(c);
 	}

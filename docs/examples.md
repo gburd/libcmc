@@ -16,10 +16,10 @@ in the source tree, and `make check` builds and checks each one.
 
 - **[Single-decree Paxos](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/paxos)**
   -- two proposers and three acceptors; the safety property is agreement.
-  Reference: Lamport's `Paxos.tla`.  A second implementation,
-  `paxos2.c`, is withdrawn as a demonstration: it blocks on a
-  synchronous RPC to itself and its values fall outside the binding's
-  domain (remediation plan, 4.1).
+  Reference: Lamport's `Paxos.tla`.  A second, structurally different
+  implementation, `paxos2.c`, is checked against the same abstract
+  model through its own binding; its planted bug breaks the spec's
+  agreement.
 - **[Raft leader election](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/raft)**
   -- three nodes; Election Safety (at most one leader per term), with and
   without a crash.  Reference: Ongaro's `raft.tla`.  Its planted

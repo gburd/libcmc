@@ -2,7 +2,8 @@
 # that paxos2.c (the second Paxos implementation) refines
 # examples/spec/paxos.cml.  Three symmetric nodes; a timeout drives a
 # node to propose its value.  The abstract model's invariants are the
-# property; this file's own [invariants] is a trivial placeholder.
+# safety property; this file's own is progress, so a run in which no
+# node ever decides fails rather than passes vacuously.
 #
 #   cmc --model-file examples/spec/paxos2-refine.model --binary ./paxos2 \
 #       --refine examples/spec/paxos.cml --bind examples/spec/paxos2.bind
@@ -12,5 +13,8 @@ nodes = 3
 [environment]
 timeouts = 2            # each node may be driven to propose
 
+[fields]
+decided = 3             # byte 3 of paxos2's hook
+
 [invariants]
-ok = "1 == 1"
+some_decides = "eventually node[0].decided != 0 or node[1].decided != 0 or node[2].decided != 0"
