@@ -340,6 +340,9 @@ expect "connect: a dead node refuses the connection"      0 "No error has been f
 # a close with bytes unread is an RST: the peer's read gets ECONNRESET and
 # its write EPIPE, and SIGPIPE does what the node's disposition says
 expect "rst: the default SIGPIPE ends the writer"          0 "No error has been found" --model-file "$OUT/u-rstwrite.model"
+# a node starts with every signal at its default, whatever the checker
+# inherited: run cmc itself with SIGPIPE ignored (as CI runners do)
+(trap '' PIPE; fail=0; expect "rst: a node does not inherit an ignored SIGPIPE" 0 "No error has been found" --model-file "$OUT/u-rstwrite.model"; exit $fail) || fail=1
 expect "rst: an ignored SIGPIPE leaves EPIPE"              0 "No error has been found" --model-file "$OUT/u-rstignore.model"
 expect "rst: a SIGPIPE handler is refused"                 3 "SIGPIPE handler" --model-file "$OUT/u-rsthandler.model"
 expect "unmodelled: an over-long state record is refused" 3 "longer than the 64" --model-file "$OUT/u-longrec.model"

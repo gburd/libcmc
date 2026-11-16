@@ -851,6 +851,17 @@ launch(Node *nd)
 			snprintf(fdbuf, sizeof fdbuf, "%d", 3); setenv("CMC_STATE_FD", fdbuf, 1);
 			snprintf(fdbuf, sizeof fdbuf, "%d", DURABLE_FD); setenv("CMC_DURABLE_FD", fdbuf, 1);
 		}
+		/* Start the node as a service starts: every signal at its default
+		 * disposition and none blocked.  Ignored signals and the mask
+		 * survive exec, so without this a node would inherit whatever the
+		 * checker's own parent set (CI runners ignore SIGPIPE), and the
+		 * same binary would behave differently from one host to another. */
+		{
+			sigset_t none; sigemptyset(&none);
+			sigprocmask(SIG_SETMASK, &none, NULL);
+			for (int sig = 1; sig < NSIG; sig++)
+				if (sig != SIGKILL && sig != SIGSTOP) signal(sig, SIG_DFL);
+		}
 		/* No address randomisation: a thread's stack, its pthread_join
 		 * word and every mmap land at the same address on every replay,
 		 * so the world encoding can name a futex word or an epoll token by
