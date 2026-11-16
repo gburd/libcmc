@@ -61,7 +61,8 @@ turning one of them into a red test in the repository.
   on the calibration's triggers, which the release workflow calls on a
   tag, with `CMC_REQUIRE_TOOLS=1` so a missing tool fails instead of
   skipping.
-- **0.4 A qualification matrix** (`docs/qualification.md`): for each
+- **0.4 A qualification matrix** (`docs/qualification.md`, done; kept
+  current as each item lands): for each
   engine, each supported syscall and each property kind, whether it is
   exact, approximate or refused, and the gate that checks it.  This
   replaces prose claims as the source of truth.

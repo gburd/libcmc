@@ -28,6 +28,9 @@ lede: >-
 - [When libcmc fits]({{ '/fit/' | relative_url }}): where an
   explicit-state checker of the shipping code is the right tool, and
   where it is the wrong one.
+- [Qualification]({{ '/reference/qualification/' | relative_url }}): what
+  each engine answers exactly, approximates, or refuses, and the gate
+  that checks it.
 - [Soundness remediation]({{ '/reference/plan-soundness/' | relative_url }}):
   the false passes an audit of 1.3.0 found, and the plan that fixes
   them.  Until it is done, a cmc PASS is not verification evidence.
