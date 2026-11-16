@@ -1,69 +1,97 @@
 # examples/spec/fpaxos.cml: Flexible Paxos as an abstract model,
 # extending the shared consensus base.  It inherits Agreement (at most
-# one value chosen) and demonstrates Heidi Howard's central result.
+# one value chosen) unchanged.
 #
 # Reference: Heidi Howard, Dahlia Malkhi, Alexander Spiegelman,
 #   "Flexible Paxos: Quorum Intersection Revisited", OPODIS 2016,
 #   arXiv:1608.06696.
 #
-# Classical Paxos requires every quorum to be a majority so any two
-# quorums intersect.  FPaxos shows the only intersection the safety
-# argument uses is between a Phase 1 (leader-election) quorum and the
-# Phase 2 (replication) quorums of earlier leaders.  So the real
-# requirement is that every Phase 1 quorum (size Q1) intersect every
-# Phase 2 quorum (size Q2); a sufficient instance is Q1 + Q2 > A.
-# Majority is the special case Q1 = Q2 = floor(A/2)+1.
+# Classic Paxos uses majorities so that any two quorums intersect.
+# Flexible Paxos observes that the safety argument only needs every
+# phase 1 quorum to intersect every phase 2 quorum, so with quorums
+# defined by size it is enough that Q1 + Q2 > A.  The phase 2 quorum can
+# then be smaller than a majority, and two phase 2 quorums can be
+# disjoint.
 #
-# The model: each acceptor accepts one value (Phase 2); a value is
-# chosen once a Phase 2 quorum (Q2 acceptors) holds it.  A new leader
-# proposes value v only after a Phase 1 read of Q1 acceptors that saw no
-# other value -- which is possible exactly when some Q1 acceptors avoid
-# the holders of that other value, i.e. A - (holders of w) >= Q1.  When
-# Q1 + Q2 > A this cannot happen once w is chosen (A - Q2 < Q1), so the
-# new leader always sees the chosen value and cannot propose a different
-# one -- Agreement.  The config here is A = 5, Q1 = 4, Q2 = 2, so
-# Q1 + Q2 = 6 > 5: safe, with a cheap 2-acceptor steady state.
+# The model is single-decree Paxos as in paxos.cml (Lamport's
+# Paxos.tla: per-acceptor maxBal, maxVBal and maxVal, the 1b, 2a and 2b
+# messages, and Phase1b, Phase2a and Phase2b), with the one quorum size
+# split in two.  Phase2a needs the promises of Q1 acceptors and proposes
+# the value of the highest-ballot vote they report, or any value if they
+# report none; a value is chosen once Q2 acceptors voted for it at one
+# ballot.  Here A = 4, Q1 = 3 and Q2 = 2, so Q1 + Q2 = 5 > 4: safe,
+# although two phase 2 quorums of 2 can be disjoint.  See paxos.cml for
+# the message encoding and what is abstracted away.
 #
-# -DBUG: accept_bug uses the Phase 2 quorum size (Q2) where the Phase 1
-# guard needs Q1 -- the classic FPaxos mistake of shrinking the
-# replication quorum without enlarging the election quorum.  With
-# A - (holders of w) >= Q2 the new leader's read can miss a chosen
-# value, so two values are chosen.
+# -DBUG: phase2a_bug lets a leader proceed on the promises of Q1BUG = 2
+# acceptors, the mistake of shrinking the phase 2 quorum without
+# growing the phase 1 quorum.  Q1BUG + Q2 = 4 is not more than A, so the
+# leader's quorum can miss a chosen value and pick another.
 #
 #   cmc --spec examples/spec/fpaxos.cml
-#   cmc --spec examples/spec/fpaxos.cml --define BUG   (Q1 shrunk to Q2)
+#   cmc --spec examples/spec/fpaxos.cml --define BUG   (Q1 + Q2 <= A)
 
 module fpaxos
 extends consensus
 
-const A = 5                     # acceptors 0 .. A-1
-const Q1 = 4                    # Phase 1 (leader-election) quorum
-const Q2 = 2                    # Phase 2 (replication) quorum
+const A = 4                     # acceptors 0 .. A-1
+const B = 2                     # ballots 1 .. B (0 = none)
+const Q1 = 3                    # phase 1 (promise) quorum size
+const Q2 = 2                    # phase 2 (vote) quorum size
+const Q1BUG = 2                 # the BUG's phase 1 quorum: Q1BUG + Q2 = A
 
-# accepted[a] = the value acceptor a has accepted (0 = none).  Each
-# acceptor accepts one value in this single-era model.
-var accepted : [0 .. A-1 -> 0 .. V]
+# acceptor state, as in Paxos.tla
+var maxBal : [0 .. A-1 -> 0 .. B]
+var maxVBal : [0 .. A-1 -> 0 .. B]
+var maxVal : [0 .. A-1 -> 0 .. V]
 
-init accepted == [a in 0 .. A-1 -> 0]
+# messages sent, keyed (b-1)*A + a for acceptor a and ballot b
+var sent1b : [0 .. A*B-1 -> 0 .. 1]
+var bal1b : [0 .. A*B-1 -> 0 .. B]
+var val1b : [0 .. A*B-1 -> 0 .. V]
+var val2a : [1 .. B -> 0 .. V]
+var sent2b : [0 .. A*B-1 -> 0 .. 1]
 
-# acceptor a accepts value v (Phase 2).  It may do so only if, for every
-# OTHER value w, either w is not yet chosen (fewer than Q2 hold it) or a
-# Phase 1 read of Q1 acceptors could have missed w (A minus w's holders
-# is at least Q1, so Q1 acceptors avoid every w-holder) -- i.e. the
-# leader proposing v legitimately did not see w.  When Q1 + Q2 > A this
-# is false once w is chosen, so a different value cannot be accepted.
-action accept(a in 0 .. A-1, v in 1 .. V):
-  when accepted[a] == 0 and (all w in 1 .. V : w == v or (count c in 0 .. A-1 : accepted[c] == w) < Q2 or A - (count c in 0 .. A-1 : accepted[c] == w) >= Q1)
-  accepted' = [accepted except [a] = v]
+init maxBal == [a in 0 .. A-1 -> 0]
+init maxVBal == [a in 0 .. A-1 -> 0]
+init maxVal == [a in 0 .. A-1 -> 0]
+init sent1b == [k in 0 .. A*B-1 -> 0]
+init bal1b == [k in 0 .. A*B-1 -> 0]
+init val1b == [k in 0 .. A*B-1 -> 0]
+init val2a == [b in 1 .. B -> 0]
+init sent2b == [k in 0 .. A*B-1 -> 0]
 
-# the planted bug: the Phase 1 guard uses Q2 where it must use Q1 (the
-# election quorum was not enlarged when the replication quorum shrank),
-# so Q1 + Q2 > A no longer protects it and two values are chosen.
-action accept_bug(a in 0 .. A-1, v in 1 .. V) [BUG]:
-  when accepted[a] == 0 and (all w in 1 .. V : w == v or (count c in 0 .. A-1 : accepted[c] == w) < Q2 or A - (count c in 0 .. A-1 : accepted[c] == w) >= Q2)
-  accepted' = [accepted except [a] = v]
+# Phase1b: acceptor a promises ballot b and reports its last vote.
+action phase1b(a in 0 .. A-1, b in 1 .. B):
+  when b > maxBal[a]
+  maxBal' = [maxBal except [a] = b]
+  sent1b' = [sent1b except [(b-1)*A + a] = 1]
+  bal1b' = [bal1b except [(b-1)*A + a] = maxVBal[a]]
+  val1b' = [val1b except [(b-1)*A + a] = maxVal[a]]
 
-# a value v is chosen once a Phase 2 quorum of acceptors holds it.
-action choose(v in 1 .. V):
-  when (count a in 0 .. A-1 : accepted[a] == v) >= Q2
+# Phase2a: with the ballot b promises of Q1 acceptors whose highest
+# reported vote is at ballot c (c = 0: none), the leader proposes the
+# value voted at c, or any value when c = 0.
+action phase2a(b in 1 .. B, v in 1 .. V):
+  when val2a[b] == 0 and (some c in 0 .. B-1 : c < b and (count a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] <= c) >= Q1 and (c == 0 or (some a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] == c and val1b[(b-1)*A + a] == v)))
+  val2a' = [val2a except [b] = v]
+
+# Phase2b: acceptor a votes for ballot b's value, unless it has promised
+# a higher ballot.
+action phase2b(a in 0 .. A-1, b in 1 .. B):
+  when val2a[b] != 0 and b >= maxBal[a]
+  maxBal' = [maxBal except [a] = b]
+  maxVBal' = [maxVBal except [a] = b]
+  maxVal' = [maxVal except [a] = val2a[b]]
+  sent2b' = [sent2b except [(b-1)*A + a] = 1]
+
+# learn: v is chosen once Q2 acceptors voted for it at one ballot.
+action learn(v in 1 .. V, b in 1 .. B):
+  when val2a[b] == v and (count a in 0 .. A-1 : sent2b[(b-1)*A + a] == 1) >= Q2
   chosen' = [chosen except [v] = 1]
+
+# the planted bug: Phase2a with a phase 1 quorum of Q1BUG acceptors,
+# too small to intersect every phase 2 quorum.
+action phase2a_bug(b in 1 .. B, v in 1 .. V) [BUG]:
+  when val2a[b] == 0 and (some c in 0 .. B-1 : c < b and (count a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] <= c) >= Q1BUG and (c == 0 or (some a in 0 .. A-1 : sent1b[(b-1)*A + a] == 1 and bal1b[(b-1)*A + a] == c and val1b[(b-1)*A + a] == v)))
+  val2a' = [val2a except [b] = v]

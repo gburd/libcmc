@@ -54,10 +54,11 @@ checked three ways that agree -- `cmc --spec`, TLC
   Lamport's `Paxos.tla`, whose variables and actions it follows; a
   hand-written twin in that style (`paxos.tla`) gives TLC the same
   6,144 distinct states.
-- `fpaxos.cml` -- Flexible Paxos, extending `consensus`; Agreement holds
-  iff every Phase 1 quorum intersects every Phase 2 quorum, for which
-  `Q1 + Q2 > A` suffices (Howard's theorem).  Reference: Howard, Malkhi,
-  Spiegelman, OPODIS 2016.
+- `fpaxos.cml` -- Flexible Paxos, extending `consensus`: the ballots
+  and promises of `paxos.cml` with a phase 1 quorum `Q1` and a phase 2
+  quorum `Q2`.  Agreement holds at `A = 4`, `Q1 = 3`, `Q2 = 2`, where
+  two phase 2 quorums can be disjoint but `Q1 + Q2 > A`.  Reference:
+  Howard, Malkhi, Spiegelman, OPODIS 2016.
 - `fastpaxos.cml` -- Fast Paxos, extending `consensus`; a fast round may
   collide, so its quorum must exceed `3A/4` for a classic recovery round
   to resolve the collision (two rounds modelled).  Reference: Lamport,
@@ -84,7 +85,7 @@ These models are small safety demonstrations, each a few guarded
 actions over a tally.  `cmc --spec`, TLC and Apalache agreeing on one
 shows the encoded rules were executed as written; it does not show the
 rules are the named protocol.  Fast Paxos recovery does not read a
-quorum, Flexible Paxos has no ballots or phase 1, CASPaxos models a
+quorum, CASPaxos models a
 write-once register rather than a mutable one, and ZAB is a guarded
 counter with no epochs or recovery.  The remediation plan (Phase 4)
 either makes each a faithful abstraction or renames it.

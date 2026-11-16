@@ -74,13 +74,15 @@ expect "zab: commit-durability holds"         0 "20 distinct states found" --spe
 expect "zab: depth matches TLC (6)"           0 "complete state graph search is 6" --spec "$HERE/examples/spec/zab.cml"
 expect "zab: the early-ack bug loses a commit" 1 "durable is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
 
-# Flexible Paxos (Howard, Malkhi, Spiegelman 2016): Agreement holds iff
-# every Phase 1 quorum intersects every Phase 2 quorum, for which
-# Q1 + Q2 > A suffices.  With Q1=4, Q2=2, A=5 (sum 6 > 5) it holds; the
-# --define BUG uses the Phase 2 size for the Phase 1 guard, breaking the
-# cross-phase intersection so two values are chosen.
-expect "fpaxos: safe when Q1+Q2>A"           0 "No error has been found" --spec "$HERE/examples/spec/fpaxos.cml"
-expect "fpaxos: the shrunk-Q1 bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
+# Flexible Paxos (Howard, Malkhi, Spiegelman 2016): the Paxos ballots of
+# paxos.cml with a phase 1 quorum Q1 and a phase 2 quorum Q2.  With A=4,
+# Q1=3, Q2=2 (sum 5 > 4) agreement holds; counts and depth match
+# single-worker TLC on the emitted module.  The --define BUG runs phase 2a
+# on 2 promises (2 + 2 = A), so a leader can miss a chosen value.
+expect "fpaxos: safe when Q1+Q2>A"           0 "36756 distinct states found" --spec "$HERE/examples/spec/fpaxos.cml"
+expect "fpaxos: depth matches TLC (20)"      0 "complete state graph search is 20" --spec "$HERE/examples/spec/fpaxos.cml"
+expect "fpaxos: Q1+Q2<=A breaks agreement"   1 "agreement is violated" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
+expect "fpaxos: shortest trace is 12 actions" 1 "is (12 actions)" --spec "$HERE/examples/spec/fpaxos.cml" --define BUG
 
 # CASPaxos (Rystsov 2018): single-decree Paxos on a register via a
 # client change function; Agreement (one value per register version)

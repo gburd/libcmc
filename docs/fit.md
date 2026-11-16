@@ -47,9 +47,9 @@ is designed for, not ones on which a pass is yet evidence.
   protocols they are named after (see the examples page).
 - **The quorum-intersection knob.**  Undersizing a quorum so two disjoint
   quorums can each decide is a bug class this search finds at a small
-  instance.  The `fpaxos.cml` demonstration shows the arithmetic
-  (`Q1 + Q2 > A`) on a write-once tally; it has no ballots or phase 1, so
-  it does not check Flexible Paxos itself.
+  instance.  `fpaxos.cml` runs Paxos's ballots and promises with a
+  phase 1 quorum of 3 and a phase 2 quorum of 2 out of 4 acceptors, and
+  a phase 1 quorum of 2 breaks agreement.
 - **Commit durability and "no committed entry lost."**  The
   single-contested-slot reduction (as in the Raft-log process example)
   checks that an acknowledged value survives the crashes in the budget.

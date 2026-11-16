@@ -22,8 +22,8 @@ examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|PASS|
 examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|VIOLATION|--define BUG
 examples/spec|zab|zab|CONSTANTS P = 3  Q = 2|durable|PASS|
 examples/spec|zab|zab|CONSTANTS P = 3  Q = 2|durable|VIOLATION|--define BUG
-examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 5  Q1 = 4  Q2 = 2|agreement|PASS|
-examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 5  Q1 = 4  Q2 = 2|agreement|VIOLATION|--define BUG
+examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 4  B = 2  Q1 = 3  Q2 = 2  Q1BUG = 2|agreement|PASS|
+examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 4  B = 2  Q1 = 3  Q2 = 2  Q1BUG = 2|agreement|VIOLATION|--define BUG
 examples/spec|caspaxos|caspaxos|CONSTANTS V = 2  A = 3  Q = 2|agreement|PASS|
 examples/spec|caspaxos|caspaxos|CONSTANTS V = 2  A = 3  Q = 2|agreement|VIOLATION|--define BUG
 examples/spec|twophase|twophase|CONSTANT N = 3|consistency|PASS|

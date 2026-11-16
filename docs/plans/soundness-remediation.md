@@ -237,6 +237,15 @@ demonstration it is.
   not a recovery threshold.
 - **4.3 Flexible Paxos.**  Ballots, phase 1 promises and
   highest-ballot value selection, with Q1 and Q2 as parameters.
+  Status: done.  `fpaxos.cml` is the Paxos of 4.6 with the quorum split:
+  Phase2a needs Q1 promises, a value is chosen by Q2 votes at one
+  ballot.  With 4 acceptors, Q1 = 3 and Q2 = 2 (two phase 2 quorums can
+  be disjoint) it has 36,756 distinct states and depth 20 in cmc and in
+  TLC; Apalache reports no error up to length 10.  The `BUG` Phase2a
+  runs on 2 promises, so Q1 + Q2 = A; all three engines find the
+  violation, cmc and TLC in 12 steps.  The abstractions are those of
+  4.6.  There is no hand-written TLA+ twin; TLC checks the emitted
+  module.
 - **4.4 CASPaxos.**  A mutable register with a change function and
   versions; the safety property is that confirmed states descend from
   earlier confirmed states.

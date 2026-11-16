@@ -203,7 +203,7 @@ or N=5 for the quorum-split variants.
 | Variant | Minimal instance | Planted-bug knob |
 |---|---|---|
 | Single-decree Paxos (done) | 3 acceptors, 2 ballots, 2 values | a 2a that ignores the votes its promises report |
-| Flexible Paxos | 5 acceptors, 2 values | set `Q1 + Q2 <= A` |
+| Flexible Paxos (done) | 4 acceptors, 2 ballots, 2 values | phase 1 on `Q1` promises with `Q1 + Q2 <= A` |
 | Raft election (done) | 3 servers, one term | grant without spending the one vote |
 | ZAB commit-durability (done) | 3 participants | commit without a quorum (early ack) |
 | Humming Consensus (done) | 3 participants, 2 values | overwrite a write-once register |
@@ -214,9 +214,11 @@ or N=5 for the quorum-split variants.
 | Mencius (two slots) | 3 servers, 2 slots | skip a slot without the quorum |
 | Fast Paxos (collision) | 5 acceptors, 2 values, 1 fast round | plain majority for the fast round |
 
-Fast Paxos and FPaxos both need N >= 5 for the bug to be reachable (a
-majority must be strictly smaller than the quorum the protocol actually
-requires); at N=3 the bug cannot appear.
+Fast Paxos needs N >= 5 for the bug to be reachable (a majority must be
+strictly smaller than the quorum the protocol actually requires); at
+N=3 the bug cannot appear.  FPaxos does not: its quorums need not be
+majorities, and `fpaxos.cml` uses N=4 so that two phase 2 quorums of 2
+can be disjoint.
 
 ### Partial fit (a reduction that loses something)
 
