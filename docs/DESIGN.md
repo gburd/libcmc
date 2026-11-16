@@ -98,7 +98,8 @@ Every part is canonical: sorted where order carries no meaning, with
 unused entries zeroed.  The world is zero-padded to 8 bytes.  The bytes
 are the encoding, so two worlds are the same state exactly when their
 bytes are equal.  A core keeps its own state canonical (sorted sets,
-zeroed slots).  Calibration proves the HC core does.
+zeroed slots).  Calibration checks that the HC core does, at the
+instances it runs.
 
 **Direct mode** is for calibration only.  A core that ports a
 shared-register TLA+ spec sets `direct_actions`.  The world is then one
@@ -187,16 +188,16 @@ n²/2¹²⁹ is printed, as TLC does.
 | calibration (bridge) | the abstract-model checker against TLC on the *same* model: `cmc --emit-tla FILE.cml` must parse in TLC and give the identical verdict as `cmc --spec`, for safety and for liveness (`test/emit_gate.sh`, `make check-emit-tla`; needs nix) |
 
 There are two calibration tracks because there are two things to pin.
-The **engine** track (`calib/hc`) proves the in-process step-function
-search (`cmc --model`, `src/cmc.c`, the documented `libcmc(3)` path)
-agrees with TLC.  It leans on a hand-written `HummingConsensus.tla` kept
+The **engine** track (`calib/hc`) checks that the in-process
+step-function search (`cmc --model`, `src/cmc.c`, the documented
+`libcmc(3)` path) agrees with TLC, row by row, at the instances it runs.  It leans on a hand-written `HummingConsensus.tla` kept
 beside a hand-written HC core -- a duplicate that can drift -- but it
 calibrates a rich model: several HC variants (paper and code, CP and AP
 mode) against many named properties (`S1_Agreement`,
 `S2r_NoStaleRead`, `S3_NoLostAck`, `S3a_NoLostAckActive`,
 `W_AckAfterReconfig`), with exact distinct-state counts into the tens of
-millions.  The **bridge** track proves the abstract checker (`cmc
---spec`) agrees with TLC on *one* model, with no hand-kept twin: the
+millions.  The **bridge** track checks that the abstract checker (`cmc
+--spec`) agrees with TLC on each model, with no hand-kept twin: the
 same `.cml` is both checked by `cmc --spec` and emitted to TLC by `cmc
 --emit-tla` (and to Apalache by the same bridge).
 
@@ -210,8 +211,10 @@ the bridge would be a large undertaking.  More to the point, the
 in-process engine is a shipped, documented path in its own right, not a
 scaffold to be discarded, so its real-protocol calibration has standing
 value.  `calib/hc` therefore stays: retiring it would delete the only
-proof that the in-process search agrees with TLC on a real consensus
-protocol, and `hc.cml` does not replace it.
+evidence that the in-process search agrees with TLC on a real consensus
+protocol, and `hc.cml` does not replace it.  Neither track says
+anything about the process engine (`cmc --model-file`), which has its
+own search loop and is checked only by `test/proc_gate.sh`.
 
 ## Limits
 

@@ -1,9 +1,11 @@
 /*
  * paxos2.c: a SECOND, deliberately different implementation of
- * single-decree Paxos, to demonstrate the "one model, many
- * implementations" claim (Milestone C).  It is checked against the SAME
- * abstract model examples/spec/paxos.cml -- only its binding
- * (paxos2.bind) differs, because it observes differently.
+ * single-decree Paxos, meant to show one abstract model
+ * (examples/spec/paxos.cml) checking two implementations through
+ * different bindings (paxos2.bind).  WITHDRAWN as that demonstration: a
+ * node runs its own prepare and accept as a synchronous RPC to itself,
+ * which blocks, and its values 10 to 12 fall outside the binding's
+ * domain 1 .. 2 (docs/plans/soundness-remediation.md, 4.1).
  *
  * Where examples/paxos/paxos.c has 2 dedicated proposers and 3 dedicated
  * acceptors, this version has 3 SYMMETRIC nodes, each of which is both a
