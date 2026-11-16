@@ -1,0 +1,14 @@
+# A model file for test/proc/raceemit.c: two workers each add one to a
+# shared counter; once both are joined the counter must be 2.
+
+[target]
+nodes = 1
+
+[fields]
+done = 0
+count = 1
+
+[invariants]
+no_lost_update = "node[0].done == 0 or node[0].count == 2"
+# the main thread does join both workers, so a pass is not vacuous
+joined = "eventually node[0].done == 1"

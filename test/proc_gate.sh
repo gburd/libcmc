@@ -54,7 +54,7 @@ $CC -O1 -no-pie -w -DNEGFD -o "$B/proc/noprogress-stuck" "$HERE/test/proc/noprog
 $CC -O1 -no-pie -w -o "$B/proc/twothread" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/twothread-bug" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/twothread_join" "$HERE/test/proc/twothread_join.c" -lpthread || { echo "proc_gate: twothread_join.c does not build"; fail=1; }
-for f in racewake; do
+for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
@@ -267,37 +267,41 @@ expect "noprogress: a progressing loop holds"           0 "No error has been fou
 expect "noprogress: a stuck loop is not a vacuous pass"  2 "made no progress" $(run noprogress noprogress-stuck)
 
 echo "-- threads: per-thread scheduling, futex handoff"
-# per-thread scheduling (Tier 3 ask 8): a server node whose main thread
-# owns the socket and whose worker thread stores the result, handing the
-# job over a mutex + condition variable (clone/clone3 + futex underneath).
-# The search drives both threads: it accepts, delivers the request byte to
-# the main thread, which signals the worker (a FUTEX_WAKE), and the worker
-# runs -- serially, one thread at a time -- to store it.  A snapshot is
-# taken only once every thread is parked (main in recv, worker in futex),
-# the per-thread quiescence rule.  The correct build stores the byte it
-# was handed; the -DBUG build drops it across the handoff, which the
-# invariant catches.  Before threads were modelled the worker's futex hit
-# LULL_MS (or worse, a racy unmodelled pass).
-# A pass with threads is INCOMPLETE (soundness plan 3.8): one order of a
-# node's threads is run, not every order, so only a violation is final.
-expect "twothread: the handoff is not a pass (schedules)" 2 "thread schedules not explored" $(run twothread twothread)
+# per-thread scheduling (Tier 3 ask 8, soundness plan 3.8): a server node
+# whose main thread owns the socket and whose worker thread stores the
+# result, handing the job over a mutex + condition variable (clone/clone3
+# + futex underneath).  In a node with more than one thread each visible
+# operation (a futex call, a call on a checker-owned fd, a state-hook
+# write, a clone) ends the thread's step with its answer held, and the
+# search chooses which thread runs next ("run n1 t1"), one at a time.  A
+# new thread and its parent are both held at the clone's return.  The
+# correct build stores the byte it was handed; the -DBUG build drops it
+# across the handoff, which the invariant catches.
+expect "twothread: the handoff holds in every schedule"  0 "No error has been found" $(run twothread twothread)
 expect "twothread: a dropped handoff is caught"         1 "handoff is violated" $(run twothread twothread-bug)
-expect "twothread: the counterexample is the 2-action handoff" 1 "deliver n0->n1" $(run twothread twothread-bug)
-# the data genuinely crosses the handoff: a reachability check the racy
-# pre-thread engine could only satisfy by luck is now search-driven.
+expect "twothread: the counterexample names the delivery" 1 "deliver n0->n1" $(run twothread twothread-bug)
+expect "twothread: the counterexample names the worker's run" 1 "run n1 t1" $(run twothread twothread-bug)
+# the data crosses the handoff: reaching the stored value is search-driven
 printf '[target]\nnodes = 2\n[fields]\nrecvd = 0\nstored = 1\n[invariants]\nprocessed = "eventually node[1].stored == 120"\n' > "$OUT/tt-reach.model"
-expect "twothread: the worker reaches the stored value"  2 "thread schedules not explored" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread"
+expect "twothread: the worker reaches the stored value"  0 "No error has been found" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread"
 # a worker that exits after one job, joined by the main thread: exercises
 # the thread-exit slot-free and the pthread_join futex on the worker's
 # clear-tid word (woken by the checker's SYS_exit CLONE_CHILD_CLEARTID).
-expect "twothread_join: exit + join is not a pass"       2 "thread schedules not explored" $(run twothread_join twothread_join)
-# the order of two threads' system calls is a search choice (soundness
-# plan 3.8): a worker woken before the data it reads is stored runs
-# before the waker's next call in some schedule, which the search finds.
-# An engine that runs a woken thread only after the waker parks misses it.
+expect "twothread_join: exit + join holds"              0 "No error has been found" $(run twothread_join twothread_join)
+# Each race below is missed by an engine that runs one order of a node's
+# threads.  racewake: a worker woken before the data it reads is stored
+# runs before the waker's next call in some schedule.  raceemit: two
+# workers that read a shared counter, log it, and store it plus one,
+# with no lock, lose an update when one runs between the other's read
+# and store.  raceborn: a new thread's first send can come before its
+# parent's next one.  Each correct build holds in every schedule.
 expect "racewake: a wake before the store is caught"      1 "stored_first is violated" $(run racewake racewake-bug)
 expect "racewake: the woken worker runs first"            1 "run n0 t1" $(run racewake racewake-bug)
-expect "racewake: storing first holds (births not yet explored)" 2 "thread schedules not explored" $(run racewake racewake)
+expect "racewake: storing first holds"                    0 "No error has been found" $(run racewake racewake)
+expect "raceemit: an unlocked increment loses an update"  1 "no_lost_update is violated" $(run raceemit raceemit-bug)
+expect "raceemit: the locked increment holds"             0 "No error has been found" $(run raceemit raceemit)
+expect "raceborn: a new thread can send before its parent" 1 "a_first is violated" $(run raceborn raceborn-bug)
+expect "raceborn: sending before the clone holds"         0 "No error has been found" $(run raceborn raceborn)
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

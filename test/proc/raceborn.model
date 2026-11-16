@@ -1,0 +1,14 @@
+# A model file for test/proc/raceborn.c: node 1's main thread and a thread
+# it creates each send one byte to node 0; 'A' (65) must arrive first.
+
+[target]
+nodes = 2
+
+[fields]
+first = 0
+second = 1
+
+[invariants]
+a_first = "node[0].first == 0 or node[0].first == 65"
+# both bytes do arrive, so a pass is not vacuous
+both = "eventually node[0].second != 0"
