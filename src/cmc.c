@@ -1840,6 +1840,15 @@ set_violation(CmcResult *res, const CmcProp *p, const char *why)
 	snprintf(res->why, sizeof(res->why), "%s", why);
 }
 
+/* The engine error for a negative cmc_enabled() result, the same in every
+ * search and in replay. */
+static const char *
+enabled_error(int na)
+{
+	return na == -2 ? "determinism gate: action list differs on a repeat" :
+		"too many enabled actions (raise CMC_MAX_ACTIONS)";
+}
+
 /* ------------------------------------------------------------------ */
 /* BFS */
 
@@ -1901,9 +1910,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 
 		if (na < 0)
 		{
-			set_violation(res, NULL, na == -2 ?
-						  "determinism gate: action list differs on a repeat" :
-						  "too many enabled actions (raise CMC_MAX_ACTIONS)");
+			set_violation(res, NULL, enabled_error(na));
 			goto fail_at_s;
 		}
 		if (r->nqui && is_quiescent(r, s, acts, na) && (bad = check_qui(r, s, &why)))
@@ -2077,7 +2084,7 @@ run_dfs(CmcRun *r, CmcResult *res)
 
 		if (f->na < 0)
 		{
-			set_violation(res, NULL, "too many enabled actions");
+			set_violation(res, NULL, enabled_error(f->na));
 			res->trace_len = sp + 1;
 			goto copy_path;
 		}
@@ -2244,7 +2251,7 @@ run_simulate(CmcRun *r, CmcResult *res)
 
 			if (na < 0)
 			{
-				snprintf(why.msg, sizeof(why.msg), "too many enabled actions");
+				snprintf(why.msg, sizeof(why.msg), "%s", enabled_error(na));
 				bad = NULL;
 				goto viol;
 			}
@@ -2476,19 +2483,38 @@ run_replay(CmcRun *r, CmcResult *res)
 		goto out;
 	}
 	check_wit(r, s, 1);
-	for (int i = 0; i < n; i++)
+	for (int i = 0;; i++)
 	{
 		int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS),
-					ok = 0;
+					ok = 0,
+					rc;
 
-		/* a liveness counterexample: the fair suffix follows this state */
-		if (r->nev && check_ev(r, s, &why, &bad) != 0)
+		/* each state, the last included, is checked as BFS checks it */
+		if (na < 0)
+		{
+			set_violation(res, NULL, enabled_error(na));
+			res->trace_len = i + 1;
+			break;
+		}
+		if (r->nqui && is_quiescent(r, s, acts, na) && (bad = check_qui(r, s, &why)))
 		{
 			set_violation(res, bad, why.msg);
+			res->trace_len = i + 1;
+			break;
+		}
+		/* a liveness counterexample: the fair suffix follows this state */
+		if (r->nev && (rc = check_ev(r, s, &why, &bad)) != 0)
+		{
+			set_violation(res, rc < 0 ? NULL : bad, rc < 0 ? r->err : why.msg);
 			res->fair_from = i + 1;
 			res->trace_len = i + 1 + r->nfsuf;
 			path = realloc(path, sizeof(CmcAction) * (size_t) (res->trace_len + 1));
 			memcpy(path + i, r->fsuf, sizeof(CmcAction) * (size_t) r->nfsuf);
+			break;
+		}
+		if (i == n)
+		{
+			res->trace_len = n + 1;
 			break;
 		}
 
@@ -2526,21 +2552,6 @@ run_replay(CmcRun *r, CmcResult *res)
 			break;
 		}
 		check_wit(r, s, i + 2);
-	}
-	if (res->verdict == CMC_PASS)
-	{
-		int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
-
-		/* a quiescence violation shows only at the end of the trace */
-		if (r->nqui && na >= 0 && is_quiescent(r, s, acts, na) &&
-			(bad = check_qui(r, s, &why)))
-			set_violation(res, bad, why.msg);
-		else if (r->nev && check_ev(r, s, &why, &bad) != 0)
-		{
-			set_violation(res, bad, why.msg);
-			res->fair_from = n + 1;
-		}
-		res->trace_len = n + 1;
 	}
 	res->trace = path;
 	path = NULL;

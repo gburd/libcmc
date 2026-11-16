@@ -1318,6 +1318,67 @@ test_p23_property_cap(void)
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 }
 
+/* 2.4: a direct core with one action from its initial state, after which
+ * its action list overflows (cmc_enabled() returns -1) */
+static int
+cap_actions(const void *cfg, const void *sv, CmcAction *a, int max)
+{
+	(void) cfg;
+	if (((const uint8_t *) sv)[0] != 0 || max < 1)
+		return -1;
+	a[0] = 1;
+	return 1;
+}
+
+static void
+cap_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	(void) ev;
+	out->n = 0;
+	((uint8_t *) sv)[0] = 1;
+}
+
+static const CmcCore cap_core = {
+	.name = "cap", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = cap_step,
+	.direct_actions = cap_actions,
+};
+static const CmcModel cap_model = {"cap", &cap_core, nd_props, 1, 0};
+
+/* 2.4: the replay of an engine error at the last state gives BFS's verdict */
+static void
+test_p24_replay_enabled_error(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	CmcResult	res;
+	char		path[512],
+				why[sizeof(res.why)];
+	int			len;
+
+	snprintf(path, sizeof(path), "%s/p24.replay",
+			 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
+	cmc_options_default(&o);
+	r = mkc(&cap_model, CMC_BFS, "", NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "cmc:engine"));
+	CHECK(res.trace_len == 2);
+	CHECK(cmc_write_replay(r, path, res.trace, res.trace_len - 1) == 0);
+	snprintf(why, sizeof(why), "%s", res.why);
+	len = res.trace_len;
+	cmc_result_free(&res);
+	cmc_run_free(r);
+	o.replay_in = path;
+	r = mkc(&cap_model, CMC_REPLAY, "", NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "cmc:engine"));
+	CHECK(strcmp(res.why, why) == 0 && res.trace_len == len);
+	cmc_result_free(&res);
+	cmc_run_free(r);
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1354,6 +1415,7 @@ main(void)
 	test_p21_crash_clears_self_channel();
 	test_p22_simulate_checks_last_state();
 	test_p23_property_cap();
+	test_p24_replay_enabled_error();
 	test_version();
 	if (failures)
 	{
