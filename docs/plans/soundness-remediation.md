@@ -117,6 +117,22 @@ than checked, since a permuted successor folds into a self-loop.
   forever, or is documented as a fixed-priority bounded schedule whose
   liveness verdict is not a fairness verdict.
 
+Phase 2 status: done on `wip/soundness-phase2`.  Each item has a test
+in `test/test_cmc.c` that fails on `1b88c86`:
+`test_p21_crash_clears_self_channel` (a crash drops the messages a node
+sent itself, in FIFO and bag), `test_p22_simulate_checks_last_state`
+(a walk checks its last state for quiescence and eventuality),
+`test_p23_property_cap` (a 65th property of one kind, or one of no known
+kind, is refused by `cmc_run_new()`), `test_p24_replay_enabled_error`
+(replay reports BFS's `cmc:engine` verdict for an action-list overflow
+at its last state) and `test_p25_fair_schedule_fires_timers` (an armed
+timer, and a message on another channel, are not starved by a node that
+messages itself forever).  2.5 is fixed, not only documented: a drain
+runs in generations and ends when it returns to a world it started a
+generation from, so the timers that follow it fire.  The verdict is
+still about that one schedule, not every fair one, and `DESIGN.md`,
+`cmc(1)` and `libcmc(3)` say so.  The calibration rows did not move.
+
 ## Phase 3: process engine (`src/cmc_proc.c`, `src/cmc_preload.c`)
 
 - **3.1 Exact state equality.**  The visited set stores the full world
