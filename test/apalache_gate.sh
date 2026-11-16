@@ -60,6 +60,14 @@ OUT="$SCRATCH/apalache-gate"
 mkdir -p "$OUT"
 fail=0
 
+# A missing tool is a SKIP (exit 0) for a developer, but release evidence
+# must not be a skip: with CMC_REQUIRE_TOOLS=1 a skip fails the gate.
+skip() {
+	echo "apalache_gate: SKIP ($1)"
+	[ "${CMC_REQUIRE_TOOLS:-0}" = 1 ] && { echo "apalache_gate: FAILED (CMC_REQUIRE_TOOLS=1 forbids a skip)"; exit 1; }
+	exit 0
+}
+
 # resolve the apalache-mc launcher
 MC=${APALACHE_MC:-}
 if [ -z "$MC" ]; then
@@ -68,13 +76,13 @@ if [ -z "$MC" ]; then
 		echo "-- fetching Apalache $VER (optional tool; cached in $SCRATCH)"
 		url="https://github.com/apalache-mc/apalache/releases/download/v$VER/apalache-$VER.tgz"
 		if ! curl -fsSL -o "$SCRATCH/apalache-$VER.tgz" "$url"; then
-			echo "apalache_gate: SKIP (could not fetch $url; set APALACHE_MC to run)"; exit 0
+			skip "could not fetch $url; set APALACHE_MC to run"
 		fi
-		tar xzf "$SCRATCH/apalache-$VER.tgz" -C "$SCRATCH" || { echo "apalache_gate: SKIP (tarball did not unpack)"; exit 0; }
+		tar xzf "$SCRATCH/apalache-$VER.tgz" -C "$SCRATCH" || skip "tarball did not unpack"
 	fi
 	MC="$cand"
 fi
-[ -x "$MC" ] || { echo "apalache_gate: SKIP (no apalache-mc at $MC; set APALACHE_MC)"; exit 0; }
+[ -x "$MC" ] || skip "no apalache-mc at $MC; set APALACHE_MC"
 
 # a Java 21+ runner: use the host java if new enough, else nix jdk21
 java_ok() { command -v java >/dev/null 2>&1 && java -version 2>&1 | grep -qE 'version "(2[1-9]|[3-9][0-9])'; }
@@ -83,7 +91,7 @@ if java_ok; then
 elif command -v nix >/dev/null 2>&1; then
 	RUN() { nix shell nixpkgs#jdk21 -c sh -c 'export JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java)))); exec "$@"' sh "$@"; }
 else
-	echo "apalache_gate: SKIP (needs Java 21+ or nix for jdk21)"; exit 0
+	skip "needs Java 21+ or nix for jdk21"
 fi
 
 # row: DIR | CML | MODULE | INV | want | define

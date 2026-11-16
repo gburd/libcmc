@@ -3,7 +3,8 @@ name: Release
 # Pushing a tag vX.Y.Z publishes a GitHub release.  Each job needs the one
 # before it, so nothing is published unless all of them pass:
 #   ci          every job in ci.yml at the tagged commit, the full
-#               calibration against TLC included
+#               calibration against TLC and the TLA+ bridge (TLC and
+#               Apalache, no skip allowed) included
 #   verify-tag  the tag is v followed by CMC_VERSION in include/cmc.h, and
 #               CHANGELOG.md has a section for that version
 #   build       the source tarball (git archive of the tag) and the man

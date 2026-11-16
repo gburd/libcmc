@@ -93,3 +93,23 @@ jobs:
         run: make check-calibration
       - name: make check-hc-bugs
         run: make check-hc-bugs
+
+  bridge:
+    # The TLA+ bridge: every .cml model's emitted module through TLC and
+    # through Apalache, with the verdict cmc --spec gives.  On the same
+    # triggers as the calibration, so a tag cannot ship without it, and a
+    # missing tool fails the job instead of skipping.
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CMC_REQUIRE_TOOLS: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: make check-emit-tla
+        run: nix develop --command make check-emit-tla
+      - name: make check-emit-apalache
+        run: nix develop --command make check-emit-apalache

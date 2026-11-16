@@ -57,6 +57,10 @@ turning one of them into a red test in the repository.
   fail.
 - **0.3 Release path.**  `check-emit-tla` and `check-emit-apalache` run
   in CI before a tag, or the docs stop citing them as release evidence.
+  Status: done.  A `bridge` job in `.github/workflows/ci.yml` runs both
+  on the calibration's triggers, which the release workflow calls on a
+  tag, with `CMC_REQUIRE_TOOLS=1` so a missing tool fails instead of
+  skipping.
 - **0.4 A qualification matrix** (`docs/qualification.md`): for each
   engine, each supported syscall and each property kind, whether it is
   exact, approximate or refused, and the gate that checks it.  This
