@@ -95,19 +95,21 @@ cmc --model-file examples/hc/hc.model --binary ./hc
 
 ```
 Model checking completed. No error has been found.
-15202 states generated, 6393 distinct states found, 0 states left on queue.
+6026 states generated, 2694 distinct states found, 0 states left on queue.
 ```
 
-cmc runs all three participants and tries every order of their
-iterations and every pattern of a dropped message (an asymmetric network
-partition), and finds that no two ever adopt different configurations at
-one epoch -- **agreement holds even under a partition**, because adoption
-needs a quorum majority and quorums intersect.  That is a positive
-result for this program at this instance (three participants, the
-budgets given): no schedule within them breaks agreement.  It is not a
-proof for other sizes or budgets.
+**This pass is vacuous.**  In every state cmc reaches, no participant
+has adopted any projection, so agreement holds trivially; an invariant
+that no participant ever adopts holds too.  A participant's iteration
+dials its peers while they are doing the same, and each one waits for a
+reply from a peer that is itself waiting outside `accept()`.  Up to
+1.3.0 the engine kept one channel per node pair and handed those waiting
+participants each other's requests as replies, which is how the
+iterations ever finished; with connections modelled one by one
+(soundness plan 3.7) they do not.  The example needs to serve requests
+while it iterates before it shows anything (plan 4.8).
 
-## The planted bug
+## The planted bug (withdrawn)
 
 Built with `-DBUG`, a participant runs in eventual-consistency ("AP")
 mode: it adopts a projection it sees as unanimous **without** requiring a
@@ -123,17 +125,18 @@ cmc --model-file examples/hc/hc.model --binary ./hc-bug \
     --timeouts 6 --drops 1 --simulate --seed 3
 ```
 
-```
-Error: Invariant agreement is violated.
-```
-
-(The violation needs a long partition schedule, so simulation reaches it
-faster than the exhaustive search; a fixed seed makes it reproducible.)
+Up to 1.3.0 this run reported the violation, but only through the
+cross-connection replies described above, so it was not a Linux run.
+With connections modelled, no participant adopts and the bug is out of
+reach; the gate row is withdrawn until the example is reworked.
 
 ## What this shows
 
-HC is a general agreement protocol, and its agreement rule -- adopt only
-a projection a quorum agrees on, over write-once stores -- is executed,
-not transcribed.  The correct build keeps agreement even under a network
-partition; the `-DBUG` build relaxes the quorum requirement and loses it,
-and cmc prints a schedule that does.
+As it stands, nothing: the program never reaches the adoption rule it
+was written to check.  The finding is itself the point of the soundness
+work.  A checker that answers a read with bytes from the wrong
+connection can make a deadlocked program look like a working protocol,
+and a pass over such a program says only that no state was bad, not
+that any interesting state was reached.  Pair a safety invariant with an
+`eventually` property the program must reach, as `test/proc_gate.sh`
+does for its fixtures.

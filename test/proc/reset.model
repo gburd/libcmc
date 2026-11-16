@@ -6,8 +6,9 @@
 # never see the second value (2) without the first (1).
 #
 # A drop models a connection RESET, not a lost byte: dropping discards
-# the channel and both ends see EOF, so after a drop node 1 reads nothing
-# more -- it never receives 2 ahead of 1.  `never_b_first` therefore
+# the connection's queues and both ends see ECONNRESET, so after a drop
+# node 1 reads nothing more -- it never receives 2 ahead of 1.
+# `never_b_first` therefore
 # holds even with drops = 1.  Were a drop a silent mid-stream byte loss
 # (losing the head, value 1, while value 2 stayed queued), node 1 would
 # read 2 first and the checker would report a counterexample TCP can

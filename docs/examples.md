@@ -22,12 +22,15 @@ in the source tree, and `make check` builds and checks each one.
   domain (remediation plan, 4.1).
 - **[Raft leader election](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/raft)**
   -- three nodes; Election Safety (at most one leader per term), with and
-  without a crash.  Reference: Ongaro's `raft.tla`.
+  without a crash.  Reference: Ongaro's `raft.tla`.  Its planted
+  double-vote bug was caught only through a channel model that mixed
+  connections, and is withdrawn (remediation plan, 3.7 and 4.7).
 - **[Humming Consensus](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/hc)**
   -- a generic agreement protocol (like Paxos/Raft/ZAB): three
   participants agree on a configuration per epoch over write-once
-  register stores; agreement holds even under a network partition.
-  Reference: Fritchie, PaPoC 2016.
+  register stores.  Its pass is vacuous: with connections modelled one
+  by one, no participant ever adopts a projection (remediation plan, 3.7
+  and 4.8).  Reference: Fritchie, PaPoC 2016.
 - **[ZooKeeper Atomic Broadcast](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/zab)**
   -- a leader and two followers; a committed transaction is never lost.
   Reference: Apache ZooKeeper's `Zab.tla`.

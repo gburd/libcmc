@@ -13,13 +13,22 @@
  *   semaphore  an EFD_SEMAPHORE eventfd           (refused: exit 3)
  *   longrec    a 65-byte state record, past the 64 stored (refused)
  *   partrec    a state record cut short before it parks  (refused)
+ *   refused    node 1 exits at once; node 0's later connect() to it is
+ *              refused (ECONNREFUSED), so node 0 records 2, never 1
+ *   rstwrite   node 1 closes the connection with node 0's second byte
+ *              unread, an RST: node 0's read gets ECONNRESET, its write
+ *              EPIPE, and the default SIGPIPE ends it before it records
+ *   rstignore  the same with SIGPIPE ignored: node 0 records 2
+ *   rsthandler the same with a SIGPIPE handler (refused)
  *
  *   cc -O1 -no-pie -o unmodelled test/proc/unmodelled.c
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <errno.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -39,6 +48,12 @@ addr(int port)
 	a.sin_port = htons(port);
 	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	return a;
+}
+
+static void
+on_pipe(int sig)
+{
+	(void) sig;
 }
 
 static void
@@ -85,6 +100,58 @@ main(int argc, char **argv)
 	if (!strcmp(mode, "semaphore"))
 	{
 		(void) eventfd(2, EFD_SEMAPHORE);
+		return 0;
+	}
+	if (!strcmp(mode, "refused"))
+	{
+		/* node 0 waits for one timeout so node 1 has exited, then dials */
+		int id = atoi(argv[1]);
+		if (id == 1)
+			return 0;
+		int ls = socket(AF_INET, SOCK_STREAM, 0), s = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in me = addr(BASE + 0), a = addr(BASE + 1);
+
+		bind(ls, (struct sockaddr *) &me, sizeof me);
+		listen(ls, 8);
+		(void) accept(ls, NULL, NULL);	/* the timer fires */
+		emit(connect(s, (struct sockaddr *) &a, sizeof a) == 0 ? 1 : 2);
+		return 0;
+	}
+	if (!strncmp(mode, "rst", 3))
+	{
+		int id = atoi(argv[1]);
+		struct sockaddr_in a = addr(BASE + 1);
+
+		if (id == 1)
+		{
+			/* take the connection and close it with node 0's byte unread */
+			int ls = socket(AF_INET, SOCK_STREAM, 0);
+
+			bind(ls, (struct sockaddr *) &a, sizeof a);
+			listen(ls, 8);
+			int c = accept(ls, NULL, NULL);
+			unsigned char b;
+
+			(void) !read(c, &b, 1);
+			close(c);
+			return 0;
+		}
+		if (!strcmp(mode, "rstignore"))
+			signal(SIGPIPE, SIG_IGN);
+		else if (!strcmp(mode, "rsthandler"))
+			signal(SIGPIPE, on_pipe);
+		int s = socket(AF_INET, SOCK_STREAM, 0);
+		unsigned char b;
+
+		if (connect(s, (struct sockaddr *) &a, sizeof a) != 0)
+			return 0;
+		(void) !write(s, "x", 1);
+		(void) !write(s, "y", 1);	/* left unread: node 1's close is an RST */
+		/* the RST arrives as this read's ECONNRESET, then writes fail */
+		int e0 = read(s, &b, 1) < 0 ? errno : 0;
+		int e1 = write(s, "z", 1) < 0 ? errno : 0;
+
+		emit(e0 == ECONNRESET && e1 == EPIPE ? 2 : 1);
 		return 0;
 	}
 	if (!strcmp(mode, "longrec") || !strcmp(mode, "partrec"))

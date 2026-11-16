@@ -137,7 +137,10 @@ takes a connection waiting at it.
 A node reading a connection gets the oldest message on it; each
 connection is FIFO, as TCP is.
 .It EOF
-The peer is gone and the connection is drained: the read returns 0.
+The peer's host crashed and the connection is drained: the read returns
+0, standing for a timeout or keepalive that noticed the loss.
+A peer that closed its end sends a FIN instead, which DELIVER hands over
+as the read's 0.
 .It TIMEOUT
 Timeout budget is left: a node waiting for input has its timer fire.
 A node reading a connection gets the one byte
@@ -153,7 +156,9 @@ detects that it has waited long enough -- an election timeout.
 .It CRASH
 Crash budget is left: a live node dies.
 .It DROP
-Drop budget is left: the oldest message on a connection is lost.
+Drop budget is left: a connection carrying bytes is reset.
+Its queues are discarded and each end's next call fails with
+.Er ECONNRESET .
 .It RESTART
 Restart budget is left and a node has crashed: it is relaunched as a
 fresh process.
@@ -163,7 +168,8 @@ descriptor 193 returns what it had made durable before the crash
 and a server that reads its own log on startup recovers.
 The new process starts with no connections and re-dials and re-listens
 as its code does; a peer that still held a connection to the crashed
-process reads EOF on it.
+process keeps it, and its next call on it fails with
+.Er ECONNRESET .
 .It WAKE
 A node parked in
 .Fn poll
@@ -399,9 +405,24 @@ A target must be built
 .Fl no-pie ,
 use the port convention, and do its I/O through the calls above; a node
 that blocks in anything else for 10 seconds is an error.
-A read gets at most one write, a connect never fails, and
+A read gets at most one write.
+Each TCP connection has its own queue in each direction.
 .Fn close
-does not notify the peer.
+sends the peer a FIN, or an RST if bytes were left unread; a reset
+connection reports one
+.Er ECONNRESET ,
+then reads return 0 and writes fail with
+.Er EPIPE
+and the
+.Dv SIGPIPE
+the writer's disposition decides (a handler, or the signal blocked, is
+refused).
+A
+.Fn connect
+to a node that is down is refused; one to a live node that has not yet
+called
+.Fn listen
+waits rather than failing.
 .Pp
 In-process cores: at most 8 nodes, 32 bytes per message or persist
 record, 16 effects per step, 2048 possible actions per state, 16 timers

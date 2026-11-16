@@ -315,9 +315,11 @@ Client requests each node may receive.
 Default 1.
 .It Fl -drops Ar n
 Messages the network may lose.
-In the FIFO network a drop resets the connection: every queued message
-on it is discarded and both ends read EOF, the way a TCP reset or a
-partition appears, never a byte lost from the middle of a live stream.
+In the FIFO network a drop resets one connection: every queued message
+on it is discarded and each end's next call fails with
+.Er ECONNRESET ,
+the way a TCP reset or a partition appears, never a byte lost from the
+middle of a live stream.
 With
 .Fl -model-file
 this is the only drop semantics; the actor engine's

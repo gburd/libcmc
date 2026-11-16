@@ -62,7 +62,7 @@ cmc --model-file examples/raft/raft.model --binary ./raft
 
 ```
 Model checking completed. No error has been found.
-524 states generated, 361 distinct states found, 0 states left on queue.
+249 states generated, 182 distinct states found, 0 states left on queue.
 ```
 
 Two nodes may time out and stand for election; cmc tries every
@@ -78,33 +78,31 @@ cmc --model-file examples/raft/raft.model --binary ./raft --crashes 1
 
 ```
 Model checking completed. No error has been found.
-3670 states generated, 2170 distinct states found, 0 states left on queue.
+1706 states generated, 1117 distinct states found, 0 states left on queue.
 ```
 
 (about six seconds, single-threaded).
 
-## The planted bug
+## The planted bug (withdrawn)
 
 Built with `-DBUG`, a node grants a vote without recording whom it voted
 for, so it can vote for two different candidates in the same term.  Both
-candidates then reach a majority and become leader in that term -- the
-classic Raft election bug.
+candidates could then reach a majority and become leader in that term,
+the classic Raft election bug.
 
-```sh
-cc -no-pie -DBUG -o raft-bug examples/raft/raft.c
-cmc --model-file examples/raft/raft.model --binary ./raft-bug
-```
+Up to 1.3.0 cmc reported this violation, but the counterexample is not
+a Linux run.  The engine then kept one channel per node pair, so a
+candidate waiting on the connection it dialled was handed the other
+candidate's RequestVote, sent on a different connection, as its reply.
+With connections modelled one by one (soundness plan 3.7) two candidates
+deadlock instead: each waits for a reply from a node that is itself
+waiting outside `accept()`, so neither ever counts the second vote, and
+the bug is not reachable with this program.  The gate row is withdrawn
+until raft.c serves RPCs while it campaigns (plan 4.7).
 
-```
-Error: Invariant election_safety is violated.
-Error: The behavior up to this point is (10 actions):
-    1. timeout n0
-    ...
-  node states: node[0]=2,1,1 node[1]=0,1,0 node[2]=2,1,3
-```
-
-Two nodes are leader in term 1, because the voter granted both.
-Simulation finds it within a couple of random walks too.
+The pass above is the same kind of result: it holds for the schedules
+this program can reach, and in all of them at most one candidate
+collects its votes.
 
 ## What this shows
 

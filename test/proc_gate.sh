@@ -28,7 +28,7 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded unmodelled; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded unmodelled crossrpc; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 for f in repl elect lease durlog quorum pollloop; do
@@ -118,18 +118,24 @@ expect "mono: C2 passes the by-one impl"          0 "No error has been found" $(
 expect "mono: C2 catches the by-two step"         1 "no matching abstract action" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps
 expect "C2 refuses a partly-bound spec"           3 "needs every spec variable bound" $(runx "$HERE/examples/spec/paxos-refine.model" paxos) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --refine-steps
 expect "raft: election safety holds"        0 "No error has been found" $(runx "$HERE/examples/raft/raft.model" raft)
-expect "raft: double vote -> two leaders"   1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug)
-expect "raft: --simulate finds it"          1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug) --simulate --seed 1 --walks 2000
+# The raft and hc planted bugs were caught only through node-pair
+# channels, which handed a node its peer's request as the reply it was
+# waiting for.  With connections modelled, two concurrent raft candidates
+# deadlock (each waits for the other's reply outside accept()), and no hc
+# participant ever adopts a projection.  Those rows are withdrawn until
+# the examples are reworked (soundness plan 4.7, 4.8).
 expect "raftlog: no committed entry is lost" 0 "No error has been found" $(runx "$HERE/examples/raft/raftlog.model" raftlog)
 expect "raftlog: early-ack loses a committed entry" 1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug)
 expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug) --simulate --seed 1 --walks 2000
 expect "hc: agreement holds, even under a partition"   0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
-expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 6 --drops 1 --simulate --seed 3 --walks 5000
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)
 expect "zab: --simulate finds it"           1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug) --simulate --seed 1 --walks 2000
 expect "idle: time passing is not merged"  1 "never_late is violated" $(run idle idle)
 expect "fifo: a connection is in order"    0 "No error has been found" $(run fifo fifo)
+# two connections between one pair of nodes (soundness plan 3.7): each
+# carries its own bytes, so a reply is never the peer's request
+expect "crossrpc: connections never share bytes" 0 "No error has been found" $(run crossrpc crossrpc)
 # drop-as-reset (ask 7): a drop resets the connection, it does not vanish
 # one byte from a live stream.  With drops = 1 node 1 still never sees the
 # second value ahead of the first -- a reset gives EOF, not reordering.
@@ -308,10 +314,13 @@ CMC_PRELOAD=$OUT/no-such-preload.so expect "a missing preload is an error" 3 "pr
 # constructs the engine answered wrongly (soundness plan 3.4, 3.6): a
 # write from an unmapped buffer gets EFAULT, not a zero-filled success,
 # and a finite poll timeout, EPOLLET and EFD_SEMAPHORE are refused
-for m in none badptr pollto epollet semaphore longrec partrec; do
+for m in none badptr pollto epollet semaphore longrec partrec refused rstwrite rstignore rsthandler; do
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nuntouched = "node[0][0] != 1"\n' "$B/proc/unmodelled" "$m" > "$OUT/u-$m.model"
 done
 printf 'faulted = "eventually node[0][0] == 2"\n' >> "$OUT/u-badptr.model"
+printf 'refused = "eventually node[0][0] == 2"\n[environment]\ntimeouts = 1\n' >> "$OUT/u-refused.model"
+printf 'killed = "node[0][0] != 2"\n' >> "$OUT/u-rstwrite.model"
+printf 'epiped = "eventually node[0][0] == 2"\n' >> "$OUT/u-rstignore.model"
 expect "unmodelled: a bad write buffer gets EFAULT"      0 "No error has been found" --model-file "$OUT/u-badptr.model"
 # 3.9: a root that enables no action explored nothing, so a safety-only
 # model of it is not a pass
@@ -321,6 +330,13 @@ expect "unmodelled: EPOLLET is refused"                  3 "are not modelled" --
 expect "unmodelled: EFD_SEMAPHORE is refused"            3 "EFD_SEMAPHORE" --model-file "$OUT/u-semaphore.model"
 # 3.3: a state record the checker cannot store whole is an error, never
 # a truncated or dropped state
+# 3.7: a connect() to a node that is gone is refused, as on Linux
+expect "connect: a dead node refuses the connection"      0 "No error has been found" --model-file "$OUT/u-refused.model"
+# a close with bytes unread is an RST: the peer's read gets ECONNRESET and
+# its write EPIPE, and SIGPIPE does what the node's disposition says
+expect "rst: the default SIGPIPE ends the writer"          0 "No error has been found" --model-file "$OUT/u-rstwrite.model"
+expect "rst: an ignored SIGPIPE leaves EPIPE"              0 "No error has been found" --model-file "$OUT/u-rstignore.model"
+expect "rst: a SIGPIPE handler is refused"                 3 "SIGPIPE handler" --model-file "$OUT/u-rsthandler.model"
 expect "unmodelled: an over-long state record is refused" 3 "longer than the 64" --model-file "$OUT/u-longrec.model"
 expect "unmodelled: a partial state record is refused"    3 "partial volatile state record" --model-file "$OUT/u-partrec.model"
 

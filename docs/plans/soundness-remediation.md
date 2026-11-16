@@ -164,6 +164,19 @@ than checked, since a permuted successor folds into a self-loop.
   listening returns success and waits forever; Linux gives
   `ECONNREFUSED`, so the refusal path of a retrying client is never
   explored until this is modelled.
+
+  Status: done.  Each connection has its own queue in each direction,
+  `close()` sends a FIN or (with bytes unread) an RST, a reset leaves
+  one `ECONNRESET` at each live end and then `EPIPE` with `SIGPIPE`
+  decided by the writer's disposition, a crashed host's ends go dead
+  without a FIN, a stale descriptor is kept until its owner closes it,
+  and `connect()` to a node that is down is refused.  A live node that
+  has not yet called `listen()` still accepts the dial (a shortcut,
+  stated in cmc(7)).  `test/proc/crossrpc.c` gave a false violation on
+  `b2eab84`, as did the refused, rstwrite and rstignore modes of
+  `test/proc/unmodelled.c`.  The fix exposed two examples whose
+  results came from the old model: raft's planted bug and all of hc
+  (4.7, 4.8).
 - **3.8 Threads.**  Until the scheduler explores every order in which
   runnable threads may proceed at the modelled preemption points (a
   futex wake, a thread birth, each intercepted syscall), a run in which a
@@ -206,6 +219,17 @@ demonstration it is.
   guarded counter it is.
 - **4.6 Single-decree Paxos.**  Acceptors vote in more than one ballot,
   and safety rests on phase 1 value selection, not on write-once votes.
+- **4.7 Raft election.**  raft.c campaigns by blocking on each peer's
+  reply while it is outside `accept()`, so two concurrent candidates
+  deadlock.  Up to 1.3.0 the double-vote bug was reported only because
+  node-pair channels handed a candidate its rival's RequestVote as a
+  reply.  Serve RPCs while campaigning (a poll loop, or a thread), then
+  restore the planted-bug row.
+- **4.8 Humming Consensus.**  hc.c has the same shape, and with
+  connections modelled no participant ever adopts a projection, so its
+  agreement pass is vacuous and its AP-mode bug unreachable.  Rework it
+  to serve while it iterates, and add an `eventually` property that some
+  participant adopts.
 
 ## Phase 5: qualification
 

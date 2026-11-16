@@ -82,14 +82,16 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   This is how a heartbeat timeout or a lease expiry happens.
 - `crashes`: a node dies at any quiescent point.  Its state becomes what
   it last reported on descriptor 193 (durable); what it reported on
-  descriptor 3 is lost, and its peers read EOF once their connections
-  to it are drained.
+  descriptor 3 is lost.  A crashed host sends no FIN, so a peer reading
+  a connection to it may notice the loss (it reads EOF) once the
+  connection is drained, or keep waiting.
 - `drops`: a drop resets a connection.  TCP never loses one byte from a
   live stream, so a drop does not vanish a message from the middle of a
   connection; it fails the connection.  Every queued message on it, in
-  both directions, is discarded, and both ends read EOF from then on
-  (as they would on `ECONNRESET`).  This models a network partition or a
-  reset peer, the failures a TCP program must survive.
+  both directions, is discarded, and each end's next read or write
+  fails with `ECONNRESET`; after that reads return 0 and writes fail
+  with `EPIPE` (and `SIGPIPE`), as Linux does.  This models a network
+  partition or a reset peer, the failures a TCP program must survive.
 - `restarts`: a crashed node is relaunched as a fresh process.  The
   surviving durable record (what it last reported on descriptor 193) is
   handed back to it: the new process's first read of descriptor 193
@@ -97,7 +99,8 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   its own log on startup recovers; a fresh process that has never
   crashed reads EOF there.  The restarted process starts with no
   connections and re-dials and re-listens as its code does; a peer that
-  still held a connection to the crashed process sees EOF on it.  A
+  still held a connection to the crashed process keeps its descriptor,
+  and its next call on it fails with `ECONNRESET`.  A
   restart is offered only for a node that has crashed, and only while
   the budget is left.  With no restart budget a crash is final (the node
   does not come back), exactly as before this key existed.
