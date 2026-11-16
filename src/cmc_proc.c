@@ -62,6 +62,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/ioctl.h>
+#include <sys/personality.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
@@ -812,6 +813,16 @@ launch(Node *nd)
 			char fdbuf[8];
 			snprintf(fdbuf, sizeof fdbuf, "%d", 3); setenv("CMC_STATE_FD", fdbuf, 1);
 			snprintf(fdbuf, sizeof fdbuf, "%d", DURABLE_FD); setenv("CMC_DURABLE_FD", fdbuf, 1);
+		}
+		/* No address randomisation: a thread's stack, its pthread_join
+		 * word and every mmap land at the same address on every replay,
+		 * so the world encoding can name a futex word or an epoll token by
+		 * its address and still dedup across replays. */
+		if (personality(ADDR_NO_RANDOMIZE) == -1)
+		{
+			static const char msg[] = "cmc: cannot disable address randomisation for a node\n";
+			(void) !write(2, msg, sizeof msg - 1);
+			_exit(2);
 		}
 		int lf = install_filter(); if (lf < 0) _exit(2);
 		char cb[CMSG_SPACE(sizeof(int))] = {0}; char d = 'L';
@@ -1693,10 +1704,15 @@ static void fp128(const uint8_t*p,size_t n,uint64_t fp[2]){
 	fp[0]=fmix64(h1);fp[1]=fmix64(h2+n);
 }
 
-/* the seen set: an open-addressing table of 128-bit fingerprints that
- * grows at half load, so the search never forgets a state */
-typedef struct { uint64_t a, b; } FP;
+/* The seen set: an open-addressing table, keyed by the 128-bit
+ * fingerprint, whose entries also hold the full world encoding in a
+ * byte pool.  Two worlds are the same only if their encodings are equal
+ * byte for byte; a fingerprint match with different bytes is a collision
+ * and both are kept.  The table grows at half load, so the search never
+ * forgets a state. */
+typedef struct { uint64_t a, b; size_t off, len; } FP;
 static FP *seen; static size_t seen_cap, nseen;
+static unsigned char *spool; static size_t spool_cap, spool_used;
 
 static void
 seen_put(FP f)
@@ -1706,10 +1722,12 @@ seen_put(FP f)
 	seen[i] = f;
 }
 
-/* 1 if the fingerprint is new (and records it), 0 if seen before */
+/* 1 if the world (fingerprint fp, encoding w[0..n)) is new, and records
+ * it; 0 if this exact world was seen before */
 static int
-mark(uint64_t a, uint64_t b)
+mark(const uint64_t fp[2], const unsigned char *w, size_t n)
 {
+	uint64_t a = fp[0], b = fp[1];
 	if (!(a | b)) a = 1;				/* (0,0) marks an empty slot */
 	if (2 * (nseen + 1) > seen_cap)
 	{
@@ -1720,39 +1738,54 @@ mark(uint64_t a, uint64_t b)
 		for (size_t i = 0; i < oc; i++) if (old[i].a | old[i].b) seen_put(old[i]);
 		free(old);
 	}
-	for (size_t i = a & (seen_cap - 1);; i = (i + 1) & (seen_cap - 1))
+	size_t i;
+	for (i = a & (seen_cap - 1);; i = (i + 1) & (seen_cap - 1))
 	{
-		if (!(seen[i].a | seen[i].b)) { seen[i].a = a; seen[i].b = b; nseen++; return 1; }
-		if (seen[i].a == a && seen[i].b == b) return 0;
+		if (!(seen[i].a | seen[i].b)) break;
+		if (seen[i].a == a && seen[i].b == b && seen[i].len == n && !memcmp(spool + seen[i].off, w, n)) return 0;
 	}
+	if (spool_used + n > spool_cap)
+	{
+		while (spool_used + n > spool_cap) spool_cap = spool_cap ? 2 * spool_cap : (size_t) 1 << 20;
+		spool = realloc(spool, spool_cap);
+		if (!spool) die(1, "out of memory for the seen set at %zu states", nseen);
+	}
+	memcpy(spool + spool_used, w, n);
+	seen[i].a = a; seen[i].b = b; seen[i].off = spool_used; seen[i].len = n;
+	spool_used += n; nseen++;
+	return 1;
+}
+
+/* the semantic class of fd on node nd, as two bytes (class, which), so
+ * the encoding never depends on a raw virtual fd number: a connection by
+ * its peer, an eventfd by its slot, the listener, an ignored negative fd,
+ * or a kernel fd the model does not track (by its number, which is
+ * deterministic).  Writes 2 bytes to r. */
+static void
+fd_class(const Node *nd, int fd, unsigned char *r)
+{
+	int cs = cfd_slot((Node *) nd, fd), es = efd_slot((Node *) nd, fd);
+	if (cs >= 0) { r[0] = 1; r[1] = (unsigned char) (nd->cpeer[cs] + 4); }
+	else if (es >= 0) { r[0] = 2; r[1] = (unsigned char) es; }
+	else if (fd >= 0 && fd == nd->listener_fd) { r[0] = 3; r[1] = 0; }
+	else if (fd < 0) { r[0] = 4; r[1] = 0; }
+	else { r[0] = 5; r[1] = (unsigned char) fd; }
 }
 
 /* Encode a node's per-thread blocked state into out (<= cap bytes),
  * canonicalised so the raw kernel tid never leaks in: each live thread
- * contributes a fixed-width record of (block_kind, what-it-waits-on), the
- * records are sorted, and a futex wait address is replaced by its RANK
- * among the distinct futex words the node's threads wait on (sorted by
- * address).  Two runs that assign different tids to the same thread
- * roles, or land condvar words at different ASLR'd addresses, then
- * produce the same encoding -- so dedup keys on thread role/state, not
- * identity.  Returns the number of bytes written. */
-#define THREC 20				/* fixed width of one thread's record */
+ * contributes a fixed-width record of what it waits in and on, and the
+ * records are sorted, so the multiset of thread states is the key, not
+ * which tid holds which.  A record carries everything the thread's
+ * future depends on: a recv's peer and length, every polled fd with its
+ * requested events and (for epoll) its user data, a pending poll wake,
+ * and a futex wait's word by address (stable, since nodes run without
+ * address randomisation).  Returns the number of bytes written, or -1
+ * if out is too small. */
+#define THREC (16 + MAXPOLL * 12)		/* fixed width of one thread's record */
 static int
 encode_threads(const Node *nd, unsigned char *out, int cap)
 {
-	/* distinct futex words this node waits on, sorted, for a stable rank */
-	uint64_t fw[MAXTHREAD]; int nfw = 0;
-	for (int i = 0; i < nd->nth; i++)
-		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX)
-		{
-			uint64_t a = nd->th[i].futex_addr; int dup = 0;
-			for (int j = 0; j < nfw; j++) if (fw[j] == a) { dup = 1; break; }
-			if (!dup) fw[nfw++] = a;
-		}
-	for (int i = 0; i < nfw; i++)		/* insertion sort, nfw <= 8 */
-		for (int j = i + 1; j < nfw; j++)
-			if (fw[j] < fw[i]) { uint64_t t = fw[i]; fw[i] = fw[j]; fw[j] = t; }
-
 	unsigned char rec[MAXTHREAD][THREC]; int nrec = 0;
 	for (int i = 0; i < nd->nth; i++)
 	{
@@ -1760,32 +1793,30 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 		if (!th->inuse) continue;
 		unsigned char *r = rec[nrec]; memset(r, 0, THREC); int p = 0;
 		r[p++] = (unsigned char) (th->block_kind ? th->block_kind : 3);
+		if (th->poll_woke_fd >= 0) { r[p++] = 1; fd_class(nd, th->poll_woke_fd, r + p); p += 2; }
+		else r[p++] = 0;
 		if (th->block_kind == BK_RECV || th->block_kind == BK_ACCEPT)
-			r[p++] = (unsigned char) (th->block_peer + 2);
-		else if (th->block_kind == BK_FUTEX)
 		{
-			int rank = 0; for (int j = 0; j < nfw; j++) if (fw[j] == th->futex_addr) { rank = j; break; }
-			r[p++] = (unsigned char) rank;
+			r[p++] = (unsigned char) (th->block_peer + 4);
+			r[p++] = (unsigned char) th->block_want; r[p++] = (unsigned char) (th->block_want >> 8);
 		}
+		else if (th->block_kind == BK_FUTEX)
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->futex_addr >> (8 * b));
 		else if (th->block_kind == BK_POLL)
 		{
-			/* the polled set as semantic classes, as the single-slot code
-			 * did: (events, class, which) per fd, so two differently
-			 * polling threads stay distinct without raw fd numbers.  A leading
-			 * flag marks an epoll_wait park apart from a poll() one, so the
-			 * two parking modes never merge in the fingerprint. */
+			/* a leading flag marks an epoll_wait park apart from a poll()
+			 * one, so the two parking modes never merge */
 			r[p++] = (unsigned char) (th->epoll_fd >= 0 ? 1 : 0);
 			r[p++] = (unsigned char) th->pollfd_n;
-			for (int k = 0; k < th->pollfd_n && p + 3 <= THREC; k++)
+			for (int k = 0; k < th->pollfd_n; k++)
 			{
-				int fd = th->pollfds[k];
-				int cs = cfd_slot((Node *) nd, fd), es = efd_slot((Node *) nd, fd);
-				r[p++] = (unsigned char) th->pollevents[k];
-				if (cs >= 0) { r[p++] = 1; r[p++] = (unsigned char) (nd->cpeer[cs] + 2); }
-				else if (es >= 0) { r[p++] = 2; r[p++] = (unsigned char) es; }
-				else { r[p++] = 3; r[p++] = 0; }
+				r[p++] = (unsigned char) th->pollevents[k]; r[p++] = (unsigned char) (th->pollevents[k] >> 8);
+				fd_class(nd, th->pollfds[k], r + p); p += 2;
+				if (th->epoll_fd >= 0)
+					for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->polldata[k] >> (8 * b));
 			}
 		}
+		if (p > THREC) die(1, "thread record overflow on node %d", nd->id);
 		nrec++;
 	}
 	/* sort the records so the multiset, not thread order, is the key */
@@ -1800,68 +1831,69 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 	return n;
 }
 
-/* world fingerprint: every node's state and liveness, the messages in
+/* The world encoding: every node's state and liveness, the messages in
  * flight (each channel in its order), the reply log, the environment
  * budgets left and the logical clock.  Everything the future depends on
- * goes in; leaving out a budget or the clock merges worlds that differ. */
+ * goes in; leaving out a budget, the clock, a durable record or a polled
+ * fd merges worlds whose futures differ.  The encoding is written to
+ * g_world (g_world_len bytes) and its 128-bit fingerprint to fp; the seen
+ * set compares the bytes, so the fingerprint only indexes.  Tids never
+ * appear: threads are named by their sorted records.  shortcut: virtual
+ * fd numbers are left out too (an fd is named by its class, see
+ * fd_class), on the assumption that a target does not branch on an fd's
+ * value; record next_fd and the raw numbers if a target ever does. */
+static unsigned char g_world[65536]; static size_t g_world_len;
+
 static void
 world_fp(uint64_t fp[2])
 {
-	unsigned char w[16384]; size_t n = 0;
-#define PUT(b) do { if (n >= sizeof w) die(1, "world encoding exceeds %zu bytes", sizeof w); w[n++] = (unsigned char) (b); } while (0)
+	unsigned char *w = g_world; size_t n = 0;
+#define PUT(b) do { if (n >= sizeof g_world) die(1, "world encoding exceeds %zu bytes", sizeof g_world); w[n++] = (unsigned char) (b); } while (0)
+#define PUT8(x) do { uint64_t _x = (uint64_t) (x); for (int _b = 0; _b < 8; _b++) PUT(_x >> (8 * _b)); } while (0)
 	for (int i = 0; i < M.nodes; i++)
 	{
+		const Node *nd = &N[i];
 		/* node liveness: a running node (fully alive), a crashed one, or an
-		 * exited one.  The per-thread blocked state follows, canonicalised
-		 * by encode_threads so no raw tid leaks into the fingerprint. */
-		PUT(N[i].alive ? 3 : (N[i].crashed ? 0xfe : 0xff));
-		PUT(N[i].canon_len);
-		for (int k = 0; k < N[i].canon_len; k++) PUT(N[i].canon[k]);
-		if (N[i].alive)
-		{
-			unsigned char tb[1 + MAXTHREAD * THREC];
-			int tl = encode_threads(&N[i], tb, (int) sizeof tb);
-			if (tl < 0) die(1, "thread encoding overflow on node %d", i);
-			for (int k = 0; k < tl; k++) PUT(tb[k]);
-		}
-		else PUT(0);
+		 * exited one; then its volatile and its durable records, and how
+		 * much of the durable record a startup read has consumed */
+		PUT(nd->alive ? 3 : (nd->crashed ? 0xfe : 0xff));
+		PUT(nd->canon_len);
+		for (int k = 0; k < nd->canon_len; k++) PUT(nd->canon[k]);
+		PUT(nd->durable_len);
+		for (int k = 0; k < nd->durable_len; k++) PUT(nd->durable[k]);
+		PUT(nd->durable_read_off);
+		if (!nd->alive) { PUT(0); continue; }
+		unsigned char tb[1 + MAXTHREAD * THREC];
+		int tl = encode_threads(nd, tb, (int) sizeof tb);
+		if (tl < 0) die(1, "thread encoding overflow on node %d", i);
+		for (int k = 0; k < tl; k++) PUT(tb[k]);
+		PUT(nd->th_pending); PUT(nd->npending_ctid);
+		for (int k = 0; k < nd->npending_ctid; k++) PUT8(nd->pending_ctid[k]);
 		/* live connections in the order they were opened (cfd is kept in
-		 * that order), by peer, with each one's O_NONBLOCK flag: which
-		 * connection goes where, and whether a read on it would return
-		 * EAGAIN, is node state.  shortcut: absolute fd numbers are left
-		 * out, on the assumption that a target does not branch on a
-		 * virtual fd's value, only on its peer and its flags */
-		PUT(N[i].alive ? N[i].nc : 0);
-		for (int k = 0; N[i].alive && k < N[i].nc; k++) { PUT(N[i].cpeer[k] + 2); PUT(N[i].cnonblock[k]); }
-		/* eventfds and their counters: a non-zero counter is poll-ready,
-		 * so two states with different counters are different */
-		PUT(N[i].alive ? N[i].nefd : 0);
-		for (int k = 0; N[i].alive && k < N[i].nefd; k++)
-			for (int b = 0; b < 8; b++) PUT(N[i].efdval[k] >> (8 * b));
-		PUT(N[i].ls_nonblock);
-		/* epoll instances: each one's interest list, canonicalised to
-		 * (requested events, fd's semantic class, which peer/eventfd), the
-		 * same way a polled set is.  The watched fd's identity is its role,
-		 * never a raw fd number, and the user data is deliberately left out:
-		 * it is opaque (an ASLR pointer in a real loop), only ever written
-		 * back to the node, never a search distinction, so fingerprinting it
-		 * would wrongly split identical futures.  Which fds an instance
-		 * watches IS the future (it decides what epoll_wait can report), so
-		 * it goes in. */
-		PUT(N[i].alive ? N[i].nep : 0);
-		for (int e = 0; N[i].alive && e < N[i].nep; e++)
+		 * that order), by peer, with their flags, and which one is the
+		 * fired timer's: which connection goes where, and whether a read
+		 * on it would return EAGAIN or a 'T', is node state */
+		PUT(nd->nc);
+		for (int k = 0; k < nd->nc; k++)
+		{ PUT(nd->cpeer[k] + 4); PUT(nd->cnonblock[k]); PUT(nd->ccloexec[k]); PUT(nd->cfd[k] == nd->timer_fd); }
+		/* eventfds: a non-zero counter is poll-ready, and the flag decides
+		 * whether an empty read returns EAGAIN */
+		PUT(nd->nefd);
+		for (int k = 0; k < nd->nefd; k++) { PUT8(nd->efdval[k]); PUT(nd->efdnb[k]); }
+		PUT(nd->listener_fd >= 0); PUT(nd->ls_nonblock); PUT(nd->ls_cloexec);
+		/* epoll instances: each one's interest list, by requested events,
+		 * the watched fd's class and the user data epoll_wait returns.  The
+		 * data is how the loop routes a ready fd to its handler, so two
+		 * worlds that differ in it can differ in what the loop does. */
+		PUT(nd->nep);
+		for (int e = 0; e < nd->nep; e++)
 		{
-			const Epoll *ep = &N[i].ep[e];
+			const Epoll *ep = &nd->ep[e];
 			PUT(ep->nit);
 			for (int k = 0; k < ep->nit; k++)
 			{
-				int fd = ep->fd[k];
-				int cs = cfd_slot(&N[i], fd), es = efd_slot(&N[i], fd);
-				PUT(ep->events[k]);
-				if (cs >= 0) { PUT(1); PUT(N[i].cpeer[cs] + 2); }
-				else if (es >= 0) { PUT(2); PUT(es); }
-				else if (fd == N[i].listener_fd) { PUT(3); PUT(0); }
-				else { PUT(4); PUT(0); }
+				unsigned char c[2]; fd_class(nd, ep->fd[k], c);
+				PUT(ep->events[k]); PUT(ep->events[k] >> 8); PUT(c[0]); PUT(c[1]); PUT8(ep->data[k]);
 			}
 		}
 	}
@@ -1877,7 +1909,7 @@ world_fp(uint64_t fp[2])
 						best = i;
 				if (best < 0) break;
 				last = bag[best].chseq;
-				PUT(s + 1); PUT(d); PUT(bag[best].len);
+				PUT(s + 1); PUT(d); PUT(bag[best].len); PUT(bag[best].len >> 8);
 				for (int k = 0; k < bag[best].len; k++) PUT(bag[best].body[k]);
 			}
 	PUT(0xfe);
@@ -1887,9 +1919,10 @@ world_fp(uint64_t fp[2])
 	for (int a = 0; a < M.nodes; a++)
 		for (int b = a + 1; b < M.nodes; b++)
 			PUT(conn_reset[a][b]);
-	/* connections waiting to be accepted, as a multiset per node */
+	/* connections waiting to be accepted, as a multiset per node: an
+	 * accept takes a peer the search names, so arrival order is no state */
 	for (int d = 0; d < M.nodes; d++)
-		for (int s = 0; s < M.nodes; s++)
+		for (int s = -1; s < M.nodes; s++)
 		{
 			int c = 0;
 			for (int k = 0; k < N[d].npend; k++) c += N[d].pend[k] == s;
@@ -1898,8 +1931,10 @@ world_fp(uint64_t fp[2])
 	PUT(nrep);
 	for (int i = 0; i < nrep; i++) { PUT(rep_src[i]); PUT(rep_val[i]); }
 	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts);
-	for (int k = 0; k < 8; k++) PUT(logical_ns >> (8 * k));
+	PUT8(logical_ns);
+#undef PUT8
 #undef PUT
+	g_world_len = n;
 	fp128(w, n, fp);
 }
 
@@ -2635,7 +2670,7 @@ cmc_proc_main(const CmcProcOptions *po)
 			}
 		}
 		uint64_t fp[2]; world_fp(fp);
-		int isnew = mark(fp[0], fp[1]);
+		int isnew = mark(fp, g_world, g_world_len);
 		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; }
 		/* did this action make progress?  A non-root entry whose reached
 		 * world equals its parent's is a stutter: the action was enabled

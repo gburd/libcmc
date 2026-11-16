@@ -128,6 +128,17 @@ than checked, since a permuted successor folds into a self-loop.
   identity), associated with the waiting thread's role.  A whitebox test
   builds pairs of worlds with different futures and asserts their
   encodings differ.
+  Status: done.  The seen set stores each world's encoding and compares
+  bytes on a fingerprint match.  The encoding now carries the durable
+  record and how much of it was read back, every polled fd with its
+  events, epoll user data, a futex word by address (nodes run with
+  `ADDR_NO_RANDOMIZE`, so addresses repeat across replays), a recv's
+  requested length, a pending poll wake, births in flight, and the
+  per-connection flags.  `test/proc/fingerprint.c` fails on `b2eab84`
+  for each of those and checks a forced collision.  Two fixtures gain
+  states, each a real split: restart.c 28 to 30 (a recv waiting for a
+  2-byte header against one for the body), hc.c 11,545 to 14,730 (a
+  participant partway through a 3-byte read).
 - **3.3 Hook records are exact.**  A canonical record longer than `SNAP`
   is a model error; a partial record is kept or rejected, never dropped.
 - **3.4 Remote memory errors propagate.**  A short `process_vm_readv` or

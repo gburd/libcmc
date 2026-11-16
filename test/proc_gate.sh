@@ -318,6 +318,13 @@ expect "unmodelled: a finite poll timeout is refused"    3 "timeout is not model
 expect "unmodelled: EPOLLET is refused"                  3 "are not modelled" --model-file "$OUT/u-epollet.model"
 expect "unmodelled: EFD_SEMAPHORE is refused"            3 "EFD_SEMAPHORE" --model-file "$OUT/u-semaphore.model"
 
+# the world encoding (soundness plan 3.1, 3.2): worlds whose futures
+# differ encode differently, and the seen set compares bytes, not hashes
+if $CC -std=c11 -O1 -w -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fingerprint" "$T/fingerprint.c" "$HERE/src/cmc_spec.c"; then
+	if "$B/proc/fingerprint" > "$OUT/fp.txt" 2>&1; then echo "ok   the world encoding separates differing futures"
+	else echo "FAIL the world encoding"; sed 's/^/     /' "$OUT/fp.txt"; fail=1; fi
+else echo "proc_gate: fingerprint.c does not build"; fail=1; fi
+
 # the preload's allocator (soundness plan 3.5): an impossible size fails
 # instead of wrapping, and realloc copies only the old block
 if $CC -O1 -w -o "$B/proc/preload_alloc" "$T/preload_alloc.c"; then

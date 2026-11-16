@@ -108,8 +108,8 @@ named after.
 Process mode replays every state from a fresh launch, so the rate scales
 with how much the program does per launch: the small fixtures run several
 hundred replays a second (HummingConsensus with three processes, three
-timeouts and one drop is 11,545 distinct states in about 50 seconds, 555
-replays a second, on the CI box).  History and measurements are in
+timeouts and one drop is 14,730 distinct states in about 90 seconds, 380
+replays a second, on a 48-core Xeon).  History and measurements are in
 `docs/measurements/`.
 
 ## CI
