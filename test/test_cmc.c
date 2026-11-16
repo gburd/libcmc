@@ -1180,6 +1180,7 @@ replied_all(const CmcWorld *w, CmcWhy *why)
 }
 
 static const CmcProp replied_qui[] = {CMC_QUIESCENT_PROP(Replied, replied_all)};
+static const CmcProp replied_ev[] = {CMC_EVENTUALLY_PROP(EventuallyReplied, replied_all)};
 
 /* 2.1: CLIENT makes the node send the request to itself; RECV replies. */
 static void
@@ -1232,6 +1233,42 @@ test_p21_crash_clears_self_channel(void)
 	cmc_run_free(r);
 }
 
+/* 2.2: a core that never answers.  CLIENT leads to a quiescent state with
+ * the request outstanding, the last state of a walk of depth 2. */
+static void
+mute_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	(void) sv;
+	(void) ev;
+	out->n = 0;
+}
+
+static const CmcCore mute_core = {
+	.name = "mute", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = mute_step,
+};
+
+/* 2.2: a walk checks its last state too, for quiescence and eventuality */
+static void
+test_p22_simulate_checks_last_state(void)
+{
+	CmcModel	mq = {"mute", &mute_core, replied_qui, 1, 0},
+				me = {"mute", &mute_core, replied_ev, 1, 0};
+	CmcOptions	o;
+	char		prop[64];
+
+	cmc_options_default(&o);
+	o.search = CMC_SIMULATE;
+	o.walks = 1;
+	o.max_depth = 2;
+	CHECK(verdict_of(&mq, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) == CMC_VIOLATION);
+	CHECK(strcmp(prop, "Replied") == 0);
+	CHECK(verdict_of(&me, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) == CMC_VIOLATION);
+	CHECK(strcmp(prop, "EventuallyReplied") == 0);
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1266,6 +1303,7 @@ main(void)
 	test_min3_quiescent_depth();
 	test_min4_negative_bounds();
 	test_p21_crash_clears_self_channel();
+	test_p22_simulate_checks_last_state();
 	test_version();
 	if (failures)
 	{

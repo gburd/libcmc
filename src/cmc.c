@@ -2213,7 +2213,7 @@ run_simulate(CmcRun *r, CmcResult *res)
 		if ((bad = check_inv(r, s, &why)))
 			goto viol;
 		check_wit(r, s, 1);
-		for (len = 0; len < D - 1; len++)
+		for (len = 0;; len++)
 		{
 			int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
 
@@ -2240,7 +2240,8 @@ run_simulate(CmcRun *r, CmcResult *res)
 					goto viol;
 				}
 			}
-			if (na == 0)
+			/* the walk ends here only after this state, its last, was checked */
+			if (na == 0 || len == D - 1)
 				break;
 			path[len] = acts[rng_next(rs) % (uint64_t) na];
 			memcpy(t, s, r->ws);
