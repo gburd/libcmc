@@ -2069,14 +2069,17 @@ mark(const uint64_t fp[2], const unsigned char *w, size_t n)
 
 /* the semantic class of fd on node nd, as two bytes (class, which), so
  * the encoding never depends on a raw virtual fd number: a connection by
- * its peer, an eventfd by its slot, the listener, an ignored negative fd,
- * or a kernel fd the model does not track (by its number, which is
- * deterministic).  Writes 2 bytes to r. */
+ * its slot in the node's open-order connection list (two connections to
+ * the same peer are different fds with different futures, so the peer
+ * alone would merge them; the list itself, with each slot's peer, is
+ * encoded per node), an eventfd by its slot, the listener, an ignored
+ * negative fd, or a kernel fd the model does not track (by its number,
+ * which is deterministic).  Writes 2 bytes to r. */
 static void
 fd_class(const Node *nd, int fd, unsigned char *r)
 {
 	int cs = cfd_slot((Node *) nd, fd), es = efd_slot((Node *) nd, fd);
-	if (cs >= 0) { r[0] = 1; r[1] = (unsigned char) (nd->cpeer[cs] + 4); }
+	if (cs >= 0) { r[0] = 1; r[1] = (unsigned char) cs; }
 	else if (es >= 0) { r[0] = 2; r[1] = (unsigned char) es; }
 	else if (fd >= 0 && fd == nd->listener_fd) { r[0] = 3; r[1] = 0; }
 	else if (fd < 0) { r[0] = 4; r[1] = 0; }
@@ -2106,11 +2109,18 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 		r[p++] = (unsigned char) (th->block_kind ? th->block_kind : 3);
 		if (th->poll_woke_fd >= 0) { r[p++] = 1; fd_class(nd, th->poll_woke_fd, r + p); p += 2; }
 		else r[p++] = 0;
-		if (th->block_kind == BK_RECV || th->block_kind == BK_ACCEPT)
+		if (th->block_kind == BK_RECV)
 		{
-			r[p++] = (unsigned char) (th->block_peer + 4);
+			/* the connection read, by its open-order slot (not the peer:
+			 * two connections to one peer have different queues) */
+			int cs = -1;
+			for (int k = 0; k < nd->nc; k++)
+				if (nd->cconn[k] == th->block_conn && nd->cend[k] == th->block_end) { cs = k; break; }
+			r[p++] = (unsigned char) (th->block_peer + 4); r[p++] = (unsigned char) (cs + 1);
 			r[p++] = (unsigned char) th->block_want; r[p++] = (unsigned char) (th->block_want >> 8);
 		}
+		else if (th->block_kind == BK_ACCEPT)
+			r[p++] = (unsigned char) (th->block_peer + 4);
 		else if (th->block_kind == BK_FUTEX)
 			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->futex_addr >> (8 * b));
 		else if (th->block_kind == BK_POLL)

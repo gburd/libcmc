@@ -285,7 +285,7 @@ demonstration it is.
   loop while it waits, read repair no longer ends the iteration (as
   ReadRepair and Adopt are separate actions in the TLA+ spec), and
   `hc.model` requires that some participant adopts.  Four timeouts is
-  the fewest at which one does; agreement holds there (37,065 states),
+  the fewest at which one does; agreement holds there (36,331 states),
   and the AP-mode bug is found by seeded simulation at twelve.  Both
   take about seven minutes, so they run in `make check-examples-slow`,
   on the calibration's triggers, not on every push.

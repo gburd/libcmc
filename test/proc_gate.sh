@@ -28,7 +28,7 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded unmodelled crossrpc; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded unmodelled crossrpc twoconn; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 for f in repl elect lease durlog quorum pollloop; do
@@ -146,6 +146,9 @@ expect "fifo: a connection is in order"    0 "No error has been found" $(run fif
 # two connections between one pair of nodes (soundness plan 3.7): each
 # carries its own bytes, so a reply is never the peer's request
 expect "crossrpc: connections never share bytes" 0 "No error has been found" $(run crossrpc crossrpc)
+# two connections from one peer are two queues: the second's byte can be
+# read first, which a checker naming a connection by its peer misses
+expect "twoconn: the second connection's byte can arrive first" 1 "never_b_first is violated" $(run twoconn twoconn)
 # drop-as-reset (ask 7): a drop resets the connection, it does not vanish
 # one byte from a live stream.  With drops = 1 node 1 still never sees the
 # second value ahead of the first -- a reset gives EOF, not reordering.

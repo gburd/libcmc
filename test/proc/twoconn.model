@@ -1,0 +1,7 @@
+# test/proc/twoconn.c: node 1 sends 'b' on its second connection to node
+# 0, then 'a' on its first.  Node 0 can read either first; reads_b_first
+# is reachable, so cmc must report it (proc_gate expects a violation).
+[target]
+nodes = 2
+[invariants]
+never_b_first = "node[0][0] != 98"

@@ -95,7 +95,7 @@ cmc --model-file examples/hc/hc.model --binary ./hc
 
 ```
 Model checking completed. No error has been found.
-99011 states generated, 37065 distinct states found, 0 states left on queue.
+96893 states generated, 36331 distinct states found, 0 states left on queue.
 ```
 
 (about six minutes, single-threaded).  cmc runs all three participants

@@ -88,7 +88,7 @@ call runs in the kernel, untouched.
 | construct | status | limit | gate |
 |---|---|---|---|
 | the state hook (fd 3, fd 193) | exact | a record of up to 64 bytes; a longer or unfinished record is exit 3 | proc_gate longrec, partrec |
-| deduplication | exact | the full world encoding is compared on a fingerprint match | proc_gate fingerprint |
+| deduplication | exact | the full world encoding is compared on a fingerprint match; a connection is named by its slot, not its peer | proc_gate fingerprint, twoconn |
 | crash and restart | approximate | a crash keeps the fd-193 record; a restart hands it back on the first read of fd 193 | proc_gate durlog, restart |
 | `eventually P` | exact for an exhaustive search | unmet after a full search is a violation; a bounded or simulated run is INCOMPLETE | proc_gate twothread reach |
 | a run that never progressed | refused | INCOMPLETE without an `eventually` property | proc_gate noprogress |

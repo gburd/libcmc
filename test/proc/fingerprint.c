@@ -116,6 +116,24 @@ main(void)
 	N[0].durable_read_off = 1;
 	differs("a durable record already read back");
 
+	/* two connections to the same peer: a recv on one and a recv on the
+	 * other wait on different queues */
+	init_world();
+	conns[0].used = conns[1].used = 1;
+	conns[0].node[0] = conns[1].node[0] = 1;
+	conns[0].node[1] = conns[1].node[1] = 0;
+	conns[0].accepted = conns[1].accepted = 1;
+	N[0].nc = 2;
+	N[0].cfd[0] = 501; N[0].cpeer[0] = 1; N[0].cconn[0] = 0; N[0].cend[0] = 1;
+	N[0].cfd[1] = 502; N[0].cpeer[1] = 1; N[0].cconn[1] = 1; N[0].cend[1] = 1;
+	N[0].th[0].block_kind = BK_RECV;
+	N[0].th[0].block_peer = 1;
+	N[0].th[0].block_want = 1;
+	N[0].th[0].block_conn = 0; N[0].th[0].block_end = 1;
+	snap();
+	N[0].th[0].block_conn = 1;
+	differs("a recv on a second connection to the same peer");
+
 	init_world();
 	snap();
 	N[0].th[0].tid = 97;
