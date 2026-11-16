@@ -82,7 +82,7 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| the order of threads' visible operations (`futex`, calls on owned fds, state-hook writes, `clone`) | exact | every order is a search choice (RUN); one thread of a node runs at a time | proc_gate twothread, racewake, raceemit, raceborn |
+| the order of threads' visible operations (`futex`, a call on any fd, `clone`) | exact | every order is a search choice (RUN); one thread of a node runs at a time | proc_gate twothread, racewake, raceemit, raceborn, racepipe |
 | `clone`, `clone3` (threads), `futex` wait and wake, `exit`, `pthread_join` | exact | a newborn and its parent are both held at the clone's return until the search runs each | proc_gate twothread_join, raceborn |
 | memory accesses between two visible operations | not explored | a data race with no system call between the racing accesses is not found | (boundary; no fixture) |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |

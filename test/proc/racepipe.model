@@ -1,0 +1,7 @@
+# test/proc/racepipe.c: main may read the first pipe's byte after missing
+# the second's (got = 2), a schedule that interleaves the two threads'
+# calls on kernel pipes.  It must be reachable.
+[target]
+nodes = 1
+[invariants]
+mixed = "eventually node[0][0] == 2 and node[0][1] == 2"

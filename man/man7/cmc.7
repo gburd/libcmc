@@ -139,10 +139,12 @@ Only one thread of a node runs at a time, so a replay is deterministic
 and the kernel's futex and mutex handoffs are never torn.
 Other calls (the clock,
 .Fn getrandom ,
-.Fn mmap ,
-the kernel's own descriptors) are answered at once and the thread runs
-on.
+.Fn mmap )
+are answered at once and the thread runs on.
 A node with one thread behaves as if threads did not exist.
+.Pp
+A call on any descriptor is a visible operation, the kernel's (a pipe or
+a file two threads share) as well as the checker's.
 .Pp
 The boundary is the system call.
 Interleavings of plain memory accesses between two visible operations

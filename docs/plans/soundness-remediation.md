@@ -252,16 +252,22 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   increment loses an update), `raceborn.c` (a newborn sends before its
   parent).  Each bug build was missed on the previous engine (INCOMPLETE
   in every run) and is caught now; each correct build and both twothread
-  fixtures pass.  Single-threaded state counts are unchanged.
+  fixtures pass.  Single-threaded state counts are unchanged.  A second
+  change from the design, after the lead's review: a call on a kernel
+  fd is visible too, since two threads sharing a pipe or a file
+  interleave there on Linux; `racepipe.c` (a reader that misses one
+  pipe's byte and reads the other's) was unreachable with kernel fds
+  answered inline and is found now, and no other fixture's count
+  moves.
 
   The design:
 
   - **Visible operations.**  In a node with more than one thread (or a
     birth in flight), a thread's step ends at a visible operation: a
-    `futex` call, any call on a checker-owned fd, a write to fd 3 or fd
-    193, `clone`, `exit`.  Other calls (`mmap`, `rseq`, the clock) are
-    answered at once, since they touch nothing another thread can see
-    except through memory, and memory between two calls is not
+    `futex` call, a call on any fd (the checker's, the state hook's, or
+    the kernel's), `clone`, `exit`.  Other calls (`mmap`, `rseq`, the
+    clock) are answered at once, since they touch nothing another thread
+    can see except through memory, and memory between two calls is not
     explored.
   - **Execute, then park.**  A visible operation is carried out when the
     thread reaches it (so its effect, such as waking a futex waiter or

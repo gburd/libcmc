@@ -1311,13 +1311,15 @@ static int futex_wake(Node *nd, uint64_t uaddr, int n);
 
 /* Is call nr a visible operation: one whose effect another thread of the
  * node can see other than through memory?  Those are the futex calls and
- * every call on a checker-owned fd (a socket, eventfd or epoll instance,
- * numbered from 500), on the state hook (fd 3) or on the durable record
- * (fd 193), and the calls that create one.  In a node with more than one
- * thread each visible operation ends the thread's step, and the search
- * picks which thread runs next.  Everything else (the clock, getrandom,
- * the kernel's own fds) is answered at once, since nothing another thread
- * does between two calls is explored.  clone and exit are visible too,
+ * every call on an fd, whether checker-owned (a socket, eventfd or epoll
+ * instance, numbered from 500), the state hook (fd 3), the durable record
+ * (fd 193) or the kernel's own (a pipe or file two threads may share),
+ * and the calls that create a checker-owned one.  In a node with more
+ * than one thread each visible operation ends the thread's step, and the
+ * search picks which thread runs next.  Everything else (the clock,
+ * getrandom, mmap) is answered at once: the clock moves only on a TIMEOUT
+ * action, when every thread is parked, and nothing another thread does
+ * through memory between two calls is explored.  clone and exit are visible too,
  * but are not held here.  A clone stops both threads at its return (see
  * birth()), which is the same choice point.  An exit's effect, the
  * clear-tid wake a pthread_join waits for, is carried out when the thread
@@ -1325,20 +1327,23 @@ static int futex_wake(Node *nd, uint64_t uaddr, int n);
 static int
 visible(long nr, const __u64 *a)
 {
+	(void) a;
 	switch (nr)
 	{
+		/* shared node state, and the state hook */
 		case SYS_futex: case SYS_socket: case SYS_eventfd2:
 		case SYS_epoll_create1: case SYS_epoll_create: case SYS_epoll_ctl:
 		case SYS_epoll_wait: case SYS_epoll_pwait: case SYS_poll: case SYS_ppoll:
 		case SYS_accept: case SYS_accept4:
-			return 1;
 		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
+		/* a call on any fd, the kernel's (a pipe or file two threads share)
+		 * as much as the checker's: two threads' calls on kernel fds
+		 * interleave on Linux, so each ends a step here too */
 		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
 		case SYS_close: case SYS_fcntl:
-		{
-			int fd = (int) a[0];
-			return fd >= 500 || fd == 3 || fd == DURABLE_FD;
-		}
+		case SYS_readv: case SYS_writev: case SYS_preadv: case SYS_pwritev:
+		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg: case SYS_sendmsg:
+			return 1;
 		default:
 			return 0;
 	}

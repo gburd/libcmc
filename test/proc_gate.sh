@@ -58,6 +58,7 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
+$CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -302,6 +303,9 @@ expect "raceemit: an unlocked increment loses an update"  1 "no_lost_update is v
 expect "raceemit: the locked increment holds"             0 "No error has been found" $(run raceemit raceemit)
 expect "raceborn: a new thread can send before its parent" 1 "a_first is violated" $(run raceborn raceborn-bug)
 expect "raceborn: sending before the clone holds"         0 "No error has been found" $(run raceborn raceborn)
+# racepipe: two threads' calls on kernel pipes interleave, so main can
+# read the first pipe's byte after missing the second's
+expect "racepipe: calls on kernel fds interleave"          0 "No error has been found" $(run racepipe racepipe)
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
