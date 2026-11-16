@@ -176,6 +176,12 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   and any other unsupported flag are model errors until modelled
   exactly.  The synthetic timeout byte `'T'` is documented as a
   convention distinct from a syscall timeout.
+  Status: done for the flags and timeouts named here, and widened after
+  the independent review: `accept4` flags, `socket` types other than a
+  TCP stream, `recvfrom` and `sendto` flags, and the socket calls the
+  model does not answer (`writev`, `recvmsg`, `shutdown`, `dup` and the
+  rest; see docs/qualification.md) on a checker-owned fd are refused.
+  `sendmsg` is the one gap, since the launch path uses it.
 - **3.7 TCP connections, not node pairs.**  Until per-connection queues,
   FIFO order and reset state exist, a second connection between the
   same two nodes, or a reconnection after a reset, is refused.  Then

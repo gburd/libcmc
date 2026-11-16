@@ -583,15 +583,27 @@ static void sym_apply(const State *in, State *out, const int *perm){
 		}
 	}
 }
-/* the canonical fingerprint of a state (min over permutations if symmetric) */
-static void sym_perms(int *perm, int k, int n, const State *st, uint64_t *best, int *first){
-	if(k==n){ State p; sym_apply(st,&p,perm); unsigned char bb[65536]; size_t nb=state_bytes(&p,bb,sizeof bb); uint64_t h=fnv(bb,nb); if(*first||h<*best){ *best=h; *first=0; } return; }
-	for(int i=k;i<n;i++){ int t=perm[k]; perm[k]=perm[i]; perm[i]=t; sym_perms(perm,k+1,n,st,best,first); t=perm[k]; perm[k]=perm[i]; perm[i]=t; }
+/* The canonical serialisation of a state: its bytes, or under symmetry
+ * the lexicographically least serialisation over every permutation of
+ * the symmetry set, so all states in one orbit serialise alike.  Writes
+ * to out (cap bytes) and returns the length. */
+static void sym_perms(int *perm, int k, int n, const State *st, unsigned char *best, size_t *bestn, size_t cap, int *first){
+	if(k==n){
+		State p; sym_apply(st,&p,perm); unsigned char bb[65536]; size_t nb=state_bytes(&p,bb,sizeof bb);
+		if(*first || nb<*bestn || (nb==*bestn && memcmp(bb,best,nb)<0)){ memcpy(best,bb,nb<cap?nb:cap); *bestn=nb; *first=0; }
+		return;
+	}
+	for(int i=k;i<n;i++){ int t=perm[k]; perm[k]=perm[i]; perm[i]=t; sym_perms(perm,k+1,n,st,best,bestn,cap,first); t=perm[k]; perm[k]=perm[i]; perm[i]=t; }
 }
+static size_t state_canon(const State *st, unsigned char *out, size_t cap){
+	if(!g_symok) return state_bytes(st,out,cap);
+	int perm[8]; for(int i=0;i<g_symset.n;i++) perm[i]=i; size_t n=0; int first=1;
+	sym_perms(perm,0,g_symset.n,st,out,&n,cap,&first); return n;
+}
+/* the fingerprint of a state's canonical serialisation: an index only,
+ * since two states are the same exactly when those bytes are */
 static uint64_t state_fp(const State *st){
-	if(!g_symok){ unsigned char bb[65536]; size_t nb=state_bytes(st,bb,sizeof bb); return fnv(bb,nb); }
-	int perm[8]; for(int i=0;i<g_symset.n;i++) perm[i]=i; uint64_t best=0; int first=1;
-	sym_perms(perm,0,g_symset.n,st,&best,&first); return best;
+	unsigned char bb[65536]; size_t nb=state_canon(st,bb,sizeof bb); return fnv(bb,nb);
 }
 
 /* exact equality of two abstract states: the canonical serialisation,
@@ -739,10 +751,30 @@ static int sp_check(const State *st, char *err, size_t errcap){
 /* BFS state store (open-addressed hash of fingerprints) + a queue of
  * states with their shortest path (action descriptions) */
 #define SP_MAXSTATES 2000000
-static uint64_t *seen; static size_t seen_cap, seen_n;
-static int seen_insert(uint64_t h){
+/* The seen set: an open-addressing table indexed by fingerprint whose
+ * entries hold each state's canonical bytes in a pool, compared on a
+ * fingerprint match, so a hash collision cannot drop a state.  Sized for
+ * SP_MAXSTATES at half load, so it never grows. */
+typedef struct { uint64_t h; size_t off; uint32_t len; } SeenEnt;
+static SeenEnt *seen; static size_t seen_cap, seen_n;
+static unsigned char *seen_pool; static size_t seen_pool_cap, seen_pool_used;
+static int seen_insert(const State *st){
+	unsigned char bb[65536]; size_t nb=state_canon(st,bb,sizeof bb);
+	uint64_t h=fnv(bb,nb); if(!h) h=1;
 	size_t m=seen_cap-1, i=h&m;
-	for(;;){ if(seen[i]==0){ seen[i]=h?h:1; seen_n++; return 1; } if(seen[i]==(h?h:1)) return 0; i=(i+1)&m; }
+	for(;;){
+		if(seen[i].h==0) break;
+		if(seen[i].h==h && seen[i].len==nb && !memcmp(seen_pool+seen[i].off,bb,nb)) return 0;
+		i=(i+1)&m;
+	}
+	if(seen_pool_used+nb>seen_pool_cap){
+		size_t nc=seen_pool_cap?seen_pool_cap*2:(size_t)1<<20; while(seen_pool_used+nb>nc) nc*=2;
+		unsigned char *np=realloc(seen_pool,nc); if(!np){ fprintf(stderr,"cmc: out of memory for the seen set\n"); exit(1); }
+		seen_pool=np; seen_pool_cap=nc;
+	}
+	memcpy(seen_pool+seen_pool_used,bb,nb);
+	seen[i].h=h; seen[i].off=seen_pool_used; seen[i].len=(uint32_t)nb; seen_pool_used+=nb; seen_n++;
+	return 1;
 }
 
 typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
@@ -983,7 +1015,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 	size_t qcap = 1024, qh = 0, qt = 0;
 	QN **q = malloc(qcap * sizeof *q);
 	if (!q) { fprintf(stderr, "cmc: out of memory\n"); return 1; }
-	seen_insert(state_fp(&init));
+	seen_insert(&init);
 	QN *root = calloc(1, sizeof *root); root->st=init; root->prev=NULL; root->step[0]=0; root->depth=0;
 	q[qt++] = root;
 	size_t distinct=1, generated=1; int maxdepth=0;
@@ -1023,8 +1055,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 			if(rc<0){ fprintf(stderr,"cmc: action %s: %s\n",S.act[ai].name,err); ret=3; break; }
 			for(int k=0;k<ns;k++){
 				generated++;
-				uint64_t h=state_fp(&succ[k]);
-				if(!seen_insert(h)) continue;
+				if(!seen_insert(&succ[k])) continue;
 				if(seen_n>=SP_MAXSTATES){ printf("INCOMPLETE: more than %d states\n",SP_MAXSTATES); ret=2; break; }
 				if(qt>=qcap){ qcap*=2; QN **nq=realloc(q,qcap*sizeof *q); if(!nq){ fprintf(stderr,"cmc: out of memory\n"); ret=1; break; } q=nq; }
 				QN *nn=calloc(1,sizeof *nn); nn->st=succ[k]; nn->prev=cur; snprintf(nn->step,sizeof nn->step,"%s",S.act[ai].name); nn->depth=cur->depth+1;

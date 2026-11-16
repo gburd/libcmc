@@ -21,6 +21,10 @@
  *   rstignore  the same with SIGPIPE ignored: node 0 records 2
  *   rsthandler the same with a SIGPIPE handler (refused)
  *   fork       node 0 forks; the child exits at once (refused)
+ *   writev     a writev() on a checker-owned socket (refused)
+ *   peek       a recv() with MSG_PEEK (refused)
+ *   nbaccept   an accept4() with SOCK_NONBLOCK (refused)
+ *   udp        a UDP socket (refused)
  *
  *   cc -O1 -no-pie -o unmodelled test/proc/unmodelled.c
  */
@@ -35,6 +39,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define BASE 20000
@@ -153,6 +158,45 @@ main(int argc, char **argv)
 		int e1 = write(s, "z", 1) < 0 ? errno : 0;
 
 		emit(e0 == ECONNRESET && e1 == EPIPE ? 2 : 1);
+		return 0;
+	}
+	if (!strcmp(mode, "writev") || !strcmp(mode, "peek") || !strcmp(mode, "nbaccept") || !strcmp(mode, "udp"))
+	{
+		/* node 0 dials node 1, which serves one connection */
+		int id = atoi(argv[1]);
+		struct sockaddr_in a = addr(BASE + 1);
+		unsigned char b;
+
+		if (!strcmp(mode, "udp"))
+		{
+			(void) socket(AF_INET, SOCK_DGRAM, 0);
+			return 0;
+		}
+		if (id == 1)
+		{
+			int ls = socket(AF_INET, SOCK_STREAM, 0);
+
+			bind(ls, (struct sockaddr *) &a, sizeof a);
+			listen(ls, 8);
+			int c = !strcmp(mode, "nbaccept") ? accept4(ls, NULL, NULL, SOCK_NONBLOCK) : accept(ls, NULL, NULL);
+
+			if (!strcmp(mode, "peek"))
+				(void) !recv(c, &b, 1, MSG_PEEK);
+			(void) !read(c, &b, 1);
+			return 0;
+		}
+		int s = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (connect(s, (struct sockaddr *) &a, sizeof a) != 0)
+			return 0;
+		if (!strcmp(mode, "writev"))
+		{
+			struct iovec v = {.iov_base = "x", .iov_len = 1};
+
+			(void) !writev(s, &v, 1);
+		}
+		else
+			(void) !write(s, "x", 1);
 		return 0;
 	}
 	if (!strcmp(mode, "fork"))

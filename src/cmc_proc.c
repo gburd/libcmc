@@ -832,6 +832,19 @@ install_filter(void)
 		OWN(SYS_epoll_wait), OWN(SYS_epoll_pwait),
 		OWN(SYS_clone), OWN(SYS_clone3), OWN(SYS_futex), OWN(SYS_exit),
 		OWN(SYS_fork), OWN(SYS_vfork),
+		/* calls the model does not answer, intercepted only so that one on
+		 * a checker-owned fd is refused rather than sent to the kernel,
+		 * which has no such socket (see refuse_on_owned).  sendmsg is
+		 * not among them: the child itself sends the notify fd to the
+		 * parent with sendmsg once this filter is in, so trapping it would
+		 * stall every launch.  shortcut: a sendmsg on a checker-owned fd
+		 * reaches the kernel, which answers EBADF; intercept it with a
+		 * second filter installed after exec if a target uses it. */
+		OWN(SYS_readv), OWN(SYS_writev), OWN(SYS_preadv), OWN(SYS_pwritev),
+		OWN(SYS_pread64), OWN(SYS_pwrite64), OWN(SYS_recvmsg),
+		OWN(SYS_sendmmsg), OWN(SYS_recvmmsg), OWN(SYS_shutdown), OWN(SYS_dup),
+		OWN(SYS_dup2), OWN(SYS_dup3), OWN(SYS_getsockopt), OWN(SYS_getsockname),
+		OWN(SYS_getpeername), OWN(SYS_ioctl), OWN(SYS_splice), OWN(SYS_sendfile),
 #undef OWN
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
 	};
@@ -1113,6 +1126,27 @@ ep_slot(Node *nd, int epfd)
 static struct seccomp_notif *g_req;
 static struct seccomp_notif_resp *g_resp;
 
+/* A call the model does not answer, on fd a[0].  If the fd is one the
+ * checker owns (a virtual socket, eventfd or epoll instance, numbered from
+ * 500), the kernel has no such file, and answering EBADF or acting on a
+ * real fd of that number would both be wrong, so the check ends.  On any
+ * other fd the call goes to the kernel as usual.  dup2 and dup3 also
+ * refuse an owned target fd. */
+static void
+refuse_on_owned(const Node *nd, long nr, const __u64 *a)
+{
+	int fd = (int) a[0];
+	int owned = fd >= 500 && fd < nd->next_fd;
+	if ((nr == SYS_dup2 || nr == SYS_dup3) && (int) a[1] >= 500 && (int) a[1] < nd->next_fd) owned = 1;
+	if (nr == SYS_splice || nr == SYS_sendfile)
+	{
+		int other = nr == SYS_splice ? (int) a[2] : (int) a[1];
+		if (other >= 500 && other < nd->next_fd) owned = 1;
+	}
+	if (owned)
+		die(3, "node %d: system call %ld on checker-owned fd %d is not modelled", nd->id, nr, fd);
+}
+
 /* A node that forks becomes two processes the model cannot tell apart,
  * sharing one listener and its connections, and the child survives the
  * check.  End the check before the fork happens (the call is never
@@ -1252,7 +1286,24 @@ try_pending_for(Node *nd)
 
 	switch (nr)
 	{
-		case SYS_socket:  g_resp->val = nd->next_fd++; break;
+		case SYS_socket:
+		{
+			/* a TCP socket over IPv4, the only kind the model has.  A UDP
+			 * or Unix socket would be answered as TCP, so it is refused, as
+			 * is a type flag other than SOCK_CLOEXEC (SOCK_NONBLOCK is not
+			 * tracked from socket(); set it with fcntl()). */
+			int dom = (int) a[0], type = (int) a[1];
+			if (dom != AF_INET || (type & ~SOCK_CLOEXEC) != SOCK_STREAM)
+				die(3, "node %d: socket(%d, %#x) is not modelled (only AF_INET, SOCK_STREAM)", nd->id, dom, type);
+			g_resp->val = nd->next_fd++; break;
+		}
+		case SYS_readv: case SYS_writev: case SYS_preadv: case SYS_pwritev:
+		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg:
+		case SYS_sendmmsg: case SYS_recvmmsg: case SYS_shutdown: case SYS_dup:
+		case SYS_dup2: case SYS_dup3: case SYS_getsockopt: case SYS_getsockname:
+		case SYS_getpeername: case SYS_ioctl: case SYS_splice: case SYS_sendfile:
+			refuse_on_owned(nd, nr, a);
+			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
 		case SYS_clock_gettime:
 			if ((long) a[0] == CMC_PRELOAD_MAGIC) { nd->preload_ok = 1; g_resp->val = 0; break; }
 		{
@@ -1346,6 +1397,11 @@ try_pending_for(Node *nd)
 			g_resp->val = 0; break;
 		}
 		case SYS_accept: case SYS_accept4:
+			/* accept4's flags: SOCK_CLOEXEC is inert (a node never execs),
+			 * and SOCK_NONBLOCK is not carried onto the new fd, so it is
+			 * refused rather than ignored */
+			if (nr == SYS_accept4 && (a[3] & ~(uint64_t) SOCK_CLOEXEC))
+				die(3, "node %d: accept4 flags %#llx are not modelled (set O_NONBLOCK with fcntl())", nd->id, (unsigned long long) a[3]);
 			/* A non-blocking listener with no connection queued returns
 			 * EAGAIN at once, so an event loop that drains the backlog
 			 * (accept until EAGAIN) makes progress instead of parking on
@@ -1364,6 +1420,11 @@ try_pending_for(Node *nd)
 		{
 			int fd = (int) a[0];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, fd 3, libs) */
+			/* sendto's flags: MSG_NOSIGNAL is honoured; any other would
+			 * change the call (MSG_DONTWAIT, MSG_MORE, MSG_OOB) and is
+			 * refused, as is a destination address on a connected socket */
+			if (nr == SYS_sendto && ((a[3] & ~(uint64_t) MSG_NOSIGNAL) || a[4]))
+				die(3, "node %d: sendto flags %#llx or a destination address are not modelled", nd->id, (unsigned long long) a[3]);
 			int ews = efd_slot(nd, fd);
 			if (ews >= 0)
 			{
@@ -1424,6 +1485,11 @@ try_pending_for(Node *nd)
 		case SYS_read: case SYS_recvfrom:
 		{
 			int fd = (int) a[0];
+			/* recvfrom's flags change the call (MSG_PEEK keeps the bytes,
+			 * MSG_WAITALL waits for all, MSG_DONTWAIT does not block), so
+			 * any is refused; a source address out-parameter is not filled */
+			if (nr == SYS_recvfrom && fd >= 500 && (a[3] || a[4]))
+				die(3, "node %d: recvfrom flags %#llx or a source address are not modelled", nd->id, (unsigned long long) a[3]);
 			if (fd == DURABLE_FD)
 			{
 				/* A read of the durable descriptor serves the node's surviving

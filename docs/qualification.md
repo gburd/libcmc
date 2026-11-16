@@ -30,21 +30,27 @@ model gives.  None of this page makes a pass mean more than that.
 ## Process engine (`cmc --model-file`)
 
 The engine runs each node as a real process under seccomp user
-notification and answers the system calls below.  Every other system
-call runs in the kernel, untouched.
+notification and answers the system calls below.  `readv`, `writev`,
+`pread`, `pwrite`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
+`dup` family, `getsockopt`, `getsockname`, `getpeername`, `ioctl`,
+`splice` and `sendfile` are refused on a checker-owned fd (exit 3), and
+run in the kernel on any other.  `sendmsg` is not intercepted (the
+launch path itself uses it), so a `sendmsg` on a checker-owned fd gets
+the kernel's `EBADF`; that is a known gap.  Every other system call runs
+in the kernel, untouched.
 
 ### Sockets and connections
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `socket`, `bind`, `listen`, `setsockopt` | exact enough | node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts |
+| `socket`, `bind`, `listen`, `setsockopt` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts, "a UDP socket is refused" |
 | `connect` to a live node | approximate | always succeeds and waits at the listener, even before the peer calls `listen()` | proc_gate verdicts |
 | `connect` to a node that is down | exact | `ECONNREFUSED`; later reads `ENOTCONN`, writes `EPIPE`; the socket may be dialled again | proc_gate "a dead node refuses the connection", tcpsem redial |
-| `accept`, `accept4` | exact | which waiting dialler is a search choice; per dialler, oldest first; the sockaddr out-parameter is not filled | proc_gate verdicts |
+| `accept`, `accept4` | exact | which waiting dialler is a search choice; per dialler, oldest first; the sockaddr out-parameter is not filled; `accept4` flags other than `SOCK_CLOEXEC` are refused | proc_gate verdicts, "accept4 SOCK_NONBLOCK is refused" |
 | non-blocking `accept` with nothing waiting | exact | `EAGAIN` | proc_gate pollloop, epollloop |
 | one queue per connection direction | exact | FIFO; two connections between one node pair never share bytes | proc_gate crossrpc, fifo |
-| `read`, `recvfrom` | approximate | one read takes at most one write's bytes; a short read leaves the rest queued | proc_gate verdicts (the short read: code only, no fixture yet) |
-| `write`, `sendto` | approximate | at most `[target] max_write` bytes (default 64, cap 4096) per call; a longer write is exit 1 | proc_gate bigmsg |
+| `read`, `recvfrom` | approximate | one read takes at most one write's bytes; a short read leaves the rest queued; any `recvfrom` flag or source address is refused | proc_gate verdicts, "MSG_PEEK is refused" (the short read: code only, no fixture yet) |
+| `write`, `sendto` | approximate | at most `[target] max_write` bytes (default 64, cap 4096) per call; a longer write is exit 1; `sendto` flags other than `MSG_NOSIGNAL`, or a destination address, are refused | proc_gate bigmsg |
 | `close` | exact | FIN, or RST when bytes were left unread; bytes already sent stay readable | proc_gate rstwrite, rstignore, tcpsem rstdata |
 | a reset connection | exact | the reset reported once (`ECONNRESET`, or `EPIPE` after a FIN), then reads 0 and writes `EPIPE` | proc_gate rstwrite, rstignore, reset, tcpsem finwrite |
 | an exited listener's backlog | exact | each waiting dial is reset | proc_gate tcpsem backlog |
@@ -99,7 +105,7 @@ call runs in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| safety verdicts, distinct states, depth | exact | agrees with TLC on every `.cml` model | spec_gate, emit_gate, apalache_gate |
+| safety verdicts, distinct states, depth | exact | agrees with TLC on every `.cml` model; the seen set compares canonical bytes, not hashes | spec_gate, emit_gate, apalache_gate |
 | `eventually P`, `A ~> B` under `fairness weak` or none | exact | TLA+ semantics with stuttering; checked against TLC on each probe | spec_gate liveness rows, emit_gate |
 | liveness under `symmetry` | refused | exit 3 | (code; no fixture yet) |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
