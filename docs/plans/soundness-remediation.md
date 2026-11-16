@@ -251,6 +251,10 @@ demonstration it is.
   node-pair channels handed a candidate its rival's RequestVote as a
   reply.  Serve RPCs while campaigning (a poll loop, or a thread), then
   restore the planted-bug row.
+  Status: done.  A candidate waits for its replies in a `poll()` loop
+  over its listener and its vote connections.  The bug is caught again
+  by BFS and simulation, with a counterexample in which each vote is
+  read on its own connection; the pass now reaches a leader.
 - **4.8 Humming Consensus.**  hc.c has the same shape, and with
   connections modelled no participant ever adopts a projection, so its
   agreement pass is vacuous and its AP-mode bug unreachable.  Rework it

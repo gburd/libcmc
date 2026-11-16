@@ -42,6 +42,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -81,65 +82,101 @@ addr(int port)
 	return a;
 }
 
-static int
-read_full(int fd, unsigned char *m, int n)
-{
-	int			got = 0;
+static void serve(int c, const unsigned char *m);
 
-	while (got < n)
-	{
-		ssize_t		r = read(fd, m + got, (size_t) (n - got));
-
-		if (r <= 0)
-			return -1;
-		got += (int) r;
-	}
-	return 0;
-}
-
-/* one RequestVote RPC to peer `to`; returns 1 if the vote was granted */
-static int
-request_vote(int to)
-{
-	int			s = socket(AF_INET, SOCK_STREAM, 0);
-	struct sockaddr_in a = addr(BASE + to);
-
-	if (connect(s, (struct sockaddr *) &a, sizeof a) != 0)
-		return 0;
-	unsigned char req[3] = {'V', term, (unsigned char) id}, rep[3];
-
-	(void) !write(s, req, 3);
-	int			ok = read_full(s, rep, 3) == 0;
-
-	close(s);
-	if (ok && rep[0] == 'v')
-	{
-		if (rep[1] > term)		/* saw a higher term: step down */
-		{
-			term = rep[1];
-			role = 0;
-			votedFor = -1;
-			emit();
-			return 0;
-		}
-		return rep[2] == 1;
-	}
-	return 0;
-}
-
-/* become a candidate and run one election round */
+/* Accept one waiting connection and answer the RPC on it.  A connection
+ * that carries the election timer's 'T' instead is closed: a candidate
+ * already campaigning ignores its timer. */
 static void
-start_election(void)
+serve_one(int ls)
 {
+	int			c = accept(ls, NULL, NULL);
+	unsigned char m[3];
+
+	if (c < 0)
+		return;
+	if (read(c, m, 3) == 3)
+		serve(c, m);
+	close(c);
+}
+
+/* Become a candidate and run one election round.  The candidate sends
+ * RequestVote to every peer, then waits for the replies in a poll loop
+ * that also serves any RPC arriving on its listener (another candidate's
+ * RequestVote, a leader's heartbeat).  Waiting on the replies alone
+ * would deadlock two candidates, each waiting for a reply the other is
+ * too busy campaigning to send.  A reply that is a timer 'T' or EOF is a
+ * vote not granted. */
+static void
+start_election(int ls)
+{
+	int			out[N], open = 0, votes = 1;
+
 	term = term + 1;
 	role = 1;
 	votedFor = id;				/* vote for self */
 	emit();
-	int			votes = 1;
-
 	for (int p = 0; p < N; p++)
-		if (p != id && role == 1)
-			votes += request_vote(p);
+	{
+		struct sockaddr_in a = addr(BASE + p);
+		unsigned char req[3] = {'V', term, (unsigned char) id};
+
+		out[p] = -1;
+		if (p == id)
+			continue;
+		out[p] = socket(AF_INET, SOCK_STREAM, 0);
+		if (connect(out[p], (struct sockaddr *) &a, sizeof a) != 0)
+		{
+			close(out[p]);
+			out[p] = -1;
+			continue;
+		}
+		(void) !write(out[p], req, 3);
+		open++;
+	}
+	while (open > 0 && role == 1 && votes < MAJ)
+	{
+		struct pollfd pf[N + 1];
+		int			who[N + 1], np = 0;
+
+		pf[np].fd = ls; pf[np].events = POLLIN; who[np++] = -1;
+		for (int p = 0; p < N; p++)
+			if (out[p] >= 0) { pf[np].fd = out[p]; pf[np].events = POLLIN; who[np++] = p; }
+		if (poll(pf, (nfds_t) np, -1) <= 0)
+			continue;
+		for (int k = 0; k < np; k++)
+		{
+			unsigned char rep[3];
+			int			p = who[k];
+
+			if (!(pf[k].revents & POLLIN))
+				continue;
+			if (p < 0)
+			{
+				serve_one(ls);
+				continue;
+			}
+			ssize_t		n = read(out[p], rep, 3);
+
+			close(out[p]);
+			out[p] = -1;
+			open--;
+			if (n != 3 || rep[0] != 'v')
+				continue;
+			if (rep[1] > term)	/* saw a higher term: step down */
+			{
+				term = rep[1];
+				role = 0;
+				votedFor = -1;
+				emit();
+			}
+			else if (rep[2] == 1)
+				votes++;
+		}
+	}
+	for (int p = 0; p < N; p++)
+		if (out[p] >= 0)
+			close(out[p]);
 	if (role == 1 && votes >= MAJ)
 	{
 		role = 2;				/* won: leader for this term */
@@ -224,7 +261,7 @@ main(int argc, char **argv)
 		ssize_t		n = read(c, m, 3);
 
 		if (n == 1 && m[0] == 'T')
-			start_election();
+			start_election(ls);
 		else if (n == 3)
 			serve(c, m);
 		close(c);

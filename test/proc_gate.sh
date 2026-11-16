@@ -123,12 +123,12 @@ expect "mono: C2 passes the by-one impl"          0 "No error has been found" $(
 expect "mono: C2 catches the by-two step"         1 "no matching abstract action" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps
 expect "C2 refuses a partly-bound spec"           3 "needs every spec variable bound" $(runx "$HERE/examples/spec/paxos-refine.model" paxos) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --refine-steps
 expect "raft: election safety holds"        0 "No error has been found" $(runx "$HERE/examples/raft/raft.model" raft)
-# The raft and hc planted bugs were caught only through node-pair
-# channels, which handed a node its peer's request as the reply it was
-# waiting for.  With connections modelled, two concurrent raft candidates
-# deadlock (each waits for the other's reply outside accept()), and no hc
-# participant ever adopts a projection.  Those rows are withdrawn until
-# the examples are reworked (soundness plan 4.7, 4.8).
+expect "raft: double vote -> two leaders"   1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug)
+expect "raft: --simulate finds it"          1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug) --simulate --seed 1 --walks 2000
+# The hc planted bug was caught only through node-pair channels, which
+# handed a participant its peer's request as the reply it was waiting
+# for.  With connections modelled no hc participant ever adopts a
+# projection, so the row is withdrawn until hc.c is reworked (plan 4.8).
 expect "raftlog: no committed entry is lost" 0 "No error has been found" $(runx "$HERE/examples/raft/raftlog.model" raftlog)
 expect "raftlog: early-ack loses a committed entry" 1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug)
 expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug) --simulate --seed 1 --walks 2000

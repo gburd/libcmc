@@ -22,9 +22,10 @@ in the source tree, and `make check` builds and checks each one.
   agreement.
 - **[Raft leader election](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/raft)**
   -- three nodes; Election Safety (at most one leader per term), with and
-  without a crash.  Reference: Ongaro's `raft.tla`.  Its planted
-  double-vote bug was caught only through a channel model that mixed
-  connections, and is withdrawn (remediation plan, 3.7 and 4.7).
+  without a crash.  Reference: Ongaro's `raft.tla`.  A candidate serves
+  RPCs while it campaigns; before it did, its planted double-vote bug
+  was caught only through a channel model that mixed connections
+  (remediation plan, 3.7 and 4.7).
 - **[Humming Consensus](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/hc)**
   -- a generic agreement protocol (like Paxos/Raft/ZAB): three
   participants agree on a configuration per epoch over write-once
