@@ -1269,6 +1269,55 @@ test_p22_simulate_checks_last_state(void)
 	CHECK(strcmp(prop, "EventuallyReplied") == 0);
 }
 
+/* 2.3: more properties of one kind than the engine holds are refused when
+ * the run is set up, whether listed in the model or named twice.  Run in a
+ * child: on an engine without the check this writes past the arrays. */
+static void
+test_p23_property_cap(void)
+{
+	pid_t		pid;
+	int			st = 0;
+
+	fflush(NULL);
+	pid = fork();
+	if (pid == 0)
+	{
+		CmcProp		ps[65];
+		CmcModel	m = {"many", &mute_core, ps, 64, 0};
+		CmcOptions	o;
+		char		err[256];
+		const char *names[66];
+		CmcRun	   *r;
+		int			ok = 1;
+
+		for (int i = 0; i < 65; i++)
+			ps[i] = (CmcProp) CMC_INVARIANT(True, always_true);
+		cmc_options_default(&o);
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		ok &= r != NULL;
+		cmc_run_free(r);
+		m.nprops = 65;
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		ok &= r == NULL && strstr(err, "properties") != NULL;
+		cmc_run_free(r);
+		m.nprops = 1;
+		for (int i = 0; i < 65; i++)
+			names[i] = "True";
+		names[65] = NULL;
+		r = cmc_run_new(&m, "", names, &o, err, sizeof(err));
+		ok &= r == NULL && strstr(err, "properties") != NULL;
+		cmc_run_free(r);
+		/* a property of no known kind would never be checked */
+		ps[0].kind = (CmcPropKind) 0;
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		ok &= r == NULL && strstr(err, "kind") != NULL;
+		cmc_run_free(r);
+		_exit(ok ? 0 : 1);
+	}
+	CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1304,6 +1353,7 @@ main(void)
 	test_min4_negative_bounds();
 	test_p21_crash_clears_self_channel();
 	test_p22_simulate_checks_last_state();
+	test_p23_property_cap();
 	test_version();
 	if (failures)
 	{

@@ -616,6 +616,10 @@ cc -std=c11 -Ilibcmc/include mine.c mine_core.o \e
 16 timers per node.
 .It Dv CMC_MAX_WAKES
 8 waiters per node.
+.It Properties
+64 of each kind in one run;
+.Fn cmc_run_new
+refuses more.
 .El
 .Pp
 Going past a limit is reported as a violation, never truncated.

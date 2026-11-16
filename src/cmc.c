@@ -92,14 +92,12 @@ struct CmcRun
 			   *actp[CMC_MAX_PROPS],
 			   *wit[CMC_MAX_PROPS],
 			   *qui[CMC_MAX_PROPS],
-			   *ev[CMC_MAX_PROPS],
-			   *sel[CMC_MAX_PROPS];	/* the named (not always) props */
+			   *ev[CMC_MAX_PROPS];
 	int			ninv,
 				nactp,
 				nwit,
 				nqui,
-				nev,
-				nsel;
+				nev;
 	int			wit_depth[CMC_MAX_PROPS];
 	Table		t;
 	/* scratch, sized per run (docs/research/02 M1) */
@@ -548,27 +546,51 @@ parse_cfg(CmcRun *r, const char *cfg, char *err, size_t errlen)
 	return cfg_parse_into(r->core, r->cfg, cfg, err, errlen);
 }
 
+/*
+ * Files property p under its kind.  Returns 0, or -1 with the reason in err
+ * when p has no known kind (it would never be checked) or its kind already
+ * holds CMC_MAX_PROPS properties.  Both are checked before anything is
+ * written.
+ */
 static int
-add_prop(CmcRun *r, const CmcProp *p)
+add_prop(CmcRun *r, const CmcProp *p, char *err, size_t errlen)
 {
+	const CmcProp **arr;
+	int		   *n;
+
 	switch (p->kind)
 	{
 		case CMC_INV:
-			r->inv[r->ninv++] = p;
+			arr = r->inv;
+			n = &r->ninv;
 			break;
 		case CMC_ACTION_PROP:
-			r->actp[r->nactp++] = p;
+			arr = r->actp;
+			n = &r->nactp;
 			break;
 		case CMC_WITNESS:
-			r->wit[r->nwit++] = p;
+			arr = r->wit;
+			n = &r->nwit;
 			break;
 		case CMC_QUIESCENT:
-			r->qui[r->nqui++] = p;
+			arr = r->qui;
+			n = &r->nqui;
 			break;
 		case CMC_EVENTUALLY:
-			r->ev[r->nev++] = p;
+			arr = r->ev;
+			n = &r->nev;
 			break;
+		default:
+			snprintf(err, errlen, "property %s has unknown kind %d", p->name, (int) p->kind);
+			return -1;
 	}
+	if (*n >= CMC_MAX_PROPS)
+	{
+		snprintf(err, errlen, "too many properties of one kind (at most %d): %s",
+				 CMC_MAX_PROPS, p->name);
+		return -1;
+	}
+	arr[(*n)++] = p;
 	return 0;
 }
 
@@ -649,7 +671,8 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 	r->fstep = xmalloc(sizeof(int) * ((size_t) r->o.live_steps + 2));
 
 	for (int j = 0; j < m->nalways; j++)
-		add_prop(r, &m->props[j]);
+		if (add_prop(r, &m->props[j], err, errlen) != 0)
+			goto bad_prop;
 	if (props)
 	{
 		for (int i = 0; props[i]; i++)
@@ -665,22 +688,24 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 				cmc_run_free(r);
 				return NULL;
 			}
-			add_prop(r, p);
-			r->sel[r->nsel++] = p;
+			if (add_prop(r, p, err, errlen) != 0)
+				goto bad_prop;
 		}
 	}
 	else
 		for (int j = m->nalways; j < m->nprops; j++)
-		{
-			add_prop(r, &m->props[j]);
-			r->sel[r->nsel++] = &m->props[j];
-		}
+			if (add_prop(r, &m->props[j], err, errlen) != 0)
+				goto bad_prop;
 	if (r->nev && r->direct)
 		return run_reject(r, err, errlen, "CMC_EVENTUALLY needs actor mode");
 	if (r->core->durable_size && !r->core->apply_persist)
 		return run_reject(r, err, errlen,
 						  "durable_size > 0 needs apply_persist (the engine owns durable)");
 	return r;
+
+bad_prop:
+	cmc_run_free(r);
+	return NULL;
 }
 
 void
