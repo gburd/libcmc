@@ -66,13 +66,16 @@ expect "hc: agreement holds under write-once" 0 "41 distinct states found" --spe
 expect "hc: depth matches TLC (5)"            0 "complete state graph search is 5" --spec "$HERE/examples/spec/hc.cml"
 expect "hc: the overwrite bug breaks agreement" 1 "agreement is violated" --spec "$HERE/examples/spec/hc.cml" --define BUG
 
-# ZAB (Apache ZooKeeper's Zab.tla): commit-durability, a committed
-# transaction is held by a quorum so it survives a leader change.
-# Counts and depth match single-worker TLC; the early-ack bug commits
-# before a quorum stored, so a committed transaction can be lost.
-expect "zab: commit-durability holds"         0 "20 distinct states found" --spec "$HERE/examples/spec/zab.cml"
-expect "zab: depth matches TLC (6)"           0 "complete state graph search is 6" --spec "$HERE/examples/spec/zab.cml"
-expect "zab: the early-ack bug loses a commit" 1 "durable is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
+# Zab (Junqueira, Reed, Serafini 2011; ZooKeeper's Zab.tla): epochs,
+# discovery from a quorum, synchronisation, broadcast and a committed
+# prefix per epoch.  Of two epochs' committed prefixes one extends the
+# other; counts and depth match single-worker TLC on the emitted module.
+# The --define BUG starts an epoch from a stale history: initial_history
+# fails first, in 13 steps (TLC finds committed_prefix fail in 20).
+expect "zab: committed prefixes agree"        0 "27913 distinct states found" --spec "$HERE/examples/spec/zab.cml"
+expect "zab: depth matches TLC (26)"          0 "complete state graph search is 26" --spec "$HERE/examples/spec/zab.cml"
+expect "zab: a stale initial history misses a commit" 1 "initial_history is violated" --spec "$HERE/examples/spec/zab.cml" --define BUG
+expect "zab: shortest trace is 13 actions"    1 "is (13 actions)" --spec "$HERE/examples/spec/zab.cml" --define BUG
 
 # Flexible Paxos (Howard, Malkhi, Spiegelman 2016): the Paxos ballots of
 # paxos.cml with a phase 1 quorum Q1 and a phase 2 quorum Q2.  With A=4,

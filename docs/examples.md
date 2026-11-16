@@ -72,9 +72,13 @@ checked three ways that agree -- `cmc --spec`, TLC
   of promises reports.  Its invariant is the paper's: a confirmed state
   descends from every earlier confirmed state, tracked by a ghost parent
   per round.  Two rounds.  Reference: Rystsov, 2018.
-- `zab.cml` -- ZAB commit-durability: a committed transaction is held by
-  a quorum, so it survives a leader change.  Reference: ZooKeeper's
-  `Zab.tla`.
+- `zab.cml` -- Zab with epochs: discovery takes a new leader's initial
+  history from the most up-to-date member of a quorum, followers
+  synchronise to it, and the leader broadcasts and commits a prefix.
+  Of two epochs' committed prefixes one extends the other.  Three
+  servers, two epochs, histories of at most two transactions, no
+  crashes.  Reference: Junqueira, Reed, Serafini, DSN 2011, and
+  ZooKeeper's `Zab.tla`.
 - `twophase.cml` -- two-phase commit, the canonical non-consensus
   example; Consistency (atomicity): a committed and an aborted resource
   manager never coexist.  Reference: Lamport's `TwoPhase.tla`.
@@ -87,9 +91,8 @@ These models are small safety demonstrations, each a few guarded
 actions over a tally.  `cmc --spec`, TLC and Apalache agreeing on one
 shows the encoded rules were executed as written; it does not show the
 rules are the named protocol.  Fast Paxos recovery does not read a
-quorum, and ZAB is a guarded
-counter with no epochs or recovery.  The remediation plan (Phase 4)
-either makes each a faithful abstraction or renames it.
+quorum.  The remediation plan (Phase 4) either makes each a closer
+abstraction or renames it.
 
 ## The failure, animated
 

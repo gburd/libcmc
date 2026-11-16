@@ -53,7 +53,8 @@ is designed for, not ones on which a pass is yet evidence.
 - **Commit durability and "no committed entry lost."**  The
   single-contested-slot reduction (as in the Raft-log process example)
   checks that an acknowledged value survives the crashes in the budget.
-  `zab.cml` is a guarded counter, not a model of ZAB's recovery.
+  `zab.cml` models Zab's epochs and discovery at three servers and two
+  epochs, without crashes.
 - **A real implementation against an invariant.**  `cmc --refine` maps
   the binary's observable state onto an abstract `.cml` and checks the
   abstract invariants on it.  That is invariant reuse, not proof that

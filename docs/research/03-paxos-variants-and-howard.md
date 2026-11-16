@@ -205,7 +205,7 @@ or N=5 for the quorum-split variants.
 | Single-decree Paxos (done) | 3 acceptors, 2 ballots, 2 values | a 2a that ignores the votes its promises report |
 | Flexible Paxos (done) | 4 acceptors, 2 ballots, 2 values | phase 1 on `Q1` promises with `Q1 + Q2 <= A` |
 | Raft election (done) | 3 servers, one term | grant without spending the one vote |
-| ZAB commit-durability (done) | 3 participants | commit without a quorum (early ack) |
+| ZAB epochs and committed prefix (done) | 3 servers, 2 epochs, 2 transactions | discovery takes a stale history |
 | Humming Consensus (done) | 3 participants, 2 values | overwrite a write-once register |
 | CASPaxos (done) | 3 acceptors, 2 rounds | accept below a promise |
 | Vertical Paxos (two configs) | old + new, 3+3 overlap | activate new config before old read quorum |
@@ -226,12 +226,15 @@ Multi-Paxos / Raft-log / Generalized-Paxos as multi-slot logs: the
 distinctive safety (a committed prefix survives arbitrary leader changes
 across many slots) is not directly expressible in the bounded DSL.  The
 proven reduction is the single-contested-slot / single-transaction
-collapse (the `raftlog.c` and `zab.cml` approach): model one slot and its
+collapse (the `raftlog.c` approach): model one slot and its
 quorum-intersection guarantee, which is genuinely distinct from plain
 Agreement (it is durability: committed implies quorum-backed).  This
 catches "stale leader overwrites a committed entry" at the one slot but
 does not check log matching across slots, contiguity, or commit-index
-monotonicity.  State that limit.
+monotonicity.  State that limit.  `zab.cml` goes one step further: a
+history of at most two transactions, encoded as one integer, so the
+committed prefix and its order across two epochs are checked, though
+not at the lengths a real log reaches.
 
 ### Poor fit (wrong tool)
 

@@ -263,6 +263,24 @@ demonstration it is.
 - **4.5 ZAB.**  Epochs, leader election, synchronisation from a quorum
   and a committed prefix, or the model and its docs are narrowed to the
   guarded counter it is.
+  Status: done, as a model of the protocol.  `zab.cml` has accepted and
+  current epochs and a history per server, discovery (ACKEPOCH from a
+  quorum, the leader taking the most up-to-date member's history),
+  synchronisation (NEWLEADER, ACK-LD, a quorum establishes the epoch),
+  broadcast and commit of a quorum-acknowledged prefix.  A history of
+  at most two transactions is one integer.  The invariants are
+  committed_prefix (of two epochs' committed prefixes one extends the
+  other) and initial_history (a new leader's initial history extends
+  every earlier committed prefix).  With 3 servers and 2 epochs it has
+  27,913 distinct states and depth 26 in cmc and in TLC; Apalache
+  reports no error for either invariant up to length 10.  The `BUG`
+  discovery takes any quorum member's history; cmc and TLC find
+  initial_history violated in 13 steps (committed_prefix in 20), and
+  Apalache finds it at length 13 in about 17 minutes, the slowest row
+  in the gate.  Still abstracted: no leader election messages (at most
+  one leader per epoch, by construction), no crashes or restarts, no
+  loss, synchronisation as one step, and no delivery to the
+  application.
 - **4.6 Single-decree Paxos.**  Acceptors vote in more than one ballot,
   and safety rests on phase 1 value selection, not on write-once votes.
   Status: done.  `paxos.cml` has Paxos.tla's maxBal, maxVBal and maxVal

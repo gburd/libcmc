@@ -105,8 +105,9 @@ examples/spec|raft|raft|election_safety|PASS|10|
 examples/spec|raft|raftb|election_safety|VIOLATION|10|--define BUG
 examples/spec|hc|hc|agreement|PASS|10|
 examples/spec|hc|hcb|agreement|VIOLATION|10|--define BUG
-examples/spec|zab|zab|durable|PASS|10|
-examples/spec|zab|zabb|durable|VIOLATION|10|--define BUG
+examples/spec|zab|zab|committed_prefix|PASS|10|
+examples/spec|zab|zabi|initial_history|PASS|10|
+examples/spec|zab|zabb|initial_history|VIOLATION|13|--define BUG
 examples/spec|fpaxos|fpaxos|agreement|PASS|10|
 examples/spec|fpaxos|fpaxosb|agreement|VIOLATION|12|--define BUG
 examples/spec|caspaxos|caspaxos|descends|PASS|10|
