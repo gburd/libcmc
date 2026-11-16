@@ -243,6 +243,38 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
     accesses between two calls are not explored, and cmc(7) must say so.
 
   Until all of that lands, the INCOMPLETE rule is the honest answer.
+
+  The design being built (`wip/threads-sched`):
+
+  - **Visible operations.**  In a node with more than one thread (or a
+    birth in flight), a thread's step ends at a visible operation: a
+    `futex` call, any call on a checker-owned fd, a write to fd 3 or fd
+    193, `clone`, `exit`.  Other calls (`mmap`, `rseq`, the clock) are
+    answered at once, since they touch nothing another thread can see
+    except through memory, and memory between two calls is not
+    explored.
+  - **Execute, then park.**  A visible operation is carried out when the
+    thread reaches it (so its effect, such as waking a futex waiter or
+    queueing bytes, is in the world at once), but its answer is held and
+    the thread parks (BK_DONE).  A deferring call parks as before
+    (recv, accept, poll, futex wait).  A call the kernel performs
+    (CONTINUE: an fd-3 write, `clone`) is held before it runs instead.
+  - **A search action.**  When every thread of the node is parked, the
+    actions include RUN(node, thread) for each thread with a held answer
+    and each woken futex waiter.  RUN sends the answer and lets that one
+    thread run to its next visible operation.  At most one thread of a
+    node runs at a time, so a replay is deterministic.
+  - **Births.**  The main thread is seized with PTRACE_O_TRACECLONE, so
+    a newborn starts in a ptrace stop and the parent stops at
+    PTRACE_EVENT_CLONE.  The parent continues to its next visible
+    operation; the newborn stays stopped until a RUN releases it.
+    Reaping waits on every traced thread (`__WALL`).
+  - **Encoding.**  A held answer is part of a thread's record (the call
+    and its result), so worlds that differ in a pending result split.
+  - **The boundary.**  Interleavings of memory accesses between two
+    visible operations of different threads are not explored; cmc(7)
+    states it.  With the scheduler complete, the INCOMPLETE rule is
+    removed.
 - **3.9 A root with no enabled action.**  The no-progress guard also
   reports a safety-only model whose initial state enables no action,
   instead of a pass.  (An unmet `eventually` there already fails, on
