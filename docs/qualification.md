@@ -122,5 +122,5 @@ call runs in the kernel, untouched.
 | paxos | pass and planted bug, with and without faults (proc_gate) |
 | raftlog, zab | pass and planted bug (proc_gate) |
 | raft | pass and planted bug, with and without a crash (proc_gate) |
-| hc | vacuous: no participant ever adopts (plan 4.8) |
+| hc | pass with a progress property at four timeouts, planted bug by seeded simulation; both only in `make check-examples-slow`, about seven minutes; partitions only by simulation |
 | paxos2 | refines `paxos.cml` with a progress property; its planted bug breaks the spec's agreement (proc_gate) |

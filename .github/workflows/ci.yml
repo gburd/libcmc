@@ -93,6 +93,8 @@ jobs:
         run: make check-calibration
       - name: make check-hc-bugs
         run: make check-hc-bugs
+      - name: make check-examples-slow
+        run: make check-examples-slow
 
   bridge:
     # The TLA+ bridge: every .cml model's emitted module through TLC and

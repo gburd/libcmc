@@ -260,6 +260,14 @@ demonstration it is.
   agreement pass is vacuous and its AP-mode bug unreachable.  Rework it
   to serve while it iterates, and add an `eventually` property that some
   participant adopts.
+  Status: done.  An RPC serves the participant's own store in a `poll()`
+  loop while it waits, read repair no longer ends the iteration (as
+  ReadRepair and Adopt are separate actions in the TLA+ spec), and
+  `hc.model` requires that some participant adopts.  Four timeouts is
+  the fewest at which one does; agreement holds there (37,065 states),
+  and the AP-mode bug is found by seeded simulation at twelve.  Both
+  take about seven minutes, so they run in `make check-examples-slow`,
+  on the calibration's triggers, not on every push.
 
 ## Phase 5: qualification
 

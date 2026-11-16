@@ -38,9 +38,11 @@
  * projection; let E_max be the greatest epoch seen and C_max a config
  * at E_max; if some participant has no value at E_max, repair by
  * copying C_max there (write-once, so an existing value is never
- * changed); else if the configs at E_max are UNANIMOUS and E_max is
- * newer than what we have adopted, ADOPT C_max; else suggest our own
- * new config at epoch E_max + 1.
+ * changed); then, if the configs at E_max are UNANIMOUS across a quorum
+ * and E_max is newer than what we have adopted, ADOPT C_max; else
+ * suggest a new config at epoch E_max + 1.  While it waits on a peer's
+ * reply a participant keeps serving its own store, as every peer is
+ * iterating by asking the others.
  *
  * To make two participants race, each starts preferring its own config
  * (node i prefers value 10 + i), so at epoch 1 they suggest DIFFERENT
@@ -59,9 +61,10 @@
  * mode).  Under an asymmetric partition two participants each adopt from
  * a different minority and end up with different configs at the same
  * epoch -- the agreement violation the paper notes is invisible until
- * the partition heals.  cmc finds it:
+ * the partition heals.  cmc finds it (a timeout on a reply stands for an
+ * unreachable peer):
  *   cmc --model-file examples/hc/hc.model --binary ./hc-bug \
- *       --timeouts 6 --drops 1 --simulate --seed 3
+ *       --timeouts 12 --simulate --seed 2 --walks 30000 --depth 600
  *
  *   cc -no-pie -o hc examples/hc/hc.c
  *   cmc --model-file examples/hc/hc.model --binary ./hc
@@ -69,6 +72,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -113,34 +117,95 @@ addr(int port)
 	return a;
 }
 
-static int
-read_full(int fd, unsigned char *m, int n)
+static int ls;			/* this participant's listener */
+
+/* answer one store request m (READ, WRITE or LATEST) into r */
+static void
+answer_store(const unsigned char m[3], unsigned char r[3])
 {
-	int got = 0;
-
-	while (got < n)
+	r[0] = r[1] = r[2] = 0;
+	if (m[0] == 'R')				/* READ epoch: our store's value */
 	{
-		ssize_t r = read(fd, m + got, (size_t) (n - got));
-
-		if (r <= 0)
-			return -1;
-		got += (int) r;
+		r[0] = 'r';
+		r[1] = m[1];
+		r[2] = m[1] < MAXEPOCH ? store[m[1]] : 0;
 	}
-	return 0;
+	else if (m[0] == 'W')			/* WRITE epoch config (write-once) */
+	{
+		if (m[1] < MAXEPOCH && store[m[1]] == 0)
+		{
+			store[m[1]] = m[2];
+			r[0] = 'w';
+		}
+		else
+			r[0] = 'x';				/* already written: ignored */
+	}
+	else if (m[0] == 'L')			/* LATEST: highest written epoch */
+	{
+		int hi = 0;
+
+		for (int e = 1; e < MAXEPOCH; e++)
+			if (store[e])
+				hi = e;
+		r[0] = 'l';
+		r[1] = (unsigned char) hi;
+		r[2] = hi ? store[hi] : 0;
+	}
 }
 
-/* one request/reply on a fresh connection to participant `to` */
+/* accept one waiting connection and answer the store request on it; a
+ * timer 'T' that arrives mid-iteration is dropped (one iteration at a
+ * time) */
+static void
+serve_one(void)
+{
+	int c = accept(ls, NULL, NULL);
+	unsigned char m[3], r[3];
+
+	if (c < 0)
+		return;
+	if (read(c, m, 3) == 3)
+	{
+		answer_store(m, r);
+		(void) !write(c, r, 3);
+	}
+	close(c);
+}
+
+/* One request/reply on a fresh connection to participant `to`.  While
+ * the reply is outstanding the participant keeps serving its own store,
+ * in a poll() loop over the listener and the connection: every
+ * participant iterates by asking the others, so one that stopped
+ * serving while it waited would deadlock with a peer doing the same.
+ * Returns 0 with the reply in rep, or -1 (no reply: refused, reset, or
+ * a timeout standing for a partition). */
 static int
 rpc(int to, const unsigned char req[3], unsigned char rep[3])
 {
 	int s = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in a = addr(BASE + to);
+	int r = -1;
 
 	if (connect(s, (struct sockaddr *) &a, sizeof a) != 0)
+	{
+		close(s);
 		return -1;
+	}
 	(void) !write(s, req, 3);
-	int r = read_full(s, rep, 3);
+	for (;;)
+	{
+		struct pollfd pf[2] = {{.fd = ls, .events = POLLIN}, {.fd = s, .events = POLLIN}};
 
+		if (poll(pf, 2, -1) <= 0)
+			continue;
+		if (pf[0].revents & POLLIN)
+			serve_one();
+		if (pf[1].revents & POLLIN)
+		{
+			r = read(s, rep, 3) == 3 ? 0 : -1;
+			break;
+		}
+	}
 	close(s);
 	return r;
 }
@@ -255,13 +320,17 @@ iterate(void)
 	}
 	int unanimous = (seen == agree) && (seen > 0);
 
-	if (hole && seen >= MAJ && unanimous)
+	if (hole && unanimous)
 	{
-		/* repair: copy the best value to stores missing it (write-once) */
+		/* read repair (HummingConsensus.tla's ReadRepair): copy the best
+		 * value seen at E_max to the reachable stores missing it
+		 * (write-once).  Repair needs no quorum, since it only spreads a
+		 * value already suggested, and it does not end the iteration:
+		 * the adoption rule below, counted on the reads above, decides
+		 * whether to adopt, as Adopt is a separate action in the spec. */
 		for (int p = 0; p < NPART; p++)
 			if (read_at(p, e_max) == 0)
 				write_at(p, e_max, best);
-		return;
 	}
 	if (hole && !unanimous)
 	{
@@ -317,7 +386,7 @@ main(int argc, char **argv)
 	adopted_config = 0;
 	emit();
 
-	int ls = socket(AF_INET, SOCK_STREAM, 0);
+	ls = socket(AF_INET, SOCK_STREAM, 0);
 	struct sockaddr_in a = addr(BASE + id);
 
 	bind(ls, (struct sockaddr *) &a, sizeof a);
@@ -329,7 +398,7 @@ main(int argc, char **argv)
 
 		if (c < 0)
 			break;
-		unsigned char m[3], r[3] = {0, 0, 0};
+		unsigned char m[3], r[3];
 		ssize_t n = read(c, m, 3);
 
 		if (n == 1 && m[0] == 'T')		/* timeout: take one HC iteration */
@@ -343,33 +412,7 @@ main(int argc, char **argv)
 			close(c);
 			continue;
 		}
-		if (m[0] == 'R')				/* READ epoch: our store's value */
-		{
-			r[0] = 'r';
-			r[1] = m[1];
-			r[2] = m[1] < MAXEPOCH ? store[m[1]] : 0;
-		}
-		else if (m[0] == 'W')			/* WRITE epoch config (write-once) */
-		{
-			if (m[1] < MAXEPOCH && store[m[1]] == 0)
-			{
-				store[m[1]] = m[2];
-				r[0] = 'w';
-			}
-			else
-				r[0] = 'x';				/* already written: ignored */
-		}
-		else if (m[0] == 'L')			/* LATEST: highest written epoch */
-		{
-			int hi = 0;
-
-			for (int e = 1; e < MAXEPOCH; e++)
-				if (store[e])
-					hi = e;
-			r[0] = 'l';
-			r[1] = (unsigned char) hi;
-			r[2] = hi ? store[hi] : 0;
-		}
+		answer_store(m, r);
 		(void) !write(c, r, 3);
 		close(c);
 	}

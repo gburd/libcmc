@@ -7,19 +7,22 @@
 #   cc -no-pie -o hc examples/hc/hc.c
 #   cmc --model-file examples/hc/hc.model --binary ./hc
 #
-# The agreement rule is what HC's unanimity-before-adopt enforces; build
-# -DBUG (adopt without checking unanimity) to see it broken:
-#   cmc --model-file examples/hc/hc.model --binary ./hc-bug
+# The agreement rule is what HC's quorum-before-adopt enforces; build
+# -DBUG (adopt on a unanimity seen at a minority) and search longer to
+# see it broken:
+#   cmc --model-file examples/hc/hc.model --binary ./hc-bug \
+#       --timeouts 12 --simulate --seed 2 --walks 30000 --depth 600
 [target]
 nodes = 3
 
 [environment]
-# each timeout lets one participant take one iteration of the algorithm;
-# a drop is a lost message, i.e. an asymmetric network partition.  CP
-# mode (the correct build) keeps agreement even under a partition,
-# because adoption needs a quorum majority and quorums intersect.
-timeouts = 3
-drops = 1
+# A timeout lets a participant take one iteration of the algorithm, or,
+# while it waits on a peer's reply, stands for that peer being
+# unreachable.  Four is the fewest at which a participant adopts.  With
+# a drop on top the exhaustive search does not finish in two hours, so
+# partitions are left to simulation; CP mode (the correct build) keeps
+# agreement because adoption needs a quorum and quorums intersect.
+timeouts = 4
 
 [fields]
 epoch  = 0      # node[i].epoch:  the epoch this participant has adopted
@@ -33,3 +36,7 @@ config = 1      # node[i].config: the config it adopted there (0 = none)
 # participants never commit to different configs at one epoch.)  Written
 # over all pairs; a participant that has adopted nothing has epoch 0.
 agreement = "all i in nodes : all j in nodes : node[i].epoch == 0 or node[j].epoch == 0 or node[i].epoch != node[j].epoch or node[i].config == node[j].config"
+# Progress: some participant adopts a projection.  Without it a run in
+# which nobody ever adopts passes agreement trivially, as hc.c did
+# before it served requests while it waited on its own.
+adopts = "eventually node[0].epoch != 0 or node[1].epoch != 0 or node[2].epoch != 0"

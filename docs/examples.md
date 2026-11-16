@@ -29,8 +29,9 @@ in the source tree, and `make check` builds and checks each one.
 - **[Humming Consensus](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/hc)**
   -- a generic agreement protocol (like Paxos/Raft/ZAB): three
   participants agree on a configuration per epoch over write-once
-  register stores.  Its pass is vacuous: with connections modelled one
-  by one, no participant ever adopts a projection (remediation plan, 3.7
+  register stores; agreement holds and a participant adopts.  Before a
+  participant served requests while it waited on its own, it never
+  adopted at all under a faithful channel model (remediation plan, 3.7
   and 4.8).  Reference: Fritchie, PaPoC 2016.
 - **[ZooKeeper Atomic Broadcast](https://codeberg.org/gregburd/libcmc/src/branch/main/examples/zab)**
   -- a leader and two followers; a committed transaction is never lost.

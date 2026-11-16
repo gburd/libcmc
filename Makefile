@@ -48,7 +48,7 @@ ASAN_B ?= build-asan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples check-asan \
+        check-examples check-examples-slow check-asan \
         codeberg-release \
         install docs-site clean
 
@@ -117,6 +117,11 @@ check-examples: $(B)/test_cmc $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/proc_gate.sh $(B)
 	test/spec_gate.sh $(B)
 
+# check-examples plus the rows too slow for every push (the full hc
+# check and its planted bug, about seven minutes)
+check-examples-slow: $(B)/test_cmc $(B)/cmc $(PRELOAD)
+	CMC_SLOW=1 CC=$(CC) test/proc_gate.sh $(B)
+
 # MemorySanitizer (docs/research/02 M2): the engine tests and the toy gate
 # under clang -fsanitize=memory, plus the uninitialised-read probe, which
 # must be reported.  Separate build tree.
@@ -173,7 +178,7 @@ check-emit-tla: $(B)/cmc
 check-emit-apalache: $(B)/cmc
 	test/apalache_gate.sh $(B)/cmc
 
-check-all: check-unit check-msan check-asan check-calibration check-hc-bugs
+check-all: check-unit check-msan check-asan check-calibration check-hc-bugs check-examples-slow
 
 install: $(LIB) $(B)/cmc $(PRELOAD)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \

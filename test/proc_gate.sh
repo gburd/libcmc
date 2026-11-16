@@ -125,14 +125,19 @@ expect "C2 refuses a partly-bound spec"           3 "needs every spec variable b
 expect "raft: election safety holds"        0 "No error has been found" $(runx "$HERE/examples/raft/raft.model" raft)
 expect "raft: double vote -> two leaders"   1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug)
 expect "raft: --simulate finds it"          1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug) --simulate --seed 1 --walks 2000
-# The hc planted bug was caught only through node-pair channels, which
-# handed a participant its peer's request as the reply it was waiting
-# for.  With connections modelled no hc participant ever adopts a
-# projection, so the row is withdrawn until hc.c is reworked (plan 4.8).
 expect "raftlog: no committed entry is lost" 0 "No error has been found" $(runx "$HERE/examples/raft/raftlog.model" raftlog)
 expect "raftlog: early-ack loses a committed entry" 1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug)
 expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug) --simulate --seed 1 --walks 2000
-expect "hc: agreement holds, even under a partition"   0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
+# hc's model requires that some participant adopts, so agreement is not
+# a vacuous pass.  The full check and the AP-mode bug take about seven
+# minutes together, so they run only with CMC_SLOW=1 (make
+# check-examples-slow, on the calibration's triggers); the quick row
+# checks a shorter run is INCOMPLETE rather than a pass.
+expect "hc: a bounded run is not a pass" 2 "INCOMPLETE" $(runx "$HERE/examples/hc/hc.model" hc) --depth 12
+if [ "${CMC_SLOW:-0}" = 1 ]; then
+	expect "hc: agreement holds, and a participant adopts" 0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
+	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 2 --walks 30000 --depth 600
+fi
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)
 expect "zab: --simulate finds it"           1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug) --simulate --seed 1 --walks 2000

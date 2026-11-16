@@ -95,48 +95,66 @@ cmc --model-file examples/hc/hc.model --binary ./hc
 
 ```
 Model checking completed. No error has been found.
-6026 states generated, 2694 distinct states found, 0 states left on queue.
+99011 states generated, 37065 distinct states found, 0 states left on queue.
 ```
 
-**This pass is vacuous.**  In every state cmc reaches, no participant
-has adopted any projection, so agreement holds trivially; an invariant
-that no participant ever adopts holds too.  A participant's iteration
-dials its peers while they are doing the same, and each one waits for a
-reply from a peer that is itself waiting outside `accept()`.  Up to
-1.3.0 the engine kept one channel per node pair and handed those waiting
-participants each other's requests as replies, which is how the
-iterations ever finished; with connections modelled one by one
-(soundness plan 3.7) they do not.  The example needs to serve requests
-while it iterates before it shows anything (plan 4.8).
+(about six minutes, single-threaded).  cmc runs all three participants
+and tries every order of their iterations, and every point at which a
+timeout stands for an unreachable peer, up to four timeouts.  No two
+ever adopt different configurations at one epoch, and the model's
+`adopts` property requires that some participant does adopt one, so the
+pass is not vacuous.  Four timeouts is the fewest at which anyone
+adopts.  A drop on top of them does not finish in two hours, so
+partitions are explored by simulation; adoption needs a quorum majority
+and quorums intersect, which is why agreement holds under them.  That is
+a result for this program at this instance, not a proof for other sizes
+or budgets.
 
-## The planted bug (withdrawn)
+A participant serves its own store while it waits on a peer's reply, in
+a `poll()` loop over its listener and the connection.  Each participant
+iterates by asking the others, so one that stopped serving while it
+waited would deadlock with a peer doing the same.  Up to 1.3.0 hc.c did
+stop serving, and the engine's node-pair channels hid the deadlock by
+handing a waiting participant its peer's request as the reply; with
+connections modelled one by one nobody ever adopted, and the pass was
+vacuous.
+
+## The planted bug
 
 Built with `-DBUG`, a participant runs in eventual-consistency ("AP")
 mode: it adopts a projection it sees as unanimous **without** requiring a
-quorum majority, so a participant isolated with a minority of stores
-adopts anyway.  Under an asymmetric partition two participants each adopt
-from a different minority and end up with different configurations at the
-same epoch -- the conflict the paper notes is invisible until the
-partition heals.
+quorum majority, so a participant that reached only a minority of stores
+adopts anyway.  Two participants can then adopt different
+configurations at the same epoch -- the conflict the paper notes is
+invisible until the partition heals.
 
 ```sh
 cc -no-pie -DBUG -o hc-bug examples/hc/hc.c
 cmc --model-file examples/hc/hc.model --binary ./hc-bug \
-    --timeouts 6 --drops 1 --simulate --seed 3
+    --timeouts 12 --simulate --seed 2 --walks 30000 --depth 600
 ```
 
-Up to 1.3.0 this run reported the violation, but only through the
-cross-connection replies described above, so it was not a Linux run.
-With connections modelled, no participant adopts and the bug is out of
-reach; the gate row is withdrawn until the example is reworked.
+```
+Walk 21949 (seed 2):
+Error: Invariant agreement is violated.
+  node states: node[0]=1,10 node[1]=0,0 node[2]=1,11
+```
+
+The violation needs a long schedule (68 actions, twelve of them
+timeouts), so simulation reaches it where the exhaustive search does
+not; a fixed seed makes it reproducible, in about 100 seconds.
 
 ## What this shows
 
-As it stands, nothing: the program never reaches the adoption rule it
-was written to check.  The finding is itself the point of the soundness
-work.  A checker that answers a read with bytes from the wrong
-connection can make a deadlocked program look like a working protocol,
-and a pass over such a program says only that no state was bad, not
-that any interesting state was reached.  Pair a safety invariant with an
-`eventually` property the program must reach, as `test/proc_gate.sh`
-does for its fixtures.
+HC is a general agreement protocol, and its agreement rule -- adopt only
+a projection a quorum agrees on, over write-once stores -- is executed,
+not transcribed.  The correct build keeps agreement and makes progress;
+the `-DBUG` build relaxes the quorum requirement and loses agreement,
+and cmc prints a schedule that does.
+
+The way there is the point of the soundness work too.  A checker that
+answers a read with bytes from the wrong connection can make a
+deadlocked program look like a working protocol, and a pass over such a
+program says only that no state was bad, not that any interesting state
+was reached.  Pair a safety invariant with an `eventually` property the
+program must reach, as `hc.model` does.
