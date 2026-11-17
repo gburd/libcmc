@@ -1163,6 +1163,20 @@ test_min4_negative_bounds(void)
 		CHECK(r == NULL);
 		cmc_run_free(r);
 	}
+	/* a search the engine does not know would run nothing and pass */
+	for (int i = 0; i < 2; i++)
+	{
+		cmc_options_default(&o);
+		o.search = (CmcSearch) (i ? 99 : 0);
+		r = cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err));
+		CHECK(r == NULL && strstr(err, "search") != NULL);
+		cmc_run_free(r);
+	}
+	cmc_options_default(&o);
+	o.search = CMC_REPLAY;
+	r = cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "replay_in") != NULL);
+	cmc_run_free(r);
 	/* a simulation of no walks looks at nothing, so it cannot pass */
 	cmc_options_default(&o);
 	o.search = CMC_SIMULATE;

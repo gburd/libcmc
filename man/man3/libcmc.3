@@ -552,7 +552,13 @@ returns
 on a bad setting, an unknown property, a bound out of range, a
 durable part without
 .Fn apply_persist ,
-a duplicating FIFO network, or a
+a duplicating FIFO network, a
+.Fa search
+that is none of the four, a
+.Dv CMC_REPLAY
+search with no
+.Fa replay_in ,
+or a
 .Dv CMC_SIMULATE
 search with
 .Fa walks

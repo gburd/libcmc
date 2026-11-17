@@ -642,6 +642,11 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 						  "bounds must be >= 0 (depth and live steps >= 1)");
 	if (r->o.net != CMC_NET_FIFO && r->o.net != CMC_NET_BAG)
 		return run_reject(r, err, errlen, "unknown network model");
+	/* cmc_check() would run no search and report a pass */
+	if (r->o.search < CMC_BFS || r->o.search > CMC_REPLAY)
+		return run_reject(r, err, errlen, "unknown search");
+	if (r->o.search == CMC_REPLAY && !r->o.replay_in)
+		return run_reject(r, err, errlen, "a replay needs replay_in, the file to replay");
 	/* no walk looks at no state, which must not read as a pass */
 	if (r->o.search == CMC_SIMULATE && r->o.walks < 1)
 		return run_reject(r, err, errlen, "a simulation needs at least one walk");

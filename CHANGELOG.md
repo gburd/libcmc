@@ -37,6 +37,11 @@ Command line, API and the abstract checker:
 - API: `cmc_run_new()` returns NULL for a `CMC_SIMULATE` search with
   `walks` of 0, which looked at no state and passed.
   [test_cmc: test_min4_negative_bounds]
+- API: `cmc_run_new()` returns NULL for a `search` that is none of
+  `CMC_BFS`, `CMC_DFS`, `CMC_SIMULATE` and `CMC_REPLAY`: `cmc_check()`
+  ran no search for it and reported `CMC_PASS` with 0 states.  It also
+  returns NULL for `CMC_REPLAY` with no `replay_in`, which would open a
+  NULL path.  [test_cmc: test_min4_negative_bounds]
 - `--define TAG` that gates no action in the spec is an error, so a
   mistyped tag no longer checks the spec without its planted bug.
   [spec_gate: "a --define that gates no action is an error"]
