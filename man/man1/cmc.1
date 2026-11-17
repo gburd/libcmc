@@ -215,6 +215,12 @@ work as for in-process models, except that walk
 of a simulation does not take its own seed: the same
 .Fl -seed
 takes the same walks.
+A world in which a node has run more than one thread is never merged
+with another
+.Pq see Xr cmc 7 ,
+so a threaded program's search is a tree; without
+.Fl -max-states
+it stops, incomplete, after 1000000 such worlds.
 Any other option with
 .Fl -model-file
 is an error.

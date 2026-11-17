@@ -82,8 +82,12 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `clone`, `clone3` (threads), `futex` wait and wake, `exit` | approximate | one order of a node's threads is run, not every order | proc_gate twothread, twothread_join |
-| a multi-threaded search that would pass | refused | INCOMPLETE ("thread schedules not explored"); a violation still counts | proc_gate twothread |
+| the order of threads' visible operations (`futex`, a call on a checker-owned fd, a state-hook write, `clone`, a thread's exit) | exact | every order is a search choice (RUN); one thread of a node runs at a time | proc_gate twothread, racewake, raceemit, raceborn, durack |
+| a call on a kernel fd (a pipe, a file) in a node with more than one thread | refused | exit 3 before it runs; writes to stdout and stderr are allowed | proc_gate racepipe, kernelfd |
+| worlds with a node that has run more than one thread | exact (never merged) | searched as a tree over orders of visible operations; INCOMPLETE after `--max-states` such worlds, 1000000 by default | proc_gate threadpos |
+| `clone`, `clone3` (threads), `futex` wait and wake, `exit`, `pthread_join` | exact | a newborn and its parent are both held at the clone's return until the search runs each | proc_gate twothread_join, raceborn |
+| memory accesses between two visible operations | not explored | a data race with no system call between the racing accesses is not found | (boundary; no fixture) |
+| calls the filter does not intercept (`lseek`, `openat`, `fsync`, `flock`) | not modelled | they reach the kernel unseen and are not choice points, like memory accesses | (boundary; no fixture) |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |
 | `fork`, `vfork`, `clone` without `CLONE_THREAD` | refused | exit 3, before the child exists | proc_gate "a fork is refused" |
 | a `FUTEX_WAKE` of a strict subset of several waiters | refused | exit 1 | (code; no fixture yet) |
@@ -97,6 +101,8 @@ in the kernel, untouched.
 | crash and restart | approximate | a crash keeps the fd-193 record; a restart hands it back on the first read of fd 193 | proc_gate durlog, restart |
 | `eventually P` | exact for an exhaustive search | unmet after a full search is a violation; a bounded or simulated run is INCOMPLETE | proc_gate twothread reach |
 | a run that never progressed | refused | INCOMPLETE without an `eventually` property | proc_gate noprogress |
+| a fault signal (`abort`, a failed `assert`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`) | exact at the default disposition | the node is killed and the run ends with a violation (exit 1) and its trace; a handler is exit 3 | proc_gate fault |
+| a thread blocked in, or busy outside, the calls the checker sees | refused | exit 1 after 10 s with no checked call | proc_gate kernelfd |
 | `--refine` (C1) and `--refine-steps` (C2) | exact for the bound variables | C2 needs every spec variable bound; checks init, gated actions, exact states | proc_gate mono, spec_gate C2 rows |
 
 ## Abstract checker (`cmc --spec`)

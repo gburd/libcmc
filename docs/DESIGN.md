@@ -55,16 +55,65 @@ exit) is blocked, exactly like one parked in `recv`, `poll` or
 world is a search state only when every thread of every node is blocked
 or has exited.  A `FUTEX_WAKE` wakes waiters only when the program
 issues one, as a step of the waking thread; the checker invents no
-wakes, and runs woken threads one at a time to their next syscall so the
-kernel's atomic futex and mutex handoffs are never torn by concurrent
-execution.  A single-threaded node reduces to exactly one slot, the
+wakes.  A single-threaded node reduces to exactly one slot, the
 pre-thread behaviour.
 
-That is one order of a node's threads, not every order: which woken or
-runnable thread proceeds is not a search choice yet.  A violation found
-is a real schedule, but a search in which any node ran a second thread
-ends INCOMPLETE ("thread schedules not explored"), never a pass.  Making
-the choice of thread a search action is item 3.8 of the soundness plan.
+In a node with more than one thread, the order of the threads' visible
+operations is a search choice.  A visible operation is a `futex` call,
+any call on a checker-owned fd (or one that makes one), a write to fd 3
+or fd 193 or a read of fd 193, a `clone`, or a thread's exit, and
+nothing else is a choice point.  When a thread reaches one, the checker
+carries it out (bytes are queued, a futex waiter is woken, a state
+record is written) but holds its answer, and the thread parks
+(`BK_DONE`).  The checker writes
+a state-hook record into the node's hook pipe itself, from the thread's
+memory, rather than letting the kernel run the write, so a state-hook
+write has the same semantics as every other visible operation.  The
+answer to a parked recv, accept, poll or futex wait is held the same
+way when the search or another thread supplies it.  At a quiescent
+point the action RUN(node, thread) sends one held answer and lets that
+thread alone run to its next visible operation, so at most one thread
+of a node runs at a time and a replay is deterministic.  In such a node
+a call on a kernel fd (a pipe or a file the threads may share) other
+than a write to stdout or stderr is refused before it runs, since its
+contents and offset are kernel state the world does not hold.  Other
+calls (the clock, `getrandom`, `mmap`, a write to stdout or stderr) are
+answered at once; the clock moves only on a TIMEOUT action, when every
+thread is parked.  Calls the seccomp filter does not intercept (`lseek`,
+`openat`, `fsync`, `flock`) reach the kernel unseen, like memory
+accesses.
+
+A birth is held the same way.  Nodes are seized with
+`PTRACE_O_TRACECLONE`, so a `clone` stops the parent at
+`PTRACE_EVENT_CLONE` and starts the newborn in a ptrace stop.  Both stay
+stopped (`BK_CLONED`, `BK_NEWBORN`) until a RUN releases each with
+`PTRACE_CONT`, so the newborn's first visible operation can come before
+or after the parent's next one.  Every traced thread is reaped by its
+own tid (`waitpid(tid, __WALL)`): an exited thread at once, and a killed
+node's threads from `/proc/PID/task` before the leader, whose exit the
+kernel withholds until they are reaped.
+
+A thread's record in the world encoding holds its held answer (the
+result and every byte the call wrote into its memory) and, in a
+multi-threaded node, the call
+it is parked in, with its arguments and instruction and stack pointers,
+since two threads can hold the same answer at different points of their
+code.  Records are sorted, so the key is the multiset of thread states,
+not which tid holds which.
+
+The encoding does not hold a thread's memory, and two points of a run
+can share a record: two iterations of a loop park at the same call, and
+glibc gives a new thread the stack of one already joined.  So a world in
+which a live node has run more than one thread is never merged: the
+search neither looks it up in the seen set nor adds it, and follows
+every order of the threads' visible operations as a tree.  The flag is
+per process, so it clears when the node dies or restarts.  The tree is
+bounded by `--max-states`, or 1,000,000 such worlds by default, and a
+search that reaches the bound is INCOMPLETE.  Worlds whose nodes have
+each run one thread are still deduplicated.
+
+The boundary is the system call: interleavings of plain memory accesses
+between two visible operations of different threads are not explored.
 
 The seccomp *filter* is classic BPF -- the bytecode `seccomp(2)` has
 always taken -- but there is no eBPF program, no `bpf(2)`, no kernel

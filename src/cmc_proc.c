@@ -43,6 +43,7 @@
 
 #if defined(__linux__) && defined(__x86_64__)
 
+#include <asm/termbits.h>			/* TCGETS2, for stdio's isatty() (kernel_fd_call) */
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -54,6 +55,7 @@
 #include <linux/seccomp.h>
 #include <poll.h>
 #include <signal.h>
+#include <dirent.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -92,6 +94,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MAXEFD 8				/* eventfds per node */
 #define MAXEPOLL 4				/* epoll instances per node */
 #define LULL_MS 10000			/* a running node silent this long is an error */
+#define LULL_SLICE_MS 20		/* how often a silent node is checked for a signal stop */
 #define SNAP 64					/* canonical state bytes per node */
 /* The durable canonical-emit stream.  fd 3 is the volatile stream; the
  * durable one must avoid the low fds the dynamic loader uses while
@@ -596,7 +599,20 @@ typedef struct {
 	int epoll_fd; int poll_maxevents; uint64_t polldata[MAXPOLL];
 	int poll_woke_fd;			/* -1, or the channel fd a poll wake marked ready: its next read delivers (not EAGAIN) */
 	uint64_t futex_addr;		/* BK_FUTEX: the futex word this thread waits on */
-	int woken;					/* a FUTEX_WAKE marked this BK_FUTEX thread runnable; it is released (its futex answered) only once every other thread of the node is parked, so threads run one at a time and the kernel's atomic futex semantics are never torn by concurrent execution */
+	/* the thread's latest notification: the call, its arguments, the
+	 * address of its syscall instruction and, in a node with more than one
+	 * thread, its stack pointer there.  A parked thread makes no other
+	 * call, so they name where it is parked. */
+	long nr; uint64_t args[6]; uint64_t ip, sp;
+	/* BK_DONE: the answer to call nr, already carried out and held until
+	 * the search runs the thread (A_RUN).  data is every byte the call
+	 * wrote into the thread's memory (a recv's message, poll's revents),
+	 * which the world encoding cannot otherwise see once the call is
+	 * done; held_len counts them from the call's notification. */
+	long long held_val; int held_err; unsigned held_flags;
+	int held_len; unsigned char held_data[MSGLEN];
+	int cloning;				/* call nr is a clone that makes a thread: once it runs, birth() takes the newborn */
+	uint64_t clone_ctid;		/* that clone's CLONE_CHILD_CLEARTID word, for the newborn's slot */
 } Thread;
 
 typedef struct {
@@ -611,34 +627,33 @@ typedef struct {
 	int efd[MAXEFD]; uint64_t efdval[MAXEFD]; int efdnb[MAXEFD]; int nefd;
 	Epoll ep[MAXEPOLL]; int nep;	/* epoll instances: a persistent interest list per epfd */
 	Thread th[MAXTHREAD]; int nth;	/* per-thread deferred slots, keyed by tid */
-	int th_pending;				/* threads cloned but not yet seen (a birth in flight): the node is not quiescent while any is outstanding */
-	uint64_t pending_ctid[MAXTHREAD]; int npending_ctid;	/* CLONE_CHILD_CLEARTID words of births in flight, FIFO; handed to each newborn's slot on first sight */
 	int next_fd;
 	int timer_fd;				/* -1, or an fd whose first recv is a fired timeout's 'T' */
 	const char *binary; int id;
 	int fd3[2];					/* volatile canonical-emit pipe */
 	int fd4[2];					/* durable canonical-emit pipe (survives a crash) */
+	int hook_w[2];				/* the checker's write ends of fd3 and fd4 (serve_hook) */
 	unsigned char canon[SNAP]; int canon_len;
 	unsigned char durable[SNAP]; int durable_len;
 	int durable_read_off;		/* bytes of the framed durable record a startup read has consumed */
 	int crashed;				/* killed by a CRASH action: volatile lost, durable kept */
 	int preload_ok;				/* the preload announced itself in this node */
+	int threaded;				/* this process has run more than one thread (world_threaded) */
 } Node;
 
 static Node N[MAXNODES];
-/* Some node created a second thread in this search.  The engine runs
- * one order of a node's threads (a woken thread waits until the others
- * park, and a newborn runs alongside its parent), not every order, so a
- * violation it finds is a real schedule but a pass is not a proof: the
- * search ends INCOMPLETE instead (soundness plan 3.8). */
-static int g_threads_seen;
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5 };	/* what a blocked thread waits in (3 marks a running node in the fingerprint) */
+/* What a parked thread waits in (3 marks a running thread in the
+ * fingerprint).  BK_DONE holds an answer the search has yet to send.  A
+ * clone leaves two threads in ptrace stops, each released by a RUN:
+ * BK_NEWBORN is the new thread before its first instruction, and
+ * BK_CLONED the parent at the clone's return. */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8 };
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
 
 /* Find the thread slot for tid on node nd, allocating one on first sight
- * (which also clears one pending birth, since a new tid completes a clone).
- * Returns the slot, or NULL if the node already has MAXTHREAD threads. */
+ * (the main thread's first call, or a birth).  Returns the slot, or NULL
+ * if the node already has MAXTHREAD threads. */
 static Thread *
 th_for(Node *nd, pid_t tid)
 {
@@ -652,38 +667,63 @@ th_for(Node *nd, pid_t tid)
 	Thread *t = &nd->th[slot];
 	memset(t, 0, sizeof *t);
 	t->inuse = 1; t->tid = tid; t->poll_woke_fd = -1; t->epoll_fd = -1;
-	if (nd->th_pending > 0)
-	{
-		/* this tid is a newborn whose clone we saw: take its clear-tid
-		 * word (FIFO) and clear the pending-birth count */
-		nd->th_pending--;
-		if (nd->npending_ctid > 0)
-		{
-			t->ctid_addr = nd->pending_ctid[0];
-			for (int i = 1; i < nd->npending_ctid; i++) nd->pending_ctid[i - 1] = nd->pending_ctid[i];
-			nd->npending_ctid--;
-		}
-	}
 	return t;
 }
 
-/* a thread of nd is genuinely running (between syscalls): block_kind 0 and
- * not a merely-woken futex waiter.  Such a node will produce a
- * notification, so drive_quiescent RECVs it; a node whose only non-parked
- * thread is woken is advanced by release_one_woken, not by a RECV (which
- * would block, nothing being about to notify). */
+/* a thread of nd is running (between syscalls): block_kind 0.  Such a
+ * node will produce a notification, so drive_quiescent RECVs it. */
 static int
 node_has_running(const Node *nd)
 {
 	if (!nd->alive) return 0;
-	if (nd->th_pending > 0) return 1;	/* a newborn is about to notify */
 	if (nd->nth == 0) return 1;			/* the main thread's first call is coming */
 	for (int i = 0; i < nd->nth; i++)
 		if (nd->th[i].inuse && !nd->th[i].block_kind) return 1;
 	return 0;
 }
 
+/* Does nd run more than one thread?  Only then is the order of its
+ * threads' calls a search choice; a node with one thread is answered
+ * inline, as if threads did not exist.  A newborn counts from its birth,
+ * which the clone completes before its parent runs on. */
+static int
+node_multi(const Node *nd)
+{
+	int n = 0;
+	for (int i = 0; i < nd->nth; i++) n += nd->th[i].inuse;
+	return n > 1;
+}
+
 static void kill_all(void);
+static void die(int code, const char *fmt, ...);
+
+/* The thread whose call is being answered, or NULL.  Every byte the
+ * checker writes into a node's memory while it is set is kept in the
+ * thread's held_data: once the call is carried out those bytes are the
+ * call's result, and a held result must be part of the world.  A call
+ * that answers another thread (a close whose RST ends a parked recv)
+ * retargets it for that answer with cap_begin and restores it after. */
+static Thread *g_cap;
+
+static Thread *
+cap_begin(Thread *th)
+{
+	Thread	   *old = g_cap;
+
+	g_cap = th;
+	if (th) th->held_len = 0;
+	return old;
+}
+
+static void
+capture(const void *buf, size_t n)
+{
+	if (!g_cap) return;
+	if ((size_t) g_cap->held_len + n > sizeof g_cap->held_data)
+		die(1, "a held answer writes more than %zu bytes into a thread", sizeof g_cap->held_data);
+	memcpy(g_cap->held_data + g_cap->held_len, buf, n);
+	g_cap->held_len += (int) n;
+}
 
 /* Limits are errors (docs/steering/project.md, rule 4): where the checker
  * would otherwise truncate or guess, it stops.  Exit 1 = an engine rule
@@ -788,6 +828,7 @@ static size_t
 cr_write(pid_t pid, uint64_t addr, const void *buf, size_t n)
 { struct iovec l = {(void*)(uintptr_t)buf, n}, r = {(void*)(uintptr_t)addr, n};
   ssize_t k = n ? process_vm_writev(pid, &l, 1, &r, 1, 0) : 0;
+  if (k > 0) capture(buf, (size_t) k);
   return k > 0 ? (size_t) k : 0; }
 static size_t
 cr_read(pid_t pid, uint64_t addr, void *buf, size_t n)
@@ -918,7 +959,9 @@ launch(Node *nd)
 		execv(nd->binary, av);
 		_exit(2);
 	}
-	close(sp[1]); close(nd->fd3[1]); close(nd->fd4[1]);
+	/* the checker keeps the write ends: it writes a node's state-hook
+	 * records into them itself (serve_hook) */
+	close(sp[1]); nd->hook_w[0] = nd->fd3[1]; nd->hook_w[1] = nd->fd4[1];
 	char cb[CMSG_SPACE(sizeof(int))] = {0}; char d;
 	struct iovec iov = {&d, 1}; struct msghdr mh = {0};
 	mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cb; mh.msg_controllen = sizeof cb;
@@ -927,6 +970,10 @@ launch(Node *nd)
 	if (cm) memcpy(&nd->listener, CMSG_DATA(cm), sizeof(int));
 	close(sp[0]);
 	if (nd->listener < 0) return -1;
+	/* close-on-exec, so a node launched later does not inherit this one's
+	 * hook.  Not O_NONBLOCK: the status flags are shared with the node's
+	 * own fd 3, and it would see them; serve_hook polls instead. */
+	for (int k = 0; k < 2; k++) fcntl(nd->hook_w[k], F_SETFD, FD_CLOEXEC);
 	/* make the notify fd non-blocking: with threads, drive_quiescent must
 	 * poll the listeners and RECV only a ready notification, never block
 	 * one node's RECV while another node's running thread needs service */
@@ -934,8 +981,15 @@ launch(Node *nd)
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
-	nd->nth = 0; nd->th_pending = 0; nd->npending_ctid = 0; memset(nd->th, 0, sizeof nd->th);
-	ptrace(PTRACE_SEIZE, pid, 0, 0);
+	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0;
+	/* TRACECLONE: a thread the node creates starts in a ptrace stop,
+	 * so the search, not the kernel, decides when it first runs */
+	if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACECLONE) != 0)
+	{
+		fprintf(stderr, "cmc: cannot ptrace node %d: %s\n", nd->id, strerror(errno));
+		kill(pid, SIGKILL); waitpid(pid, NULL, __WALL);
+		return -1;
+	}
 	return 0;
 }
 
@@ -1075,12 +1129,6 @@ conn_maybe_free(int conn)
 	if (conns[conn].closed[0] && conns[conn].closed[1]) { conn_discard(conn); conns[conn].used = 0; }
 }
 
-/*
- * Service one ready notification on node nd without blocking the search.
- * Returns 1 if it did something, 0 if nd had no pending notification.
- * A recv on an empty channel is DEFERRED (the thread's slot set, not
- * answered).
- */
 /* an eventfd's slot index on this node, or -1.  eventfds are virtual
  * channels: a write adds to the counter, a read drains it, and a
  * non-zero counter is poll-ready, so an event loop's self-wakeup path
@@ -1229,10 +1277,10 @@ end_close(int conn, int e, int dead)
 /* one hex signal mask ("SigBlk:" and the like) from a thread's
  * /proc status; die if it cannot be read */
 static uint64_t
-sigmask_of(const Node *nd, const Thread *th, const char *key)
+sigmask_of(const Node *nd, pid_t tid, const char *key)
 {
 	char path[64], line[128]; size_t kl = strlen(key);
-	snprintf(path, sizeof path, "/proc/%d/task/%d/status", (int) nd->pid, (int) th->tid);
+	snprintf(path, sizeof path, "/proc/%d/task/%d/status", (int) nd->pid, (int) tid);
 	FILE *f = fopen(path, "r");
 	if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
 	uint64_t m = 0; int found = 0;
@@ -1254,30 +1302,191 @@ sigmask_of(const Node *nd, const Thread *th, const char *key)
  * refused.  Returns 1 if the node died. */
 static void node_gone(Node *nd);
 static void drain_canon(Node *nd);
+static void kill_node(Node *nd);
 static int
 sigpipe_kills(Node *nd, Thread *th)
 {
 	uint64_t bit = (uint64_t) 1 << (SIGPIPE - 1);
-	if (sigmask_of(nd, th, "SigIgn:") & bit) return 0;
-	if (sigmask_of(nd, th, "SigBlk:") & bit)
+	if (sigmask_of(nd, th->tid, "SigIgn:") & bit) return 0;
+	if (sigmask_of(nd, th->tid, "SigBlk:") & bit)
 		die(3, "node %d writes into a reset connection with SIGPIPE blocked; a pending SIGPIPE is not modelled", nd->id);
-	if (sigmask_of(nd, th, "SigCgt:") & bit)
+	if (sigmask_of(nd, th->tid, "SigCgt:") & bit)
 		die(3, "node %d writes into a reset connection with a SIGPIPE handler installed; a handler is not modelled", nd->id);
-	kill(nd->pid, SIGKILL); int st; waitpid(nd->pid, &st, 0);
-	nd->alive = 0; nd->pid = 0; drain_canon(nd); node_gone(nd);
+	kill_node(nd);
+	nd->alive = 0; drain_canon(nd); node_gone(nd);
 	return 1;
 }
 
 static int futex_wake(Node *nd, uint64_t uaddr, int n);
 
+/* Is call nr a visible operation: one whose effect another thread of the
+ * node can see other than through memory?  Those are the futex calls,
+ * every call on a checker-owned fd (a socket, eventfd or epoll instance,
+ * numbered from 500), a write to the state hook (fd 3) or the durable
+ * record (fd 193) and a read of the durable record, and the calls that
+ * create a checker-owned fd.  The checker carries out each of them
+ * itself.  In a node with more than one thread each visible operation
+ * ends the thread's step, and the search picks which thread runs next.
+ * A call on any other fd, the kernel's, is refused in such a node (see
+ * kernel_fd_call), except a write to stdout or stderr.  Everything else
+ * (the clock, getrandom, mmap, writes to fd 1 and 2) is answered at once:
+ * the clock moves only on a TIMEOUT action, when every thread is parked,
+ * and nothing another thread does through memory between two calls is
+ * explored.  clone and exit are visible too, but are not held here.  A
+ * clone stops both threads at its return (see birth()), which is the
+ * same choice point.  An exit's effect, the
+ * clear-tid wake a pthread_join waits for, is carried out when the thread
+ * reaches it, and the thread then has nothing left to run. */
+static int
+visible(long nr, const __u64 *a)
+{
+	switch (nr)
+	{
+		case SYS_futex: case SYS_socket: case SYS_eventfd2:
+		case SYS_epoll_create1: case SYS_epoll_create: case SYS_epoll_ctl:
+		case SYS_epoll_wait: case SYS_epoll_pwait: case SYS_poll: case SYS_ppoll:
+		case SYS_accept: case SYS_accept4:
+			return 1;
+		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
+		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
+		case SYS_close: case SYS_fcntl:
+		{
+			int fd = (int) a[0];
+			return fd >= 500 || fd == 3 || fd == DURABLE_FD;
+		}
+		default:
+			return 0;
+	}
+}
+
+/* Is call nr, in a node with more than one thread, a call on a kernel fd
+ * the model does not answer?  Two threads that share a pipe or a file
+ * interleave there on Linux, and its contents and offset are kernel
+ * state the world encoding does not hold, so a check that sent such a
+ * call to the kernel would search orders it cannot tell apart (and merge
+ * them).  Every intercepted call whose first argument is an fd below the
+ * checker's 500 counts, except the ones the checker answers itself (a
+ * write to the state hook, a read of the durable record) and a write to
+ * stdout or stderr, which no thread reads back.  A negative fd is the
+ * kernel's EBADF, which shares nothing.  Calls the filter does not
+ * intercept (lseek, openat, fsync, flock, sendmsg below fd 500) reach the
+ * kernel unseen, like memory accesses, and are outside the model
+ * (cmc(7)).
+ *
+ * The C library itself makes two such calls from a worker: the first
+ * output on a stdio stream asks whether it is a terminal (ioctl TCGETS or
+ * TCGETS2 on the stream's fd, to choose line buffering), and a failed
+ * assert() writes its message to stderr with writev().  Both are let
+ * through: the first only reads the terminal's settings, the same in
+ * every schedule, and the second writes stderr. */
+static int
+kernel_fd_call(long nr, const __u64 *a)
+{
+	int fd = (int) a[0];
+
+	switch (nr)
+	{
+		case SYS_write: case SYS_writev:
+			if (fd == 1 || fd == 2) return 0;
+			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) return 0;
+			break;
+		case SYS_ioctl:
+			if (fd >= 0 && fd <= 2 && (a[1] == TCGETS || a[1] == TCGETS2)) return 0;
+			break;
+		case SYS_read:
+			if (fd == DURABLE_FD) return 0;
+			break;
+		case SYS_recvfrom: case SYS_sendto: case SYS_close: case SYS_fcntl:
+		case SYS_readv: case SYS_preadv: case SYS_pwritev:
+		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg:
+		case SYS_sendmmsg: case SYS_recvmmsg: case SYS_shutdown: case SYS_dup:
+		case SYS_dup2: case SYS_dup3: case SYS_getsockopt: case SYS_getsockname:
+		case SYS_getpeername: case SYS_splice: case SYS_sendfile:
+		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
+		case SYS_accept: case SYS_accept4:
+			break;
+		default:
+			return 0;
+	}
+	return fd >= 0 && fd < 500;
+}
+
+/* A write to the state hook: fd 3, or DURABLE_FD for the durable record.
+ * The checker carries it out itself: it reads the bytes from the
+ * thread's memory and writes them into the node's hook pipe, then
+ * answers with the length.  So a hook write is a call the checker
+ * answers like any other visible operation: its effect happens when the
+ * thread reaches it, and in a node with more than one thread its answer
+ * is held until the search runs the thread.  drain_canon() reads the
+ * pipe as before, so the record checks (too long, left unfinished)
+ * apply unchanged.  A write of at most PIPE_BUF bytes into a pipe with
+ * room for them is whole, which poll's POLLOUT promises. */
+static void
+serve_hook(Node *nd, const __u64 *a)
+{
+	unsigned char buf[MSGLEN];
+	size_t		len = (size_t) a[2];
+	int			w = (int) a[0] == 3 ? nd->hook_w[0] : nd->hook_w[1];
+
+	if (len > sizeof buf)
+		die(3, "node %d writes %zu bytes to its state hook in one call; the limit is %zu", nd->id, len, sizeof buf);
+	size_t		got = cr_read(nd->pid, a[1], buf, len);
+	if (got == 0 && len > 0) { g_resp->error = -EFAULT; return; }
+	if (got < len) cr_fail(nd->id, "a state-hook write sends from a buffer that ends");
+	struct pollfd pf = {w, POLLOUT, 0};
+	if (len > 0 && (poll(&pf, 1, 0) != 1 || !(pf.revents & POLLOUT)))
+		die(1, "node %d writes more state records between two quiescent points than the checker's pipe holds", nd->id);
+	if (len > 0 && write(w, buf, len) != (ssize_t) len)
+		die(1, "node %d: cannot pass a state record to the checker: %s", nd->id, strerror(errno));
+	g_resp->val = (long long) len;
+}
+
+static int serve(Node *nd, Thread *th);
+static void birth(Node *nd, Thread *th);
+static void reap_tid(pid_t tid);
+
+/* Thread th's stack pointer at the system call it is stopped in, from
+ * /proc/PID/task/TID/syscall ("nr a0 .. a5 sp pc").  The libc wrapper's
+ * instruction pointer is the same for every write() a program makes, so
+ * the stack pointer is what tells two call sites of one wrapper apart;
+ * with no address randomisation it is the same on every replay. */
+static uint64_t
+stack_pointer(const Node *nd, const Thread *th)
+{
+	char		path[64], line[256];
+	unsigned long long v[9];
+
+	snprintf(path, sizeof path, "/proc/%d/task/%d/syscall", (int) nd->pid, (int) th->tid);
+	FILE	   *f = fopen(path, "r");
+	if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
+	int			ok = fgets(line, sizeof line, f) != NULL &&
+		sscanf(line, "%llu %llx %llx %llx %llx %llx %llx %llx %llx",
+			   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) == 9;
+	fclose(f);
+	if (!ok) die(1, "node %d: %s does not show a thread in a system call", nd->id, path);
+	return v[7];
+}
+
+/* Service one ready notification on node nd without blocking the search.
+ * Returns 1 if it did something, 0 if nd had no pending notification.
+ * serve() carries the call out.  In a node with one thread its answer is
+ * sent at once.  In a node with more than one, a visible operation's
+ * answer is held instead (BK_DONE) and the thread parks, until the
+ * search runs it (A_RUN): every visible operation is one the checker
+ * carries out itself, so it has its effect now and returns later. */
 static int
 try_pending_for(Node *nd)
 {
 	if (!nd->alive) return 0;
+	/* SECCOMP_IOCTL_NOTIF_RECV blocks even on an O_NONBLOCK listener
+	 * (measured on Linux 6.18), so ask poll first: a thread busy or
+	 * blocked in a call the checker does not see must leave the wait to
+	 * drive_quiescent, whose lull check reports it */
+	struct pollfd pf = {nd->listener, POLLIN, 0};
+	if (poll(&pf, 1, 0) != 1 || !(pf.revents & POLLIN)) return 0;
 	memset(g_req, 0, g_sz.seccomp_notif);
-	/* non-blocking RECV: use ioctl; returns -1/ENOENT if none ready.  It
-	 * delivers a notification from ANY of this node's threads, so a tid
-	 * already parked in a deferred slot does not stop the search from
+	/* It delivers a notification from ANY of this node's threads, so a
+	 * tid already parked in a deferred slot does not stop the search from
 	 * servicing another tid's call. */
 	if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_RECV, g_req) != 0)
 		return 0;
@@ -1287,6 +1496,87 @@ try_pending_for(Node *nd)
 	Thread *th = th_for(nd, g_req->pid);
 	if (!th) die(1, "node %d has more than %d threads", nd->id, MAXTHREAD);
 	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
+	th->nr = nr; th->ip = g_req->data.instruction_pointer; th->sp = 0;
+	memcpy(th->args, a, sizeof th->args);
+	if (node_multi(nd) && kernel_fd_call(nr, a))
+		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %ld); only checker-owned fds and the state hook are modelled between threads", nd->id, (int) a[0], nr);
+	/* decided before the call is served, which may add or end a thread */
+	int hold = node_multi(nd) && visible(nr, a);
+	if (hold || nr == SYS_clone || nr == SYS_clone3) th->sp = stack_pointer(nd, th);
+	cap_begin(th);
+	int parked = serve(nd, th);
+	g_cap = NULL;
+	if (parked) return 1;
+	if (!hold)
+	{
+		if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_resp) != 0 && errno != ENOENT) {}
+		if (th->cloning) birth(nd, th);
+		/* a traced thread lingers after exit until its tracer reaps it */
+		if (nr == SYS_exit && (pid_t) g_req->pid != nd->pid) reap_tid((pid_t) g_req->pid);
+		return 1;
+	}
+	th->block_kind = BK_DONE; th->block_id = g_req->id;
+	th->held_val = g_resp->val; th->held_err = g_resp->error; th->held_flags = g_resp->flags;
+	return 1;
+}
+
+/* The clone of thread th has just been sent its CONTINUE: the kernel
+ * makes the thread, and stops both.  The parent stops at
+ * PTRACE_EVENT_CLONE, which names the newborn; the newborn starts in a
+ * ptrace stop (PTRACE_EVENT_STOP, since the node is seized).  Both stay
+ * stopped, the newborn as BK_NEWBORN and the parent as BK_CLONED, until
+ * the search runs each (PTRACE_CONT).  Holding the parent too is what
+ * lets the newborn's first visible operation come before the parent's
+ * next one: a call the checker answers takes effect when the thread
+ * reaches it, so a parent resumed at once would always act first.  Every
+ * other thread of the node is parked, so the parent's stop is the only
+ * one to wait for.  A clone the kernel refuses (EAGAIN at a thread limit)
+ * returns with no event, and the parent's next call reaches the listener
+ * instead; a failed thread creation is not modelled, so that ends the
+ * check rather than waiting forever. */
+static void
+birth(Node *nd, Thread *th)
+{
+	int			st;
+	pid_t		r;
+
+	th->cloning = 0;
+	for (int waited = 0;; waited++)
+	{
+		r = waitpid(th->tid, &st, __WALL | WNOHANG);
+		if (r == th->tid) break;
+		if (r < 0 && errno != EINTR) die(1, "node %d: lost thread %d in a clone: %s", nd->id, (int) th->tid, strerror(errno));
+		struct pollfd pf = {nd->listener, POLLIN, 0};
+		if (poll(&pf, 1, 1) > 0 && (pf.revents & POLLIN))
+			die(3, "node %d: a thread's clone failed; a failed thread creation is not modelled", nd->id);
+		if (waited >= LULL_MS) die(1, "node %d: a clone did not stop its thread within %d ms", nd->id, LULL_MS);
+	}
+	if (!WIFSTOPPED(st))
+		die(3, "node %d died in a clone (status %#x); a signal is not modelled", nd->id, st);
+	if (st >> 8 != (SIGTRAP | (PTRACE_EVENT_CLONE << 8)))
+		die(3, "node %d stopped with signal %d in a clone; a signal is not modelled", nd->id, WSTOPSIG(st));
+	unsigned long nt = 0;
+	if (ptrace(PTRACE_GETEVENTMSG, th->tid, 0, &nt) != 0)
+		die(1, "node %d: cannot read the new thread of a clone: %s", nd->id, strerror(errno));
+	pid_t tid = (pid_t) nt;
+	do r = waitpid(tid, &st, __WALL);
+	while (r < 0 && errno == EINTR);
+	if (r != tid || !WIFSTOPPED(st) || st >> 16 != PTRACE_EVENT_STOP)
+		die(1, "node %d: new thread %d did not start in a ptrace stop (status %#x)", nd->id, (int) tid, st);
+	Thread *t = th_for(nd, tid);
+	if (!t) die(1, "node %d has more than %d threads", nd->id, MAXTHREAD);
+	t->block_kind = BK_NEWBORN; t->ctid_addr = th->clone_ctid;
+	th->block_kind = BK_CLONED;
+	nd->threaded = 1;
+}
+
+/* Carry out notification g_req of thread th on node nd.  Returns 1 if the
+ * call parked (a deferred recv, accept, poll or futex wait) or ended the
+ * node, and 0 if g_resp holds its answer. */
+static int
+serve(Node *nd, Thread *th)
+{
+	long nr = g_req->data.nr; __u64 *a = g_req->data.args;
 
 	switch (nr)
 	{
@@ -1423,7 +1713,8 @@ try_pending_for(Node *nd)
 		case SYS_write: case SYS_sendto:
 		{
 			int fd = (int) a[0];
-			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, fd 3, libs) */
+			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) { serve_hook(nd, a); break; }
+			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, libs) */
 			/* sendto's flags: MSG_NOSIGNAL is honoured; any other would
 			 * change the call (MSG_DONTWAIT, MSG_MORE, MSG_OOB) and is
 			 * refused, as is a destination address on a connected socket */
@@ -1778,17 +2069,15 @@ try_pending_for(Node *nd)
 		case SYS_clone: case SYS_clone3:
 		{
 			/* A new thread shares the address space and the seccomp filter,
-			 * so its notifications arrive on this same listener.  The real
-			 * thread must run (its syscalls are what the search drives), so
-			 * the clone is CONTINUE'd; the checker only records that a birth
-			 * is in flight (so it does not call the node quiescent while the
-			 * newborn is still computing toward its first blocking point)
-			 * and captures the CLONE_CHILD_CLEARTID word, which the kernel
-			 * zeroes and wakes on the thread's exit (what pthread_join waits
-			 * on).  A clone without CLONE_THREAD is a fork: a second process
-			 * in the node that shares its listener and connections but that
-			 * the model does not track, and that outlives the check.  It is
-			 * refused before the child exists (see refuse_fork). */
+			 * so its notifications arrive on this same listener.  The kernel
+			 * makes the thread (CONTINUE), and once it has, birth() records
+			 * the newborn held in its ptrace start stop, with the
+			 * CLONE_CHILD_CLEARTID word the kernel zeroes and wakes on the
+			 * thread's exit (what pthread_join waits on).  A clone without
+			 * CLONE_THREAD is a fork: a second process in the node that
+			 * shares its listener and connections but that the model does
+			 * not track, and that outlives the check.  It is refused before
+			 * the child exists (see refuse_fork). */
 			uint64_t flags, ctid = 0;
 			if (nr == SYS_clone3)
 			{
@@ -1805,16 +2094,11 @@ try_pending_for(Node *nd)
 				flags = a[0]; ctid = a[3];
 			}
 			if (!(flags & CLONE_THREAD)) refuse_fork(nd);
-			if (flags & CLONE_THREAD)
-			{
-				g_threads_seen = 1;
-				if (nd->nth + nd->th_pending >= MAXTHREAD)
-					die(1, "node %d creates more than %d threads", nd->id, MAXTHREAD);
-				nd->th_pending++;
-				/* the newborn's clear-tid word, handed to its slot on first
-				 * sight (FIFO); used to wake a pthread_join on its exit */
-				if (ctid) nd->pending_ctid[nd->npending_ctid++] = ctid;
-			}
+			/* every live thread and every clone yet to run needs a slot */
+			int need = 1;
+			for (int i = 0; i < nd->nth; i++) need += nd->th[i].inuse + nd->th[i].cloning;
+			if (need > MAXTHREAD) die(1, "node %d creates more than %d threads", nd->id, MAXTHREAD);
+			th->cloning = 1; th->clone_ctid = ctid;
 			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
 		}
 		case SYS_futex:
@@ -1869,83 +2153,187 @@ try_pending_for(Node *nd)
 		}
 		default: g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
 	}
-	if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_resp) != 0 && errno != ENOENT) {}
-	return 1;
+	return 0;
 }
 
 static void node_gone(Node *nd);
 
-/* detect that a node has exited (its listener gives ENOTCONN/POLLHUP) */
+/* Wait for thread tid, which is exiting or killed, to die.  It is a
+ * traced task, so the checker must reap it by its own tid (__WALL).  A
+ * wait that reports a ptrace stop (a newborn held in its start stop when
+ * the group was killed) waits again, for the death the SIGKILL brings. */
+static void
+reap_tid(pid_t tid)
+{
+	int			st;
+	pid_t		r;
+
+	do r = waitpid(tid, &st, __WALL);
+	while ((r == tid && WIFSTOPPED(st)) || (r < 0 && errno == EINTR));
+}
+
+/* Reap every thread of node nd, which is dead or dying: each task still
+ * listed in /proc/PID/task, then the leader, whose exit the kernel
+ * reports only once the other traced threads are reaped.  The task list
+ * names a newborn the checker has not recorded too.  Clears the pid, so
+ * kill_all never signals a reused one. */
+static void
+reap_node(Node *nd)
+{
+	char		path[64];
+
+	snprintf(path, sizeof path, "/proc/%d/task", (int) nd->pid);
+	DIR		   *d = opendir(path);
+	if (d)
+	{
+		struct dirent *e;
+		while ((e = readdir(d)) != NULL)
+		{
+			pid_t		tid = (pid_t) atoi(e->d_name);
+			if (tid > 0 && tid != nd->pid) reap_tid(tid);
+		}
+		closedir(d);
+	}
+	reap_tid(nd->pid);
+	nd->pid = 0;
+}
+
+/* end node nd's process: SIGKILL ends every thread, then reap them all */
+static void
+kill_node(Node *nd)
+{
+	kill(nd->pid, SIGKILL);
+	reap_node(nd);
+}
+
+/* Detect that a node has exited, or that one of its threads stopped for
+ * a signal.  Only an exit or a fatal signal is a death.  A thread other
+ * than the leader stops on its own tid, so each known thread is asked
+ * too; an abort() in a worker stops the worker, not the leader. */
+static void signal_stop(Node *nd, pid_t tid, int st);
 static void
 reap(Node *nd)
 {
 	if (!nd->alive) return;
-	int st; pid_t r = waitpid(nd->pid, &st, WNOHANG);
-	/* clear the pid once reaped, so kill_all never signals a reused one */
-	if (r == nd->pid) { nd->alive = 0; nd->pid = 0; drain_canon(nd); node_gone(nd); }
+	int st;
+	for (int i = 0; i < nd->nth; i++)
+	{
+		const Thread *th = &nd->th[i];
+		if (!th->inuse || th->tid == nd->pid) continue;
+		if (waitpid(th->tid, &st, WNOHANG | __WALL) == th->tid && WIFSTOPPED(st))
+		{ signal_stop(nd, th->tid, st); return; }
+	}
+	pid_t r = waitpid(nd->pid, &st, WNOHANG | __WALL);
+	if (r != nd->pid) return;
+	if (WIFSTOPPED(st)) { signal_stop(nd, nd->pid, st); return; }
+	nd->pid = 0; nd->alive = 0; drain_canon(nd); node_gone(nd);
+}
+
+/* The first node a fault signal killed in this replay, and the signal:
+ * the search reports it as a violation (see signal_stop).  -1: none. */
+static int g_fault_node = -1, g_fault_sig;
+
+/* Thread tid of node nd is in a signal-delivery stop (waitpid status
+ * st): the node is ptrace-seized, so a signal parks the thread instead
+ * of acting.  A fault signal (SIGABRT from abort() or a failed assert,
+ * SIGSEGV, SIGBUS, SIGFPE, SIGILL) at its default disposition ends the
+ * process on Linux.  The checker kills the node instead of delivering
+ * it, so no core file is written, and records the fault: a program that
+ * kills itself this way has found a bug of its own, and treating that as
+ * an ordinary exit could pass it.  A handler would run instead, and is
+ * not modelled.  An ignored fault signal may or may not end the process
+ * (abort() and the kernel reset it to the default first, kill() and
+ * raise() do not), and the stop cannot tell which, so it is not
+ * modelled either, nor is any other signal.  Each ends the check. */
+static void
+signal_stop(Node *nd, pid_t tid, int st)
+{
+	int sig = WSTOPSIG(st);
+	int fault = sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE || sig == SIGILL;
+	if (!fault || st >> 16 != 0)
+		die(3, "node %d stopped with signal %d; a signal other than SIGPIPE or a fault is not modelled", nd->id, sig);
+	uint64_t bit = (uint64_t) 1 << (sig - 1);
+	if ((sigmask_of(nd, tid, "SigCgt:") | sigmask_of(nd, tid, "SigIgn:")) & bit)
+		die(3, "node %d raised signal %d with a handler installed or the signal ignored; neither is modelled", nd->id, sig);
+	kill_node(nd);
+	nd->alive = 0; drain_canon(nd); node_gone(nd);
+	if (g_fault_node < 0) { g_fault_node = nd->id; g_fault_sig = sig; }
 }
 
 /* answer a thread's deferred syscall with return value val (a negative
- * val is an errno), clearing its slot (the thread resumes running) */
+ * val is an errno), clearing its slot (the thread resumes running).  In a
+ * node with more than one thread the answer is held instead (BK_DONE),
+ * with whatever the call wrote into the thread's memory, and the thread
+ * stays parked until the search runs it (A_RUN): that a parked call
+ * completes and that its thread runs on are two steps, and another
+ * thread may act between them. */
 static void
 answer(Node *nd, Thread *th, long val)
 {
+	if (node_multi(nd))
+	{
+		if (g_cap != th) th->held_len = 0;
+		th->block_kind = BK_DONE; th->held_flags = 0;
+		th->held_val = val < 0 ? 0 : val; th->held_err = val < 0 ? (int) val : 0;
+		return;
+	}
 	memset(g_ans, 0, g_sz.seccomp_notif_resp); g_ans->id = th->block_id;
 	if (val < 0) g_ans->error = (int) val; else g_ans->val = val;
 	ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_ans);
 	th->block_kind = 0;
 }
 
-/* wake up to n threads parked in BK_FUTEX on uaddr: answer each woken
- * futex with 0 and return how many woke.  A FUTEX_WAKE from the waker's
- * step; it invents no wakes.  When n would wake a strict subset of
+/* A_RUN: send thread th its held answer, so it runs to its next visible
+ * operation.  Every other thread of the node is parked, so it runs alone. */
+static void
+run_held(Node *nd, Thread *th)
+{
+	memset(g_ans, 0, g_sz.seccomp_notif_resp); g_ans->id = th->block_id;
+	g_ans->val = th->held_val; g_ans->error = th->held_err; g_ans->flags = th->held_flags;
+	ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_ans);
+	th->block_kind = 0; th->held_len = 0;
+}
+
+/* A_RUN of a thread held in a ptrace stop by a clone (a newborn, or its
+ * parent at the clone's return): release it, so it runs to its next
+ * visible operation */
+static void
+run_stopped(Node *nd, Thread *th)
+{
+	if (ptrace(PTRACE_CONT, th->tid, 0, 0) != 0)
+		die(1, "node %d: cannot start thread %d: %s", nd->id, (int) th->tid, strerror(errno));
+	th->block_kind = 0;
+}
+
+/* Wake up to n threads parked in BK_FUTEX on uaddr, and return how
+ * many.  A FUTEX_WAKE from the waker's step; it invents no wakes.  Each
+ * woken wait is answered 0, which in a node with more than one thread
+ * holds the answer (BK_DONE): whether the woken thread or the waker runs
+ * first is the search's choice (A_RUN), so a wake sent before the data it
+ * announces is stored is caught.  When n would wake a strict subset of
  * several same-address waiters, which subset wakes is a schedule this
  * model does not enumerate, so rather than pick one silently (and risk
  * hiding a bug) the checker errors.  waiters == 1 and n >= waiters (the
- * condvar-signal and broadcast cases, and the loop-plus-one-worker shape
- * the eval asks for) are unambiguous. */
-/* Mark up to n threads parked in BK_FUTEX on uaddr as runnable (woken),
- * and return how many.  A FUTEX_WAKE from the waker's step; it invents no
- * wakes.  The woken threads are NOT resumed here: drive_quiescent
- * releases them one at a time only once every other thread of the node is
- * parked, so threads run serially and the kernel's atomic futex and mutex
- * semantics are never torn by two threads running at once.  When n would
- * wake a strict subset of several same-address waiters, which subset
- * wakes is a schedule this model does not enumerate, so rather than pick
- * one silently (and risk hiding a bug) the checker errors.  waiters == 1
- * and n >= waiters (the condvar-signal and broadcast cases, and the
- * loop-plus-one-worker shape the eval asks for) are unambiguous. */
+ * condvar-signal and broadcast cases) are unambiguous. */
 static int
 futex_wake(Node *nd, uint64_t uaddr, int n)
 {
 	int waiters = 0;
 	for (int i = 0; i < nd->nth; i++)
-		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr && !nd->th[i].woken) waiters++;
+		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr) waiters++;
 	if (waiters == 0) return 0;
 	if (n < waiters && n < 0x7fffffff)
 		die(1, "node %d: FUTEX_WAKE of %d would wake a subset of %d waiters on one word; the thread model does not enumerate which (a lock contended by a pool is out of scope)", nd->id, n, waiters);
 	int woke = 0;
 	for (int i = 0; i < nd->nth && woke < n; i++)
-		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr && !nd->th[i].woken)
-		{ nd->th[i].woken = 1; woke++; }
-	return woke;
-}
-
-/* Release one woken thread on node nd: answer its parked futex with 0 so
- * it resumes and runs to its next owned syscall.  Called by
- * drive_quiescent only when the node has no other running or pending-wake
- * thread, so execution stays serial.  Returns 1 if it released one. */
-static int
-release_one_woken(Node *nd)
-{
-	for (int i = 0; i < nd->nth; i++)
-		if (nd->th[i].inuse && nd->th[i].woken)
+		if (nd->th[i].inuse && nd->th[i].block_kind == BK_FUTEX && nd->th[i].futex_addr == uaddr)
 		{
-			nd->th[i].woken = 0;
+			Thread *old = cap_begin(&nd->th[i]);
 			answer(nd, &nd->th[i], 0);
-			return 1;
+			g_cap = old;
+			woke++;
 		}
-	return 0;
+	return woke;
 }
 
 /* answer a thread's deferred recv with up to len bytes (0 = EOF);
@@ -1954,8 +2342,10 @@ static int
 deliver(Node *nd, Thread *th, const unsigned char *body, int len)
 {
 	int k = len < th->block_want ? len : th->block_want;
+	Thread *old = cap_begin(th);
 	if (k > 0 && cr_write(nd->pid, th->block_bufaddr, body, (size_t) k) != (size_t) k) cr_fail(nd->id, "a recv buffer");
 	answer(nd, th, k);
+	g_cap = old;
 	return k;
 }
 
@@ -2041,10 +2431,10 @@ crash_node(Node *nd)
 {
 	if (!nd->alive) return;
 	drain_canon(nd);
-	kill(nd->pid, SIGKILL); int st; waitpid(nd->pid, &st, 0);
-	nd->pid = 0; nd->alive = 0; nd->crashed = 1;
+	kill_node(nd);
+	nd->alive = 0; nd->crashed = 1;
 	node_gone(nd);
-	nd->nth = 0; nd->th_pending = 0; nd->npending_ctid = 0; memset(nd->th, 0, sizeof nd->th);
+	nd->nth = 0; memset(nd->th, 0, sizeof nd->th);
 	/* volatile is gone; the node's observable state is what was durable */
 	memcpy(nd->canon, nd->durable, nd->durable_len); nd->canon_len = nd->durable_len;
 	/* close the parent's fds for the dead process (the final drain is done,
@@ -2054,7 +2444,8 @@ crash_node(Node *nd)
 	if (nd->listener > 0) close(nd->listener);
 	if (nd->fd3[0] > 0) close(nd->fd3[0]);
 	if (nd->fd4[0] > 0) close(nd->fd4[0]);
-	nd->listener = nd->fd3[0] = nd->fd4[0] = -1;
+	for (int k = 0; k < 2; k++) if (nd->hook_w[k] > 0) close(nd->hook_w[k]);
+	nd->listener = nd->fd3[0] = nd->fd4[0] = nd->hook_w[0] = nd->hook_w[1] = -1;
 }
 
 /* RESTART a crashed node (Tier 3 ask 6): relaunch it as a fresh process
@@ -2092,31 +2483,30 @@ drive_quiescent(void)
 		for (int i = 0; i < M.nodes; i++) reap(&N[i]);
 		/* service a notification from each node with a running thread (or a
 		 * birth in flight).  The RECV ioctl waits for the running thread's
-		 * next owned syscall, which drives the node forward.  A node whose
-		 * only non-parked thread is merely woken is NOT serviced here (no
-		 * thread of it is about to notify; it is advanced by release below),
-		 * and a fully quiescent node is skipped. */
+		 * next owned syscall, which drives the node forward.  A fully parked
+		 * node is skipped: a thread holding an answer runs only when the
+		 * search picks it (A_RUN). */
 		int did = 0;
 		for (int i = 0; i < M.nodes; i++)
 			if (node_has_running(&N[i]))
 				did |= try_pending_for(&N[i]);
 		if (did) continue;
-		/* release a woken thread (one marked runnable by a FUTEX_WAKE) on
-		 * any node that has no thread currently running: this keeps
-		 * execution serial (one thread runs to its next syscall at a time),
-		 * so the real kernel's atomic futex/mutex semantics are never torn
-		 * by two threads of a node running concurrently. */
-		int released = 0;
-		for (int i = 0; i < M.nodes; i++)
-			if (N[i].alive && !node_has_running(&N[i]))
-				released |= release_one_woken(&N[i]);
-		if (released) continue;
 		/* wait for a node that still has a running thread to make a syscall */
 		struct pollfd pf[MAXNODES]; int np = 0;
 		for (int i = 0; i < M.nodes; i++)
 			if (node_has_running(&N[i])) { pf[np].fd = N[i].listener; pf[np].events = POLLIN; np++; }
 		if (np == 0) break;			/* every node quiescent or dead */
-		int r = poll(pf, np, LULL_MS);
+		/* wait in slices: a thread stopped by a signal makes no call and
+		 * wakes no poll, so look for one (reap) between slices */
+		int r = 0, died = 0;
+		for (int waited = 0; !died && waited < LULL_MS; waited += LULL_SLICE_MS)
+		{
+			r = poll(pf, np, LULL_SLICE_MS);
+			if (r != 0) break;
+			for (int i = 0; i < M.nodes; i++)
+				if (N[i].alive) { reap(&N[i]); died |= !N[i].alive; }
+		}
+		if (died) continue;
 		if (r < 0 && errno == EINTR) continue;
 		/* a notify fd that reports POLLHUP has lost its owning process: the
 		 * node exited (its last thread ran off the end or called
@@ -2128,7 +2518,7 @@ drive_quiescent(void)
 			if (pf[i].revents & (POLLHUP | POLLERR))
 				for (int j = 0; j < M.nodes; j++)
 					if (N[j].alive && N[j].listener == pf[i].fd)
-					{ int st; waitpid(N[j].pid, &st, 0); N[j].alive = 0; N[j].pid = 0; drain_canon(&N[j]); node_gone(&N[j]); hup = 1; }
+					{ reap_node(&N[j]); N[j].alive = 0; drain_canon(&N[j]); node_gone(&N[j]); hup = 1; }
 		if (hup) continue;
 		if (r == 0)
 		{
@@ -2236,14 +2626,17 @@ fd_class(const Node *nd, int fd, unsigned char *r)
  * which tid holds which.  A record carries everything the thread's
  * future depends on: a recv's peer and length, every polled fd with its
  * requested events and (for epoll) its user data, a pending poll wake,
- * and a futex wait's word by address (stable, since nodes run without
- * address randomisation).  Returns the number of bytes written, or -1
- * if out is too small. */
-#define THREC (16 + MAXPOLL * 12)		/* fixed width of one thread's record */
+ * a futex wait's word by address (stable, since nodes run without
+ * address randomisation), and a held answer: the call, its result, and
+ * the bytes it wrote into the thread's memory, after a fixed-width head.
+ * Returns the number of bytes written, or -1 if out is too small. */
+#define THREC (16 + MAXPOLL * 12)		/* fixed width of one thread's record, before a held answer's bytes */
+#define THREC_MAX (THREC + 76 + 18 + MSGLEN)	/* the widest record: a head, the call, a held answer and its bytes */
 static int
 encode_threads(const Node *nd, unsigned char *out, int cap)
 {
-	unsigned char rec[MAXTHREAD][THREC]; int nrec = 0;
+	static unsigned char rec[MAXTHREAD][THREC_MAX]; int len[MAXTHREAD], nrec = 0;
+	int multi = node_multi(nd);
 	for (int i = 0; i < nd->nth; i++)
 	{
 		const Thread *th = &nd->th[i];
@@ -2281,17 +2674,58 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 			}
 		}
 		if (p > THREC) die(1, "thread record overflow on node %d", nd->id);
-		nrec++;
+		p = THREC;
+		/* In a node with more than one thread, a thread's position is part
+		 * of the world: two threads may be parked with the same kind of
+		 * wait at different points of their code (a woken condition wait
+		 * and the mutex unlock after it both hold a futex answer of 0).
+		 * The call, its arguments, and its instruction and stack pointers
+		 * name the point; they are fixed across replays, since nodes run
+		 * without address randomisation.  A newborn has none: it is
+		 * unstarted, which its BK_NEWBORN kind says.  A thread still holding
+		 * an answer when the others have exited keeps its point too. */
+		if (multi || th->block_kind >= BK_DONE)
+		{
+			for (int b = 0; b < 4; b++) r[p++] = (unsigned char) (th->nr >> (8 * b));
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->ip >> (8 * b));
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->sp >> (8 * b));
+			for (int k = 0; k < 6; k++)
+				for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->args[k] >> (8 * b));
+			/* which thread a pthread_join waits for: its clear-tid word */
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->ctid_addr >> (8 * b));
+		}
+		if (th->block_kind == BK_DONE)
+		{
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) ((uint64_t) th->held_val >> (8 * b));
+			for (int b = 0; b < 4; b++) r[p++] = (unsigned char) ((uint32_t) th->held_err >> (8 * b));
+			for (int b = 0; b < 4; b++) r[p++] = (unsigned char) (th->held_flags >> (8 * b));
+			r[p++] = (unsigned char) th->held_len; r[p++] = (unsigned char) (th->held_len >> 8);
+			memcpy(r + p, th->held_data, (size_t) th->held_len); p += th->held_len;
+		}
+		len[nrec++] = p;
 	}
-	/* sort the records so the multiset, not thread order, is the key */
+	/* sort the records so the multiset, not thread order, is the key: by
+	 * the fixed head, then by length, then by the held bytes */
+	int ord[MAXTHREAD];
+	for (int i = 0; i < nrec; i++) ord[i] = i;
 	for (int i = 0; i < nrec; i++)
 		for (int j = i + 1; j < nrec; j++)
-			if (memcmp(rec[j], rec[i], THREC) < 0)
-			{ unsigned char t[THREC]; memcpy(t, rec[i], THREC); memcpy(rec[i], rec[j], THREC); memcpy(rec[j], t, THREC); }
+		{
+			int a = ord[i], b = ord[j];
+			int c = memcmp(rec[b], rec[a], THREC);
+			if (!c) c = len[b] != len[a] ? len[b] - len[a] : memcmp(rec[b], rec[a], (size_t) len[a]);
+			if (c < 0) { ord[i] = b; ord[j] = a; }
+		}
 	int n = 0;
-	if (1 + nrec * THREC > cap) return -1;
+	if (1 + nrec * 2 > cap) return -1;
 	out[n++] = (unsigned char) nrec;
-	for (int i = 0; i < nrec; i++) { memcpy(out + n, rec[i], THREC); n += THREC; }
+	for (int i = 0; i < nrec; i++)
+	{
+		int k = ord[i];
+		if (n + 2 + len[k] > cap) return -1;
+		out[n++] = (unsigned char) len[k]; out[n++] = (unsigned char) (len[k] >> 8);
+		memcpy(out + n, rec[k], (size_t) len[k]); n += len[k];
+	}
 	return n;
 }
 
@@ -2351,12 +2785,10 @@ world_fp(uint64_t fp[2])
 		for (int k = 0; k < nd->durable_len; k++) PUT(nd->durable[k]);
 		PUT(nd->durable_read_off);
 		if (!nd->alive) { PUT(0); continue; }
-		unsigned char tb[1 + MAXTHREAD * THREC];
+		static unsigned char tb[1 + MAXTHREAD * (2 + THREC_MAX)];
 		int tl = encode_threads(nd, tb, (int) sizeof tb);
 		if (tl < 0) die(1, "thread encoding overflow on node %d", i);
 		for (int k = 0; k < tl; k++) PUT(tb[k]);
-		PUT(nd->th_pending); PUT(nd->npending_ctid);
-		for (int k = 0; k < nd->npending_ctid; k++) PUT8(nd->pending_ctid[k]);
 		/* live connections in the order they were opened (cfd is kept in
 		 * that order), by peer, with their flags, and which one is the
 		 * fired timer's: which connection goes where, and whether a read
@@ -2427,7 +2859,7 @@ static void
 reset_world(void)
 {
 	memset(bag, 0, sizeof bag); memset(conns, 0, sizeof conns);
-	nrep = 0; logical_ns = CLK_BASE;
+	nrep = 0; logical_ns = CLK_BASE; g_fault_node = -1;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
 	bud.restarts = M.restarts;
 }
@@ -2435,7 +2867,7 @@ reset_world(void)
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -2455,11 +2887,14 @@ typedef struct { int kind, node, peer, thr, arg; } Act;
  *     accept()s or read()s that fd and defers again (BK_ACCEPT/BK_RECV),
  *     which the existing ACCEPT/DELIVER/TIMEOUT actions service, so poll
  *     readiness stays a search decision like a deferred recv (M5).
+ *   - RUN: a thread holding an answer (BK_DONE) gets it and runs to its
+ *     next visible operation.  Only threads of a node with more than one
+ *     thread hold answers, so which of them runs next is a search choice.
  * A futex wait (BK_FUTEX) has no environment action: it is woken only by
- * another thread's FUTEX_WAKE, which the search already drives by
- * servicing that other thread.  Each per-thread action carries the
- * thread's slot index (thr), stable across replay because threads are
- * allocated in notification order.  Every environment action is bounded
+ * another thread's FUTEX_WAKE, which then holds the waiter's answer for a
+ * RUN.  Each per-thread action carries the thread's slot index (thr),
+ * stable across replay because threads are allocated in notification
+ * order.  Every environment action is bounded
  * so the search stays finite. */
 static int
 enum_actions(Act *out)
@@ -2531,6 +2966,8 @@ enum_actions(Act *out)
 				continue;
 			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
+			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED)
+			{ ADD(A_RUN, d, -1, ti); continue; }
 			int p = th->block_peer;
 			if (conn_head(th->block_conn, th->block_end) >= 0) ADD(A_DELIVER, d, p, ti);
 			else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, p, ti);
@@ -2585,6 +3022,7 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 		if (match && hit < 0) hit = k;
 	}
 	if (hit < 0) die(1, "poll wake on node %d found no polled fd for target %d", nd->id, target);
+	Thread *old = cap_begin(th);
 	if (th->epoll_fd >= 0)
 	{
 		/* return one ready struct epoll_event (packed on x86-64) carrying
@@ -2609,6 +3047,7 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 	 * wake is serviced by the timer-'T' read path, not a message */
 	th->poll_woke_fd = (target >= -1) ? th->pollfds[hit] : -1;
 	answer(nd, th, 1);
+	g_cap = old;
 }
 
 /* Reset connection conn (a DROP): discard every queued message in both
@@ -2707,6 +3146,10 @@ apply(const Act *a)
 			break;
 		}
 		case A_WAKE: poll_wake(nd, th, a->peer, a->arg); break;
+		case A_RUN:
+			if (th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED) run_stopped(nd, th);
+			else run_held(nd, th);
+			break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
 		case A_RESTART:
@@ -2767,14 +3210,15 @@ static void
 kill_all(void)
 {
 	for (int i = 0; i < M.nodes; i++)
-		if (N[i].pid > 0) { kill(N[i].pid, SIGKILL); int st; waitpid(N[i].pid, &st, 0); N[i].pid = 0; }
+		if (N[i].pid > 0) kill_node(&N[i]);
 	/* close this run's fds: a long search would otherwise exhaust them */
 	for (int i = 0; i < M.nodes; i++)
 	{
 		if (N[i].listener > 0) close(N[i].listener);
 		if (N[i].fd3[0] > 0) close(N[i].fd3[0]);
 		if (N[i].fd4[0] > 0) close(N[i].fd4[0]);
-		N[i].listener = N[i].fd3[0] = N[i].fd4[0] = -1;
+		for (int k = 0; k < 2; k++) if (N[i].hook_w[k] > 0) close(N[i].hook_w[k]);
+		N[i].listener = N[i].fd3[0] = N[i].fd4[0] = N[i].hook_w[0] = N[i].hook_w[1] = -1;
 	}
 }
 
@@ -2835,8 +3279,9 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
 	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);
@@ -2901,6 +3346,39 @@ report_refine(const int *seq, int len)
 	printf("\n");
 	kill_all();
 }
+
+/* report a node that a fault signal killed (signal_stop): the trace to
+ * it and the world there, as for a violated invariant */
+static void
+report_fault(const int *seq, int len)
+{
+	printf("Error: node %d was killed by signal %d (%s), a fault the program raised (an abort, a failed assert, a bad access).\n",
+		   g_fault_node, g_fault_sig, strsignal(g_fault_sig));
+	report_refine(seq, len);
+}
+
+/* Is a node alive that has run more than one thread since it was
+ * launched?  Such a world is never merged with another (see the search
+ * in cmc_proc_main).  Its threads' order decides what is in memory, and
+ * the encoding holds a thread's position (its call, arguments,
+ * instruction and stack pointers) but not that memory: two iterations of
+ * a loop park at one point, glibc gives a thread the stack of one it has
+ * joined, and a value two threads update between their calls is seen by
+ * no call.  The flag stays set once the node's extra threads have exited,
+ * since what they wrote stays in memory; it clears when the process dies
+ * or a RESTART starts a fresh one. */
+static int
+world_threaded(void)
+{
+	for (int i = 0; i < M.nodes; i++)
+		if (N[i].alive && N[i].threaded) return 1;
+	return 0;
+}
+
+/* The bound on worlds searched as a tree (world_threaded) when no
+ * --max-states is given: each one is a node of the tree, and a threaded
+ * program that never stops would otherwise grow it forever. */
+#define TREE_CAP 1000000
 
 /* the BFS frontier: action sequences, appended in one growing pool */
 static int *qpool; static size_t qcap, qused;
@@ -2990,7 +3468,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	if (pie < 0) { fprintf(stderr, "cmc: %s is not an ELF executable\n", M.binary); return 3; }
 	if (pie) { fprintf(stderr, "cmc: %s must be a non-PIE ELF (build with -no-pie)\n", M.binary); return 3; }
 	if (find_preload()) return 3;
-	for (int i = 0; i < MAXNODES; i++) { N[i].binary = M.binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = -1; }
+	for (int i = 0; i < MAXNODES; i++) { N[i].binary = M.binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = N[i].hook_w[0] = N[i].hook_w[1] = -1; }
 	if (seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &g_sz))
 	{ fprintf(stderr, "cmc: seccomp user notification is not available: %s\n", strerror(errno)); return 3; }
 	g_req = calloc(1, g_sz.seccomp_notif); g_resp = calloc(1, g_sz.seccomp_notif_resp);
@@ -3023,6 +3501,14 @@ cmc_proc_main(const CmcProcOptions *po)
 			for (;;)
 			{
 				int which = -1; states++;
+				if (g_fault_node >= 0)
+				{
+					kill_all();
+					printf("Walk %" PRIu64 " (seed %" PRIu64 "):\n", w + 1, po->seed);
+					report_fault(seq, len);
+					free(seq);
+					return 1;
+				}
 				if (!check_invariants(&which))
 				{
 					if (which == -2) { kill_all(); return 3; }
@@ -3066,8 +3552,16 @@ cmc_proc_main(const CmcProcOptions *po)
 
 	/* breadth-first search: shortest counterexample, every distinct world
 	 * expanded once.  Each frontier entry is replayed from a fresh launch
-	 * (stateless), so a world costs one replay of its whole prefix. */
-	size_t distinct = 0, cut = 0, replays = 0; int maxlen = 0;
+	 * (stateless), so a world costs one replay of its whole prefix.  A
+	 * world with a live node that has run threads is not merged with any
+	 * other (world_threaded): it is neither looked up in the seen set nor
+	 * added to it, and counts as distinct.  The search below such a world
+	 * is a tree that follows every order of the threads' visible
+	 * operations, whatever the encoding misses about their memory.  A
+	 * stutter (a world that encodes like its parent) is expanded there
+	 * too, since the thread that ran may be at a point the encoding
+	 * cannot see.  TREE_CAP bounds the tree. */
+	size_t distinct = 0, cut = 0, replays = 0, ntree = 0; int maxlen = 0;
 	size_t progressed = 0, stutter_leaves = 0;	/* no-progress (self-loop) detection */
 	const char *why = NULL;
 	g_step_refine = po->refine_steps;	/* C2 checks run inside run_seq's replay */
@@ -3096,6 +3590,7 @@ cmc_proc_main(const CmcProcOptions *po)
 			free(seq); return 1;
 		}
 
+		if (g_fault_node >= 0) { kill_all(); report_fault(seq, e.len); free(seq); return 1; }
 		int which = -1; int ok = check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
 		if (ok && po->refine && !po->refine_steps)
@@ -3112,8 +3607,9 @@ cmc_proc_main(const CmcProcOptions *po)
 			}
 		}
 		uint64_t fp[2]; world_fp(fp);
-		int isnew = mark(fp, g_world, g_world_len);
-		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; }
+		int tree = world_threaded();
+		int isnew = tree || mark(fp, g_world, g_world_len);
+		if (isnew) { distinct++; ntree += tree; if (e.len > maxlen) maxlen = e.len; }
 		/* did this action make progress?  A non-root entry whose reached
 		 * world equals its parent's is a stutter: the action was enabled
 		 * but changed nothing the fingerprint sees, a self-loop the
@@ -3134,6 +3630,12 @@ cmc_proc_main(const CmcProcOptions *po)
 		}
 		free(seq);
 		if (po->max_states && distinct >= po->max_states) { why = "max states reached"; break; }
+		if (!po->max_states && ntree >= TREE_CAP)
+		{
+			static char tbuf[160];
+			snprintf(tbuf, sizeof tbuf, "%d worlds with a multi-threaded node were searched without merging (set the bound with --max-states)", TREE_CAP);
+			why = tbuf; break;
+		}
 		if (po->time_limit > 0 && now_s() - t0 > po->time_limit) { why = "time limit reached"; break; }
 	}
 	double dt = now_s() - t0;
@@ -3142,14 +3644,6 @@ cmc_proc_main(const CmcProcOptions *po)
 	{
 		printf("INCOMPLETE (no violation found): %s; %zu distinct states, %zu left on queue, %zu cut at depth %ld, %.1f s\n",
 			   why, distinct, qt - qh, cut, depth, dt);
-		return 2;
-	}
-	/* threads ran in one order only, so neither a pass nor an unmet
-	 * `eventually` (which another order might reach) is established */
-	if (g_threads_seen)
-	{
-		printf("INCOMPLETE (no violation found): thread schedules not explored -- a node ran more than one thread, and the checker runs one order of a node's threads, not every order.  %zu distinct states, %.1f s\n",
-			   distinct, dt);
 		return 2;
 	}
 	/* the search was exhaustive: an `eventually` property that no state
@@ -3186,6 +3680,8 @@ cmc_proc_main(const CmcProcOptions *po)
 	/* TLC's wording; depth counts the initial state as 1 */
 	printf("Model checking completed. No error has been found.\n");
 	printf("%zu states generated, %zu distinct states found, 0 states left on queue.\n", replays, distinct);
+	if (ntree)
+		printf("  %zu of them have a multi-threaded node and were searched as a tree, without merging.\n", ntree);
 	printf("The depth of the complete state graph search is %d.\n", maxlen + 1);
 	printf("  %d invariant%s held; %.1f s, %.0f replays/s.\n", M.ninv, M.ninv == 1 ? "" : "s",
 		   dt, dt > 0 ? replays / dt : 0.0);

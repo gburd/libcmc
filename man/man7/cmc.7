@@ -118,12 +118,66 @@ A
 .Dv FUTEX_WAKE
 wakes the waiters only when the program issues it, as part of the waking
 thread's step; the checker invents no wakes.
-Woken threads run one at a time, each to its next system call, so the
-kernel's atomic futex and mutex handoffs are never torn.
-This runs one order of a node's threads, not every order: a woken thread
-waits until the others park, and a new thread runs alongside its parent.
-A violation found is a real schedule, but a search in which any node ran
-a second thread ends INCOMPLETE (exit 2), never a pass.
+.Pp
+In a node with more than one thread, each thread's step ends at a
+.Em visible operation ,
+and these are the only choice points:
+a
+.Fn futex
+call; a call that makes, uses or closes a socket, eventfd or epoll
+instance the checker owns; a write to the state hook (fd 3 or fd 193)
+or a read of fd 193; a
+.Fn clone ;
+and a thread's exit.
+The checker carries the operation out when the thread reaches it, so
+its effect (bytes queued, a waiter woken, a state record written) is in
+the world at once, but its answer is held and the thread parks.
+A new thread and its parent are both held at the clone's return, the new
+thread before its first instruction.
+When every thread is parked, RUN gives one held thread its answer, and
+which thread runs next is the search's choice, so every order of the
+threads' visible operations is explored.
+Only one thread of a node runs at a time, so a replay is deterministic
+and the kernel's futex and mutex handoffs are never torn.
+Other calls (the clock,
+.Fn getrandom ,
+.Fn mmap ,
+a write to stdout or stderr)
+are answered at once and the thread runs on.
+A node with one thread behaves as if threads did not exist.
+.Pp
+In a node with more than one thread, a call on a kernel descriptor (a
+pipe or a file the threads may share) is refused (exit 3) before it
+runs, since its contents and offset are not part of the world.
+Writes to stdout and stderr are allowed, as is the C library's query
+of whether one of them is a terminal.
+Calls the checker does not intercept (such as
+.Fn lseek ,
+.Fn openat ,
+.Fn fsync
+and
+.Fn flock )
+reach the kernel unseen, as memory accesses do.
+.Pp
+A world in which a live node has run more than one thread is never
+merged with another: it is neither looked up in nor added to the set of
+seen states.
+A thread's record holds the call it is parked in, but not its memory,
+and two points of a run can park at the same call (two iterations of a
+loop, a thread born on the stack of one already joined, a value two
+threads update between their calls), so merging could hide a schedule.
+The search over such worlds is a tree that follows every order of the
+threads' visible operations, so a pass is exhaustive over those orders.
+A thread that never stops makes the tree endless, so the search stops,
+incomplete, after
+.Fl -max-states
+worlds, or 1000000 without it.
+.Pp
+The boundary is the system call.
+Interleavings of plain memory accesses between two visible operations
+of different threads are not explored: a data race on a shared variable
+with no system call between the racing accesses is not found.
+.Pp
 When every thread of every node is blocked or has exited the world is
 .Em quiescent :
 the checker reads each node's state, checks the invariants, and the
@@ -180,6 +234,10 @@ It takes no message: the node then
 .Fn accept Ns s
 or reads that fd and blocks again, which ACCEPT, DELIVER or TIMEOUT
 services, so readiness stays a search decision.
+.It RUN
+A thread of a node with more than one thread holds an answer: it gets
+it and runs to its next visible operation
+.Pq Ql run n1 t2 .
 .El
 .Pp
 A node's state is what it reports.
@@ -215,7 +273,8 @@ counter, every epoll instance's interest list, every connection's
 messages in order, the connections waiting
 to be accepted, the ghost log of client replies, the budgets left and
 the logical clock.
-Its 128-bit fingerprint dedups states.
+Its 128-bit fingerprint, checked against the full encoding, dedups
+states, except a world with a multi-threaded node, which is never merged.
 The search is stateless: to expand a world the checker starts every
 node again and replays the actions that reached it.
 Breadth-first search gives a shortest counterexample; simulation takes
@@ -407,6 +466,18 @@ A target must be built
 .Fl no-pie ,
 use the port convention, and do its I/O through the calls above; a node
 that blocks in anything else for 10 seconds is an error.
+A node that kills itself with a fault signal
+.Dv ( SIGABRT
+from
+.Fn abort
+or a failed
+.Fn assert ,
+.Dv SIGSEGV ,
+.Dv SIGBUS ,
+.Dv SIGFPE ,
+.Dv SIGILL )
+is a violation, reported with the trace to it; a handler for the signal
+is refused.
 A read gets at most one write.
 Each TCP connection has its own queue in each direction.
 .Fn close

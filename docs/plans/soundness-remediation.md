@@ -9,9 +9,8 @@ lede: >-
 
 # Plan: soundness remediation
 
-Status: Phases 0 to 4 done, except the thread scheduler of 3.8 (the
-INCOMPLETE rule stands in for it) and Phase 5's randomised fingerprint
-tests.  Audited commit: `b2eab84` (1.3.0).  Branch: `pr/soundness`.
+Status: Phases 0 to 4 done, the thread scheduler of 3.8 included,
+except Phase 5's randomised fingerprint tests.  Audited commit: `b2eab84` (1.3.0).  Branch: `pr/soundness`.
 
 ## Why
 
@@ -242,23 +241,70 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
   - The boundary stays system calls: interleavings of plain memory
     accesses between two calls are not explored, and cmc(7) must say so.
 
-  Until all of that lands, the INCOMPLETE rule is the honest answer.
+  Status: done (`wip/threads-sched`), as designed below, and the
+  INCOMPLETE rule is removed.  One change from the design: a clone holds
+  the parent as well as the newborn (BK_CLONED), since the parent's next
+  call is carried out when it is reached and would otherwise always
+  come first.  A thread's record also names the call it is parked in
+  (its arguments and instruction and stack pointers), since two threads
+  can hold the same answer at different points of their code.  Fixtures:
+  `racewake.c` (a wake before the store), `raceemit.c` (an unlocked
+  increment loses an update), `raceborn.c` (a newborn sends before its
+  parent).  Each bug build was missed on the previous engine (INCOMPLETE
+  in every run) and is caught now; each correct build and both twothread
+  fixtures pass.  Single-threaded state counts are unchanged.
 
-  The design being built (`wip/threads-sched`):
+  A second review (of `f9df3b2`, which had made a call on a kernel fd a
+  visible operation) found five gaps, each fixed with a fixture that
+  failed on that engine:
+
+  - Kernel fds were choice points, but a pipe's contents and a file's
+    offset are not in the world, so schedules that leave different
+    bytes in a pipe merged.  A call on a kernel fd in a node with more
+    than one thread is now refused (exit 3) before it runs, except a
+    write to stdout or stderr and the C library's terminal query on
+    them (`racepipe`, `kernelfd`).
+  - A state-hook write ran in the kernel when the thread next ran, so
+    one RUN did the write, the user code after it and the next call as
+    one step.  The checker now writes the record itself when the
+    thread reaches it, as it carries out every other visible operation
+    (`durack`).
+  - A thread's record (its call, arguments and instruction and stack
+    pointers) cannot tell two iterations of a loop apart, nor a thread
+    born on a joined thread's stack, nor memory two threads update
+    between calls.  A world in which a live node has run more than one
+    thread is now never merged: the search over it is a tree, bounded
+    by `--max-states` or 1,000,000 such worlds, and INCOMPLETE at the
+    bound (`threadpos`).  Threaded fixtures' counts rise (twothread 40
+    to 515 distinct); single-threaded counts are unchanged.
+  - cmc(7) claimed that a call on any descriptor is visible; it now
+    lists the choice points (`futex`, calls on checker-owned fds, state-
+    hook writes and the read of fd 193, `clone`, exit) and the calls
+    that are not intercepted at all (`lseek`, `openat`, `fsync`,
+    `flock`).
+  - The checker hung on a thread blocked in a call it does not see
+    (`SECCOMP_IOCTL_NOTIF_RECV` blocks even on an `O_NONBLOCK`
+    listener) and on a node stopped by `abort()`.  It now polls before
+    each receive, so the 10-second lull error fires, and a fault signal
+    ends the node and is reported as a violation (`fault`,
+    `kernelfd`).
+
+  The design:
 
   - **Visible operations.**  In a node with more than one thread (or a
     birth in flight), a thread's step ends at a visible operation: a
-    `futex` call, any call on a checker-owned fd, a write to fd 3 or fd
-    193, `clone`, `exit`.  Other calls (`mmap`, `rseq`, the clock) are
-    answered at once, since they touch nothing another thread can see
-    except through memory, and memory between two calls is not
+    `futex` call, a call on a checker-owned fd, a state-hook write or a
+    read of fd 193, `clone`, `exit`.  A call on a kernel fd is refused.  Other calls (`mmap`, `rseq`, the
+    clock) are answered at once, since they touch nothing another thread
+    can see except through memory, and memory between two calls is not
     explored.
   - **Execute, then park.**  A visible operation is carried out when the
     thread reaches it (so its effect, such as waking a futex waiter or
     queueing bytes, is in the world at once), but its answer is held and
     the thread parks (BK_DONE).  A deferring call parks as before
-    (recv, accept, poll, futex wait).  A call the kernel performs
-    (CONTINUE: an fd-3 write, `clone`) is held before it runs instead.
+    (recv, accept, poll, futex wait).  The checker writes a state-hook
+    record itself; only `clone` runs in the kernel, and it stops both
+    threads at its return.
   - **A search action.**  When every thread of the node is parked, the
     actions include RUN(node, thread) for each thread with a held answer
     and each woken futex waiter.  RUN sends the answer and lets that one
@@ -271,6 +317,8 @@ still about that one schedule, not every fair one, and `DESIGN.md`,
     Reaping waits on every traced thread (`__WALL`).
   - **Encoding.**  A held answer is part of a thread's record (the call
     and its result), so worlds that differ in a pending result split.
+    A world with a node that has run more than one thread is not merged
+    at all, since the record misses the thread's memory.
   - **The boundary.**  Interleavings of memory accesses between two
     visible operations of different threads are not explored; cmc(7)
     states it.  With the scheduler complete, the INCOMPLETE rule is

@@ -1,9 +1,11 @@
 # Plan: per-thread scheduling in libcmc process mode (Tier 3, ask 8)
 
-Status: shipped in 1.3.0 as a single schedule.  The engine runs one
-order of a node's threads, so the soundness plan (item 3.8) makes any
-multi-threaded search end INCOMPLETE until the choice of thread is a
-search action.
+Status: shipped in 1.3.0 as a single schedule, then replaced by a
+scheduler (soundness plan item 3.8): the order of a node's threads'
+visible operations, births included, is now a search choice, and a
+multi-threaded search can pass.  The sections below describe the 1.3.0
+design; the "Births" and "Wake ordering" parts are superseded by
+`docs/DESIGN.md` and cmc(7).
 
 ## The problem
 

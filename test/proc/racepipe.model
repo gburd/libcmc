@@ -1,0 +1,7 @@
+# test/proc/racepipe.c: two threads share two kernel pipes.  The pipes'
+# contents are not in the world, so the node is refused (exit 3) before
+# a call on one runs.
+[target]
+nodes = 1
+[invariants]
+mixed = "eventually node[0][0] == 2 and node[0][1] == 2"

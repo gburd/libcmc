@@ -101,8 +101,11 @@ checks the shipped binary as it runs, under seccomp, with the network,
 timeouts, crashes and connection resets as search decisions.  Blocking
 sockets, `poll`/`ppoll`/`epoll`, `fcntl` for `O_NONBLOCK`, `eventfd`,
 threads and node restart are intercepted, each with the limits listed in
-cmc(7) and the remediation plan; multi-threaded nodes are run in one
-thread schedule, not every schedule.  The worked examples are small
+cmc(7) and the remediation plan.  The order of a multi-threaded node's
+system calls on checker-owned fds, futexes and the state hook is a
+search choice, and such a node may not share pipes or files between its
+threads; interleavings of memory accesses between those calls are not
+explored.  The worked examples are small
 safety demonstrations, not complete models of the protocols they are
 named after.
 Process mode replays every state from a fresh launch, so the rate scales
