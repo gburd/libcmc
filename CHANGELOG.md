@@ -5,47 +5,71 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 2.0.0 (2026-11-17)
+
 A soundness release, from an audit of 1.3.0
 ([docs/plans/soundness-remediation.md](docs/plans/soundness-remediation.md)).
 The audit found ways for every engine to report a pass where a bug
 existed, gates that passed after their tool failed, and documentation
 that claimed more than the gates showed.  Each fix below has a test that
-fails on 1.3.0.  [docs/qualification.md](docs/qualification.md) now
-lists what each engine answers exactly, approximates, or refuses.
+fails on 1.3.0, named in brackets after it (a gate script and its row
+or fixture), unless the bracket says otherwise.  [docs/qualification.md](docs/qualification.md) lists what
+each engine answers exactly, approximates, or refuses, with its gate.
 
-Some results change.  A model that passed on 1.3.0 may now fail, end
-INCOMPLETE, or be refused (exit 3), and state counts move.  Where an
-example's 1.3.0 result was an artifact of a bug, its README says so.
+The major version changes because results change for the same input.  A
+model that passed on 1.3.0 may now fail, end INCOMPLETE (exit 2), or be
+refused (exit 3), and state counts move.  Where an example's 1.3.0
+result was an artifact of a bug, its README says so.
 
 Abstract checker (`cmc --spec`):
 
 - Liveness follows TLA+ semantics.  Stuttering counts as a behaviour,
   every fair bad component is checked, and the backward search for
-  `A ~> B` stops at B.  The verdicts now agree with TLC on five probes
-  where 1.3.0 disagreed.
+  `A ~> B` stops at B.  The verdicts agree with TLC on five probes
+  where 1.3.0 disagreed, and a graph with many edges per state is
+  checked whole.  [spec_gate: sound/leads, leadscross, once, unfair,
+  dead, edges; emit_gate runs the first five through TLC]
+- The seen set compares states exactly, under symmetry as well: a
+  fingerprint match is confirmed against the stored canonical state.
+  [no failing test: a 64-bit collision cannot be produced at gate
+  sizes; spec_gate's symmetry and count rows show no count moved]
 - Model errors are errors.  These used to change the model silently and
   now exit 3: text that overflows a buffer; a non-set domain; a value
   outside its declared domain; integer overflow; `/` or `mod` on a
   negative; a primed variable read; an init that reads an unset
   variable; a variable assigned twice; a bound name that shadows another.
-- Liveness under `symmetry` is refused.
+  [spec_gate: sound/truncate, typepass, boundpass, succbound, overflow,
+  primed, init_order, duplicate, quantifier]
+- Liveness under `symmetry` is refused.  [spec_gate: sound/symlive]
 - `--refine-steps` (C2) checks the first state against init, skips
   actions gated off by `--define`, and compares states exactly.
+  [spec_gate: sound/c2gate, c2init, scalar.bind]
+- The spec gate also runs under ASan and UBSan.  [make check-asan]
 
 Process engine (`cmc --model-file`):
 
 - Each TCP connection has its own queues.  On 1.3.0, two connections
-  between the same two nodes shared bytes.
-- `close()` sends a FIN, or an RST when bytes are left unread.  After a
-  reset, the next call reports `ECONNRESET`, then writes fail with
-  `EPIPE` and the `SIGPIPE` the node's disposition decides.
-- A `connect()` to a node that is down is refused.
+  between the same two nodes shared bytes.  [proc_gate: crossrpc,
+  twoconn]
+- `close()` sends a FIN, or an RST when bytes are left unread; a reset
+  keeps the bytes already sent; an exited listener resets its backlog;
+  a refused socket reads `ENOTCONN` and can be dialled again.  After a
+  reset the next call reports `ECONNRESET`, then writes fail with
+  `EPIPE` and the `SIGPIPE` the node's disposition decides.  Each case
+  matches Linux loopback, which the gate runs natively beside cmc.
+  [proc_gate: tcpsem finwrite, rstdata, backlog, redial]
+- A `connect()` to a node that is down is refused.  [proc_gate:
+  unmodelled refused]
 - A node starts with every signal at its default and none blocked,
-  whatever cmc inherited.
-- Worlds are deduplicated by their exact encoding.  The encoding gains
-  the durable record, every polled fd, epoll user data, the futex word,
-  and a recv's requested length.  Nodes run without ASLR, so addresses
-  repeat across replays.
+  whatever cmc inherited.  [proc_gate: the SIGPIPE row under `trap ''
+  PIPE`]
+- Worlds are deduplicated by their exact encoding, not a hash.  The
+  encoding gains the durable record and its read offset, every polled
+  fd, epoll user data, the futex word, a recv's requested length, and
+  the connection flags.  Nodes run without ASLR, so addresses repeat
+  across replays.  [proc_gate: fingerprint; fpfuzz, 3000 random worlds
+  with mutations that must change the encoding and changes it must
+  hide]
 - Threads are scheduled by the search.  In a node with more than one
   thread, each `futex` call, call on a checker-owned fd, state-hook
   write, `clone` and thread exit ends the thread's step, and the search
@@ -56,44 +80,66 @@ Process engine (`cmc --model-file`):
   call on a kernel fd (a pipe, a file) from such a node is refused,
   except writes to stdout and stderr.  Interleavings of memory accesses
   between two visible calls are not explored.  A single-threaded node
-  is unchanged.
+  is unchanged.  On 1.3.0 a multi-threaded node ran in one order.
+  [proc_gate: racewake, raceemit, raceborn, threadpos, durack,
+  kernelfd, racepipe, twothread, twothread_join]
+- State-hook writes are carried out by the checker, so a crash can fall
+  between a durable write and the next call.  [proc_gate: durack]
 - A node that aborts (a failed `assert`) or faults is reported as a
   violation, and a thread blocked in a call the checker does not see
-  ends the check after 10 s; both used to hang it.
+  ends the check after 10 s; both used to hang it.  [proc_gate: fault,
+  kernelfd]
 - These are refused (exit 3): a finite `poll`, `ppoll` or `epoll_wait`
   timeout; a timed futex wait; `EPOLLET`, `EPOLLONESHOT` and other epoll
   flags; `EFD_SEMAPHORE`; a state record longer than 64 bytes or left
   unfinished; a `SIGPIPE` handler or blocked `SIGPIPE` on a write into
-  a reset connection.
-- A write from a buffer the node does not own gets `EFAULT`.  On 1.3.0
-  it was a zero-filled success.  The preload allocator checks sizes
-  and copies exactly on `realloc`.
+  a reset connection; `fork`, `vfork` and a `clone` that is not a
+  thread; a socket other than `AF_INET` `SOCK_STREAM`; `accept4`,
+  `recvfrom` and `sendto` flags or addresses the model does not
+  follow; and `readv`, `writev`, `pread`, `pwrite`, `recvmsg`,
+  `sendmsg`, `shutdown`, `dup`, `ioctl`, `splice`, `sendfile` and the
+  `*sockopt`/`*name` queries on a checker-owned fd.  [proc_gate:
+  unmodelled pollto, epollet, semaphore, longrec, partrec, rsthandler,
+  fork, udp, nbaccept, peek, writev, sendmsg]
+- A write from a buffer the node does not own gets `EFAULT`, and a
+  partial transfer of a call's arguments ends the check.  On 1.3.0 it
+  was a zero-filled success.  The preload allocator checks sizes and
+  copies exactly on `realloc`.  [proc_gate: unmodelled badptr,
+  preload_alloc]
 - A safety-only model whose initial state enables no action is
-  INCOMPLETE, not a pass.
+  INCOMPLETE, not a pass.  [proc_gate: noprogress]
 
 In-process engine (`cmc --model`, `libcmc(3)`):
 
-- A crash clears the node's messages to itself.
+- A crash clears the node's messages to itself.  [test_cmc]
 - Simulation and replay check every state, including the last.
+  [test_cmc]
 - `cmc_run_new()` refuses more than 64 properties of one kind, and a
-  property of an unknown kind.
-- The fair schedule cannot postpone an armed timer forever.
+  property of an unknown kind.  [test_cmc]
+- The fair schedule cannot postpone an armed timer forever.  [test_cmc]
 
 Examples:
 
 - raft.c and hc.c served no requests while waiting on their own.  Under
   1.3.0's shared channels, a waiting node was handed its peer's request
   as the reply.  Both now serve while they wait.  raft's double-vote bug
-  is caught again, through real schedules.
+  is caught again, through real schedules.  [make check-examples,
+  check-examples-slow]
 - hc's pass on 1.3.0 was vacuous: no participant ever adopted.  Now a
-  participant adopts, and the model requires it.
+  participant adopts, and the model requires it.  [make
+  check-examples-slow]
 - paxos2 decides, and its planted bug breaks the shared spec's
-  agreement.
+  agreement.  [make check-examples: paxos2-refine]
+- The Paxos family follows Lamport's Paxos.tla: `paxos.cml` (with a TLA+
+  twin), and new `fpaxos.cml` (Flexible Paxos quorums), `caspaxos.cml`,
+  `zab.cml` (epochs, discovery and the committed prefix) and
+  `fastpaxos.cml`.  cmc's counts agree with TLC, and Apalache agrees.
+  [emit_gate, apalache_gate]
 
 Gates and release:
 
 - The Apalache gate fails on a tool error.  A missing tool fails the
-  gate under `CMC_REQUIRE_TOOLS=1`.
+  gate under `CMC_REQUIRE_TOOLS=1`.  [apalache_gate --self-test]
 - CI runs the TLA+ bridge gates (TLC and Apalache), the spec gate under
   ASan and UBSan (`make check-asan`), and the slow example rows (`make
   check-examples-slow`) before a tag.

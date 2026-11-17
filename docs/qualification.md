@@ -125,7 +125,7 @@ in the kernel, untouched.
 | the search on the HC calibration core | exact at the instances run | 22 rows against TLC: verdicts and distinct-state counts | `make check-calibration`, `check-hc-bugs` |
 | determinism of a core | checked | `--det` runs every step twice | toy_gate |
 | uninitialised reads in a core | checked | MemorySanitizer | `make check-msan` |
-| crash, simulation, replay, the fair schedule | under remediation | see Phase 2 of the plan | test_cmc |
+| crash, simulation, replay, the fair schedule | exact | a crash clears the node's self-channel; simulation and replay check every state; an armed timer is never starved (Phase 2 of the plan) | test_cmc |
 
 ## Examples
 

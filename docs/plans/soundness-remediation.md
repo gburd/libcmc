@@ -9,8 +9,8 @@ lede: >-
 
 # Plan: soundness remediation
 
-Status: Phases 0 to 4 done, the thread scheduler of 3.8 included,
-except Phase 5's randomised fingerprint tests.  Audited commit: `b2eab84` (1.3.0).  Branch: `pr/soundness`.
+Status: done, released in 2.0.0.  Phases 0 to 5 are done, the thread
+scheduler of 3.8 included.  Audited commit: `b2eab84` (1.3.0).
 
 ## Why
 
@@ -463,17 +463,23 @@ liveness probes, and runs in CI before a tag.  The process engine's
 differential test against Linux covers close and reset
 (`test/proc/tcpsem.c`, run natively and under cmc by proc_gate).
 `test/proc/fingerprint.c` checks named pairs of worlds, and
-`test/proc/fpfuzz.c` random ones: 3,000 seeded worlds, each with 22
+`test/proc/fpfuzz.c` random ones: 3,000 seeded worlds, each with 25
 kinds of mutation that must change the encoding and three changes
 (thread order and tids, bag slots, connection slots) that must not.
-Dropping any of three encoded fields, or leaking a tid, fails it.  An independent
+The worlds include threads parked at different points of their code,
+holding an answer, held at a clone, or newborn.  Dropping any of three
+encoded fields, leaking a tid, or dropping a thread's instruction
+pointer, held bytes or clone hold fails it.  An independent
 review of the engine changes at `21fd57d` found six process-engine
 false passes and a hash-only seen set in the abstract checker; each has
 a fix and a red test (`f9e5370`, `eebaaa9`, `ce59d01`, `1c3ae30`).  The
 review covered Phases 1 to 3, not the Phase 4 models, which rest on
 three-engine agreement (cmc, TLC, Apalache) and, for paxos, a separately
-written TLA+ twin.  The CHANGELOG's Unreleased section lists the
-changes; it does not yet name each item's gate.
+written TLA+ twin.  Two reviews of the thread scheduler found false
+passes (kernel fds outside the world, two semantics for visible calls,
+thread positions that merged) and hangs; each has a fix and a red test
+(`22a332a`, `c4f0f2d`, `99b29a4`, `6da5145`).  The 2.0.0 CHANGELOG names
+each item's gate, or says it has no failing test.
 
 ## Order
 

@@ -34,9 +34,10 @@ so you do not reach for it where it cannot help.
 
 ## Where it is a strong fit
 
-Read this section with the [soundness remediation plan]({{ '/reference/plan-soundness/' | relative_url }}):
-an audit of 1.3.0 found false passes, so these are the problems the tool
-is designed for, not ones on which a pass is yet evidence.
+Read this section with the [qualification table]({{ '/reference/qualification/' | relative_url }}):
+a pass is evidence only for the behaviour it lists as modelled, at the
+instance and budgets searched.  An audit of 1.3.0 found false passes,
+which 2.0.0 fixes (see the [soundness remediation plan]({{ '/reference/plan-soundness/' | relative_url }})).
 
 - **Crash-fault agreement and replication protocols at a small
   instance.**  Safety in this family often rests on quorum intersection
@@ -86,10 +87,10 @@ is designed for, not ones on which a pass is yet evidence.
 
 - **Sole evidence for a safety-critical system.**  Banking ledgers,
   launch control, medical devices: do not accept such a system on a cmc
-  pass.  1.3.0 has reproduced false passes, and even a sound bounded
-  check covers only the instance and budgets it searched.  Use it, once
-  remediated, as one input beside formal specifications, proofs where
-  feasible, review, testing and fault injection.
+  pass.  1.3.0 had reproduced false passes, and even a sound bounded
+  check covers only the instance and budgets it searched.  Use it as
+  one input beside formal specifications, proofs where feasible,
+  review, testing and fault injection.
 - **Liveness and progress under partial synchrony.**  "Eventually a
   value is chosen," leader stabilization, termination under an
   adversarial-but-fair scheduler: these are what the FLP result and the

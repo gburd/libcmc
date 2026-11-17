@@ -32,8 +32,9 @@ lede: >-
   each engine answers exactly, approximates, or refuses, and the gate
   that checks it.
 - [Soundness remediation]({{ '/reference/plan-soundness/' | relative_url }}):
-  the false passes an audit of 1.3.0 found, and the plan that fixes
-  them.  Until it is done, a cmc PASS is not verification evidence.
+  the false passes an audit of 1.3.0 found, and how 2.0.0 fixes each
+  one.  A pass is evidence only for what the qualification table lists
+  as modelled.
 
 After `make install` these are on your system as `man cmc`,
 `man libcmc` and `man 7 cmc`.  The header,

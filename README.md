@@ -34,11 +34,15 @@ process front end (`cmc --model-file`) and the abstract checker (`cmc
 --spec`) have separate search loops that this calibration does not
 cover.  Output follows TLC's wording.
 
-**Not verification evidence yet.**  An audit of 1.3.0 found false
-passes in all three engines and gates that could report success after a
-tool failed.  Until the [soundness remediation plan](docs/plans/soundness-remediation.md)
-is done, treat a cmc pass as a debugging aid, not as evidence that a
-system is correct.
+**What a pass means.**  An audit of 1.3.0 found false passes in all
+three engines and gates that could report success after a tool failed.
+2.0.0 fixes each one found, with a test that fails on 1.3.0 (see the
+[soundness remediation plan](docs/plans/soundness-remediation.md) and
+[CHANGELOG.md](CHANGELOG.md)).  A pass covers only the instance and the
+budgets searched, and only the behaviour
+[docs/qualification.md](docs/qualification.md) lists as modelled; a
+construct outside it is refused, not passed.  Use cmc as one input
+beside review, testing and, for critical systems, a formal proof.
 
 Documentation, with a guide that builds a first model and the manual
 pages: <https://gregburd.codeberg.page/libcmc/> (mirrored at
@@ -96,7 +100,7 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 1.3.0, under remediation (see above).  `cmc --model-file`
+Release 2.0.0.  `cmc --model-file`
 checks the shipped binary as it runs, under seccomp, with the network,
 timeouts, crashes and connection resets as search decisions.  Blocking
 sockets, `poll`/`ppoll`/`epoll`, `fcntl` for `O_NONBLOCK`, `eventfd`,
