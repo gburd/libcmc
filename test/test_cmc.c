@@ -2003,6 +2003,157 @@ test_core_rules(void)
 	}
 }
 
+/* ---- every search on one model --------------------------------------
+ * The toy and its bugs through BFS, DFS, simulation and replay, with
+ * each kind of property, so the searches agree on what they report. */
+
+static void
+test_searches_agree(void)
+{
+	static const char *const inv[] = {"Mutex", NULL};
+	static const char *const act[] = {"PhaseMonotone", NULL};
+	static const char *const qui[] = {"AllReplied", NULL};
+	CmcOptions	o;
+	char		prop[64],
+				why[512];
+
+	for (int s = 0; s < 3; s++)
+	{
+		cmc_options_default(&o);
+		o.search = s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : CMC_SIMULATE;
+		o.max_depth = 40;
+		o.walks = 2000;
+		/* an action property, a quiescence property, an invariant */
+		CHECK(verdict_of(&toy_bug3_model, &o, act, prop, sizeof(prop), NULL, 0, NULL) ==
+			  CMC_VIOLATION && !strcmp(prop, "PhaseMonotone"));
+		CHECK(verdict_of(&toy_bug2_model, &o, qui, prop, sizeof(prop), NULL, 0, NULL) ==
+			  CMC_VIOLATION && !strcmp(prop, "AllReplied"));
+		CHECK(verdict_of(&toy_bug1_model, &o, inv, prop, sizeof(prop), NULL, 0, NULL) ==
+			  CMC_VIOLATION && !strcmp(prop, "Mutex"));
+		/* the correct toy holds every property, in a FIFO and in a bag */
+		CHECK(verdict_of(&toy_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+		o.net = CMC_NET_BAG;
+		o.drop_budget = 1;
+		o.dup_budget = 1;
+		CHECK(verdict_of(&toy_model, &o, inv, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+	}
+	/* DFS: a depth bound that cuts the graph is incomplete, and a state
+	 * reached again more shallowly is searched again below */
+	cmc_options_default(&o);
+	o.search = CMC_DFS;
+	o.max_depth = 5;
+	CHECK(verdict_of(&toy_model, &o, inv, NULL, 0, why, sizeof(why), NULL) == CMC_INCOMPLETE &&
+		  strstr(why, "depth bound 5"));
+	o.max_depth = 40;
+	o.max_states = 10;
+	CHECK(verdict_of(&toy_model, &o, inv, NULL, 0, why, sizeof(why), NULL) == CMC_INCOMPLETE &&
+		  strstr(why, "max_states"));
+	/* a bug at depth 7 is found by DFS under any bound that reaches it */
+	o.max_states = 0;
+	o.max_depth = 7;
+	CHECK(verdict_of(&toy_bug1_model, &o, inv, prop, sizeof(prop), NULL, 0, NULL) ==
+		  CMC_VIOLATION);
+	/* the replay of each search's trace reports what the search did */
+	for (int s = 0; s < 3; s++)
+	{
+		char		path[512];
+		CmcRun	   *r;
+		CmcResult	res;
+
+		snprintf(path, sizeof(path), "%s/agree.replay",
+				 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
+		cmc_options_default(&o);
+		o.max_depth = 40;
+		o.walks = 2000;
+		r = mkc(&toy_bug3_model, s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : CMC_SIMULATE, "", act, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_VIOLATION && res.trace_len > 1);
+		CHECK(cmc_write_replay(r, path, res.trace, res.trace_len - 1) == 0);
+		cmc_result_free(&res);
+		cmc_run_free(r);
+		o.replay_in = path;
+		r = mkc(&toy_bug3_model, CMC_REPLAY, "", act, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "PhaseMonotone"));
+		cmc_result_free(&res);
+		cmc_run_free(r);
+		/* and of the quiescent state of a lost wake */
+		r = mkc(&toy_bug2_model, s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : CMC_SIMULATE, "", qui, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_VIOLATION);
+		CHECK(cmc_write_replay(r, path, res.trace, res.trace_len - 1) == 0);
+		cmc_result_free(&res);
+		cmc_run_free(r);
+		r = mkc(&toy_bug2_model, CMC_REPLAY, "", qui, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "AllReplied"));
+		cmc_result_free(&res);
+		cmc_run_free(r);
+	}
+}
+
+/* a replay file that does not fit the run is refused, never run */
+static void
+test_replay_refusals(void)
+{
+	static const char *const inv[] = {"Mutex", NULL};
+	static const char *const bad[] = {
+		"not a replay\n",
+		"# cmc replay v2\nmodel toy_model\nenv client=1 drop=0 dup=0 crash=0 net=8 persist=2"
+		" reply=8 mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\n",
+		"# cmc replay v2\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8 persist=2 reply=8"
+		" mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=8 mode=tree live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg clients=9\nenv client=1 drop=0 dup=0 crash=0"
+		" net=8 persist=2 reply=8 mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=1 crash=0 net=8"
+		" persist=2 reply=8 mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=7"
+		" persist=2 reply=8 mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=3 reply=8 mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=7 mode=fifo live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=8 mode=bag live=1000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=8 mode=fifo live=999\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=8 mode=fifo live=1000\nact 0701000000000000\nact 0701000000000000\n",
+	};
+	static const char *const want[] = {"not a cmc replay", "lacks its model", "lacks its model",
+		"lacks its model", "bad env line", "recorded with cfg", "different environment",
+		"different environment", "different environment", "different environment",
+		"different environment", "different environment", "replay step 2"};
+	char		path[512];
+
+	snprintf(path, sizeof(path), "%s/refuse.replay",
+			 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+	{
+		FILE	   *f = fopen(path, "w");
+		CmcOptions	o;
+		CmcRun	   *r;
+		CmcResult	res;
+		/* live steps differ only for a run with an eventually property */
+		const char *const ev[] = {"Mutex", "EventuallyAllReplied", NULL};
+
+		fputs(bad[i], f);
+		fclose(f);
+		cmc_options_default(&o);
+		o.replay_in = path;
+		r = mkc(&toy_model, CMC_REPLAY, "", i == 11 ? ev : inv, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_ERROR && strstr(res.why, want[i]) != NULL);
+		if (res.verdict != CMC_ERROR || !strstr(res.why, want[i]))
+			fprintf(stderr, "  replay %zu: %s\n", i, res.why);
+		cmc_result_free(&res);
+		cmc_run_free(r);
+	}
+}
+
 /* ---- the command line (cmc_main) ------------------------------------ */
 
 /* toy-bug1 with its first property (Mutex) always checked, under a
@@ -2414,6 +2565,8 @@ main(void)
 	test_p25_fair_schedule_fires_timers();
 	test_output_rules();
 	test_core_rules();
+	test_searches_agree();
+	test_replay_refusals();
 	test_apply_refuses();
 	test_cli_input();
 	test_cli_runs();
