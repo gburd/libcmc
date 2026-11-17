@@ -1,0 +1,20 @@
+# test/spec/sound/symlive.cml: a liveness property under symmetry.  The
+# reduction maps each state to a representative, and a fair cycle in the
+# quotient need not be one in the full graph, so cmc refuses the pair
+# rather than report a verdict it cannot back.
+module symlive
+
+const N = 2
+symmetry 1 .. N
+
+var holder : 0 .. N
+
+init holder == 0
+
+fairness weak
+
+action take(n in 1 .. N):
+  when holder != n
+  holder' = n
+
+property held: eventually holder != 0

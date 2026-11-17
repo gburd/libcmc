@@ -178,6 +178,7 @@ expect "liveness: unfair stuttering avoids the goal"   1 "progress is violated" 
 expect "liveness: a goal already reached holds"        0 "No error has been found" --spec "$S/once.cml" # TLC: holds
 expect "liveness: every bad component is checked"      1 "response is violated" --spec "$S/leads.cml"   # TLC: violated
 expect "liveness: reaching B discharges A ~> B"        0 "No error has been found" --spec "$S/leadscross.cml" # TLC: holds
+expect "liveness under symmetry is refused"          3 "under symmetry" --spec "$S/symlive.cml"
 
 # the Apalache gate's verdict classifier: a tool error (parse, typing,
 # input) must never count as an expected violation (audit 0.2)
