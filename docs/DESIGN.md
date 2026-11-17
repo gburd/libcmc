@@ -60,10 +60,12 @@ pre-thread behaviour.
 
 In a node with more than one thread, the order of the threads' visible
 operations is a search choice.  A visible operation is a `futex` call,
-any call on a checker-owned fd, a write to fd 3 or fd 193, or a
-`clone`.  When a thread reaches one, the checker carries it out (bytes
-are queued, a futex waiter is woken, a state record is written) but
-holds its answer, and the thread parks (`BK_DONE`).  The checker writes
+any call on a checker-owned fd (or one that makes one), a write to fd 3
+or fd 193 or a read of fd 193, a `clone`, or a thread's exit, and
+nothing else is a choice point.  When a thread reaches one, the checker
+carries it out (bytes are queued, a futex waiter is woken, a state
+record is written) but holds its answer, and the thread parks
+(`BK_DONE`).  The checker writes
 a state-hook record into the node's hook pipe itself, from the thread's
 memory, rather than letting the kernel run the write, so a state-hook
 write has the same semantics as every other visible operation.  The
@@ -75,8 +77,11 @@ of a node runs at a time and a replay is deterministic.  In such a node
 a call on a kernel fd (a pipe or a file the threads may share) other
 than a write to stdout or stderr is refused before it runs, since its
 contents and offset are kernel state the world does not hold.  Other
-calls (the clock, `getrandom`, `mmap`) are answered at once; the clock
-moves only on a TIMEOUT action, when every thread is parked.
+calls (the clock, `getrandom`, `mmap`, a write to stdout or stderr) are
+answered at once; the clock moves only on a TIMEOUT action, when every
+thread is parked.  Calls the seccomp filter does not intercept (`lseek`,
+`openat`, `fsync`, `flock`) reach the kernel unseen, like memory
+accesses.
 
 A birth is held the same way.  Nodes are seized with
 `PTRACE_O_TRACECLONE`, so a `clone` stops the parent at

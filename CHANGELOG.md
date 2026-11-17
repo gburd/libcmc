@@ -48,11 +48,18 @@ Process engine (`cmc --model-file`):
   repeat across replays.
 - Threads are scheduled by the search.  In a node with more than one
   thread, each `futex` call, call on a checker-owned fd, state-hook
-  write and `clone` ends the thread's step, and the search chooses which
-  thread runs next (`run n1 t1`), births included: a new thread and its
-  parent are held at the clone's return.  Interleavings of memory
-  accesses between two such calls are not explored.  A single-threaded
-  node is unchanged.
+  write, `clone` and thread exit ends the thread's step, and the search
+  chooses which thread runs next (`run n1 t1`), births included: a new
+  thread and its parent are held at the clone's return.  A world with
+  such a node is never merged with another, so the search over it is a
+  tree, INCOMPLETE after `--max-states` or 1,000,000 such worlds.  A
+  call on a kernel fd (a pipe, a file) from such a node is refused,
+  except writes to stdout and stderr.  Interleavings of memory accesses
+  between two visible calls are not explored.  A single-threaded node
+  is unchanged.
+- A node that aborts (a failed `assert`) or faults is reported as a
+  violation, and a thread blocked in a call the checker does not see
+  ends the check after 10 s; both used to hang it.
 - These are refused (exit 3): a finite `poll`, `ppoll` or `epoll_wait`
   timeout; a timed futex wait; `EPOLLET`, `EPOLLONESHOT` and other epoll
   flags; `EFD_SEMAPHORE`; a state record longer than 64 bytes or left

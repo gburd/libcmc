@@ -120,12 +120,15 @@ wakes the waiters only when the program issues it, as part of the waking
 thread's step; the checker invents no wakes.
 .Pp
 In a node with more than one thread, each thread's step ends at a
-.Em visible operation :
+.Em visible operation ,
+and these are the only choice points:
 a
 .Fn futex
-call, any call on a socket, eventfd or epoll instance the checker owns,
-a write to the state hook (fd 3 or fd 193), or a
-.Fn clone .
+call; a call that makes, uses or closes a socket, eventfd or epoll
+instance the checker owns; a write to the state hook (fd 3 or fd 193)
+or a read of fd 193; a
+.Fn clone ;
+and a thread's exit.
 The checker carries the operation out when the thread reaches it, so
 its effect (bytes queued, a waiter woken, a state record written) is in
 the world at once, but its answer is held and the thread parks.
@@ -138,14 +141,16 @@ Only one thread of a node runs at a time, so a replay is deterministic
 and the kernel's futex and mutex handoffs are never torn.
 Other calls (the clock,
 .Fn getrandom ,
-.Fn mmap )
+.Fn mmap ,
+a write to stdout or stderr)
 are answered at once and the thread runs on.
 A node with one thread behaves as if threads did not exist.
 .Pp
 In a node with more than one thread, a call on a kernel descriptor (a
 pipe or a file the threads may share) is refused (exit 3) before it
 runs, since its contents and offset are not part of the world.
-Writes to stdout and stderr are allowed.
+Writes to stdout and stderr are allowed, as is the C library's query
+of whether one of them is a terminal.
 Calls the checker does not intercept (such as
 .Fn lseek ,
 .Fn openat ,
@@ -162,7 +167,7 @@ and two points of a run can park at the same call (two iterations of a
 loop, a thread born on the stack of one already joined, a value two
 threads update between their calls), so merging could hide a schedule.
 The search over such worlds is a tree that follows every order of the
-threads' visible operations, and a pass is exhaustive over those orders.
+threads' visible operations, so a pass is exhaustive over those orders.
 A thread that never stops makes the tree endless, so the search stops,
 incomplete, after
 .Fl -max-states
