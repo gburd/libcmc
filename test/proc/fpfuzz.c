@@ -73,10 +73,33 @@ add_conn(int a, int b, int accepted)
 		bag_add(c, pick(2), NULL, 0, 1);	/* a FIN */
 }
 
-/* park thread t of node nd in a random kind of call */
+/* park thread t of node nd in a random kind of call, at a random point
+ * of its code, sometimes holding an answer (BK_DONE) or held at a clone */
 static void
 park(Node *nd, Thread *t)
 {
+	t->nr = 200 + pick(3);
+	t->ip = 0x401000 + 16 * (uint64_t) pick(4);
+	t->sp = 0x7ff000 - 64 * (uint64_t) pick(4);
+	t->args[0] = (uint64_t) pick(4);
+	t->ctid_addr = pick(2) ? 0x9000 + 8 * (uint64_t) pick(3) : 0;
+	switch (pick(7))
+	{
+		case 4:
+			t->block_kind = BK_DONE;
+			t->held_val = pick(3);
+			t->held_err = pick(2) ? 0 : 11;
+			t->held_len = pick(4);
+			for (int k = 0; k < t->held_len; k++)
+				t->held_data[k] = (unsigned char) pick(4);
+			return;
+		case 5:
+			t->block_kind = BK_CLONED;
+			return;
+		case 6:
+			t->block_kind = BK_NEWBORN;
+			return;
+	}
 	switch (pick(4))
 	{
 		case 0:
@@ -407,10 +430,89 @@ m_reply(void)
 	return 1;
 }
 
+/* a newborn thread, not yet run */
 static int
-m_pending_birth(void)
+m_newborn(void)
 {
-	some_node()->th_pending++;
+	Node	   *nd = some_node();
+
+	if (nd->nth >= MAXTHREAD)
+		return 0;
+	Thread	   *t = &nd->th[nd->nth++];
+
+	memset(t, 0, sizeof *t);
+	t->inuse = 1;
+	t->tid = 98;
+	t->poll_woke_fd = -1;
+	t->epoll_fd = -1;
+	t->block_kind = BK_NEWBORN;
+	return 1;
+}
+
+/* a thread whose position is part of the world: one of a node with more
+ * than one thread, or one holding an answer; NULL if there is none */
+static Thread *
+positioned_thread(void)
+{
+	Node	   *nd = some_node();
+	Thread	   *t = some_thread(nd);
+
+	if (node_multi(nd) || t->block_kind >= BK_DONE)
+		return t;
+	return NULL;
+}
+
+/* the point a thread is parked at: its call, an argument, its
+ * instruction or stack pointer, or the word a join waits on */
+static int
+m_position(void)
+{
+	Thread	   *t = positioned_thread();
+
+	if (t == NULL || t->block_kind == BK_NEWBORN)
+		return 0;
+	switch (pick(5))
+	{
+		case 0: t->nr++; break;
+		case 1: t->args[pick(6)] ^= 1; break;
+		case 2: t->ip += 16; break;
+		case 3: t->sp -= 64; break;
+		default: t->ctid_addr += 8; break;
+	}
+	return 1;
+}
+
+/* a held answer: its value, errno, or a byte it wrote */
+static int
+m_held(void)
+{
+	Thread	   *t = some_thread(some_node());
+
+	if (t->block_kind != BK_DONE)
+		return 0;
+	switch (pick(3))
+	{
+		case 0: t->held_val++; break;
+		case 1: t->held_err = t->held_err ? 0 : 11; break;
+		default:
+			if (t->held_len == 0)
+				t->held_data[t->held_len++] = 1;
+			else
+				t->held_data[pick(t->held_len)] ^= 1;
+			break;
+	}
+	return 1;
+}
+
+/* a parked thread becomes one held at a clone */
+static int
+m_cloned(void)
+{
+	Thread	   *t = some_thread(some_node());
+
+	if (t->block_kind == BK_CLONED)
+		return 0;
+	t->block_kind = BK_CLONED;
 	return 1;
 }
 
@@ -437,13 +539,13 @@ static int (*const mutations[]) (void) = {
 	m_canon, m_durable, m_read_off, m_alive, m_block_kind, m_want,
 	m_recv_conn, m_futex, m_poll_fd, m_poll_events, m_woke, m_msg_byte,
 	m_msg_drop, m_conn_flag, m_nonblock, m_pend, m_efd, m_budget, m_clock,
-	m_reply, m_pending_birth, m_thread_count,
+	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned,
 };
 static const char *const mutation_names[] = {
 	"canon", "durable", "read_off", "alive", "block_kind", "want",
 	"recv_conn", "futex", "poll_fd", "poll_events", "woke", "msg_byte",
 	"msg_drop", "conn_flag", "nonblock", "pend", "efd", "budget", "clock",
-	"reply", "pending_birth", "thread_count",
+	"reply", "newborn", "thread_count", "position", "held", "cloned",
 };
 
 /* ---- changes the encoding must hide ------------------------------- */
