@@ -2,7 +2,8 @@ name: CI
 
 # The gates in `make check` (engine tests, the toy bug gate, the purity
 # gate and its teeth, the docs gate, the fast calibration rows) under gcc
-# and clang, the MemorySanitizer gate, and the Nix build.  The full
+# and clang, the MemorySanitizer gate, the coverage gate, and the Nix
+# build.  The full
 # calibration against TLC and the calibration's own planted bugs take
 # about 9 minutes and 7 GB, so they run weekly and on demand.
 #
@@ -68,6 +69,28 @@ jobs:
       - uses: actions/checkout@v4
       - name: make check-asan
         run: make check-asan
+
+  coverage:
+    # every gate of make check on a gcc --coverage build; fails below 90%
+    # of functions or of branches in any src/*.c file
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y gcc mandoc
+          pipx install gcovr==8.6
+      - name: make coverage
+        run: make coverage
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: |
+            build-cov/coverage.csv
+            build-cov/coverage-branches.txt
+            build-cov/coverage/
 
   nix:
     runs-on: ubuntu-24.04

@@ -2,8 +2,8 @@ name: CI
 
 # One small job: `make check` with gcc (about 35 s on 2 CPUs, 1 GB of RAM).
 # Codeberg's hosted runners are shared and asked to be used sparingly
-# (https://codeberg.org/actions/meta), so the clang, MemorySanitizer, Nix
-# and full-calibration jobs run on the GitHub mirror
+# (https://codeberg.org/actions/meta), so the clang, MemorySanitizer,
+# coverage, Nix and full-calibration jobs run on the GitHub mirror
 # (.github/workflows/ci.yml), which Codeberg pushes to on every commit.
 
 on:

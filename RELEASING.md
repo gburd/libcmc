@@ -14,8 +14,11 @@ read it from there.
 3. Commit (`Release X.Y.Z`), push `main` to Codeberg (origin), and sync
    the GitHub mirror.
 4. Wait for GitHub CI to pass on that commit.  CI runs the full
-   `make check` (gcc and clang), msan, the calibration against TLC, and
-   the nix build; a release should not ship on a red commit.
+   `make check` (gcc and clang), msan, coverage, the calibration against
+   TLC, and the nix build; a release should not ship on a red commit.
+   `make coverage` must be green with `COV_PENDING` empty: at least 90%
+   of the functions and of the branches of every `src/*.c` file run
+   under the gates.
 5. Create the annotated, signed tag and push it:
 
    ```sh

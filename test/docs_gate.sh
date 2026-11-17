@@ -110,9 +110,11 @@ else
 	echo "docs: SKIP the guide's server: cmc --model-file needs Linux x86-64"
 fi
 
+# CFLAGS is libcmc.a's, so a build with --coverage or a sanitizer links
 S=$HERE/docs/_includes/snippets/quickstart.c
-if $CC $W -I"$HERE/include" -o "$B/quickstart" "$S" "$B/libcmc.a" &&
-	$CC $W -DQUICKSTART_BUG -I"$HERE/include" -o "$B/quickstart-bug" "$S" "$B/libcmc.a"; then
+# shellcheck disable=SC2086
+if $CC $W ${CFLAGS:-} -I"$HERE/include" -o "$B/quickstart" "$S" "$B/libcmc.a" &&
+	$CC $W ${CFLAGS:-} -DQUICKSTART_BUG -I"$HERE/include" -o "$B/quickstart-bug" "$S" "$B/libcmc.a"; then
 	Q="--model quickstart --all-props --det"
 	"$B/quickstart" $Q --crashes 1 > "$OUT/qs.txt" 2>&1 &&
 		grep -q 'No error has been found' "$OUT/qs.txt" ||

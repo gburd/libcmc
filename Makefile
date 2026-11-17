@@ -10,6 +10,9 @@
 #   make check-calibration   every HC row against TLC (about 9 minutes)
 #   make check-hc-bugs       planted HC port bugs must fail calibration
 #   make check-all           all of the above
+#   make coverage            every gate of make check on a gcc --coverage
+#                            build; fails below 90% of functions or of
+#                            branches in any src/*.c file (needs gcovr)
 #   make CC=clang check
 #   make install             cmc, libcmc.a, the preload, cmc.h and the man
 #                            pages under $(PREFIX)
@@ -215,3 +218,46 @@ codeberg-release:
 clean:
 	rm -f $(B)/*.o $(B)/*.a $(B)/*.so $(B)/cmc $(B)/test_cmc $(B)/quickstart $(B)/quickstart-bug \
 		$(B)/*.replay $(B)/probe/* $(B)/proc/*
+
+# Coverage (docs/plans/2.1-boundaries.md, section 5).  make coverage
+# builds libcmc.a, cmc, test_cmc and the in-process drivers the gates
+# compile with gcc --coverage -O0 into $(COV_B), runs every gate of
+# `make check` against that build, then scripts/coverage.sh: gcovr over
+# src/*.c, a per-file table, and a failure unless function and branch
+# coverage are each at least $(COV_MIN)% overall and in every file.
+# COV_PENDING="src/a.c ..." reports the named files as PENDING instead of
+# failing on them; it is for development, and a release runs with it
+# empty.  make coverage-report reruns the report alone.
+#
+# Two kinds of object stay uninstrumented, because counters would change
+# what a gate checks: the cores the purity gate reads (gcov's counters are
+# writable data, which that gate rejects) and the preload every checked
+# node runs under (its counter dump at exit is file I/O inside a node).
+# cmc_preload.c is measured through in-process drivers that include its
+# source (test/proc/preload_alloc.c).  The gates pass CFLAGS (exported,
+# since it is set on the sub-make's command line) to every in-process
+# program they build against libcmc's objects, so those link with gcov.
+# COV_FLAGS carries $(WARN) because gcov matches counters to code by
+# basic block and gcc's warning passes change the blocks it builds: a
+# driver that includes a src/*.c file under other warning flags would
+# have its branches counted a second time.
+COV_B ?= build-cov
+COV_CC ?= gcc
+COV_MIN ?= 90
+COV_PENDING ?=
+COV_FLAGS = $(WARN) -O0 -g --coverage
+COV_S = $(CMC_SCRATCH)/coverage
+
+ifeq ($(COV_BUILD),1)
+$(PURE) $(PRELOAD): override CFLAGS = $(OPT) -g
+endif
+
+.PHONY: coverage coverage-report
+coverage:
+	mkdir -p $(COV_B) $(COV_S)
+	find $(COV_B) $(COV_S) -name '*.gcda' -delete
+	$(MAKE) B=$(COV_B) CC=$(COV_CC) CFLAGS="$(COV_FLAGS)" COV_BUILD=1 CMC_SCRATCH=$(COV_S) check
+	$(MAKE) coverage-report
+
+coverage-report:
+	COV_PENDING="$(COV_PENDING)" sh scripts/coverage.sh $(COV_MIN) $(COV_B) $(COV_S)

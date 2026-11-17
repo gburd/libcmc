@@ -517,7 +517,10 @@ restarts = 1"
 
 # the world encoding (soundness plan 3.1, 3.2): worlds whose futures
 # differ encode differently, and the seen set compares bytes, not hashes
-if $CC -std=c11 -O1 -w -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fingerprint" "$T/fingerprint.c" "$HERE/src/cmc_spec.c"; then
+# the whitebox drivers include the engine source, so they take its CFLAGS
+# (a --coverage build measures it through them); node binaries do not
+# shellcheck disable=SC2086
+if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fingerprint" "$T/fingerprint.c" "$HERE/src/cmc_spec.c"; then
 	if "$B/proc/fingerprint" > "$OUT/fp.txt" 2>&1; then echo "ok   the world encoding separates differing futures"
 	else echo "FAIL the world encoding"; sed 's/^/     /' "$OUT/fp.txt"; fail=1; fi
 else echo "proc_gate: fingerprint.c does not build"; fail=1; fi
@@ -525,14 +528,16 @@ else echo "proc_gate: fingerprint.c does not build"; fail=1; fi
 # the same, over random worlds (soundness plan, Phase 5): a mutation of
 # any future-relevant field changes the encoding, and slot order, tids
 # and allocation positions do not
-if $CC -std=c11 -O1 -w -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fpfuzz" "$T/fpfuzz.c" "$HERE/src/cmc_spec.c"; then
+# shellcheck disable=SC2086
+if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fpfuzz" "$T/fpfuzz.c" "$HERE/src/cmc_spec.c"; then
 	if "$B/proc/fpfuzz" > "$OUT/fpfuzz.txt" 2>&1; then echo "ok   the world encoding holds over random worlds ($(tail -1 "$OUT/fpfuzz.txt" | cut -d' ' -f4-))"
 	else echo "FAIL the world encoding over random worlds"; sed 's/^/     /' "$OUT/fpfuzz.txt"; fail=1; fi
 else echo "proc_gate: fpfuzz.c does not build"; fail=1; fi
 
 # the preload's allocator (soundness plan 3.5): an impossible size fails
 # instead of wrapping, and realloc copies only the old block
-if $CC -O1 -w -o "$B/proc/preload_alloc" "$T/preload_alloc.c"; then
+# shellcheck disable=SC2086
+if $CC -O1 -w ${CFLAGS:-} -o "$B/proc/preload_alloc" "$T/preload_alloc.c"; then
 	if "$B/proc/preload_alloc" > "$OUT/alloc.txt" 2>&1; then echo "ok   the preload allocator checks sizes and copies exactly"
 	else echo "FAIL the preload allocator"; sed 's/^/     /' "$OUT/alloc.txt"; fail=1; fi
 else echo "proc_gate: preload_alloc.c does not build"; fail=1; fi
