@@ -154,6 +154,20 @@ and
 .Fn flock )
 reach the kernel unseen, as memory accesses do.
 .Pp
+A world in which a live node has run more than one thread is never
+merged with another: it is neither looked up in nor added to the set of
+seen states.
+A thread's record holds the call it is parked in, but not its memory,
+and two points of a run can park at the same call (two iterations of a
+loop, a thread born on the stack of one already joined, a value two
+threads update between their calls), so merging could hide a schedule.
+The search over such worlds is a tree that follows every order of the
+threads' visible operations, and a pass is exhaustive over those orders.
+A thread that never stops makes the tree endless, so the search stops,
+incomplete, after
+.Fl -max-states
+worlds, or 1000000 without it.
+.Pp
 The boundary is the system call.
 Interleavings of plain memory accesses between two visible operations
 of different threads are not explored: a data race on a shared variable
@@ -254,7 +268,8 @@ counter, every epoll instance's interest list, every connection's
 messages in order, the connections waiting
 to be accepted, the ghost log of client replies, the budgets left and
 the logical clock.
-Its 128-bit fingerprint dedups states.
+Its 128-bit fingerprint, checked against the full encoding, dedups
+states, except a world with a multi-threaded node, which is never merged.
 The search is stateless: to expand a world the checker starts every
 node again and replays the actions that reached it.
 Breadth-first search gives a shortest counterexample; simulation takes

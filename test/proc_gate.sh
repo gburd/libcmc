@@ -59,7 +59,7 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack; do
+for f in fault kernelfd durack threadpos; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
@@ -319,6 +319,26 @@ expect "raceborn: sending before the clone holds"         0 "No error has been f
 # between it and the worker's next call (the value durable, its ack not
 # sent).  A hook write held before it ran made the two one step.
 expect "durack: a crash between a durable write and its ack" 0 "No error has been found" $(run durack durack)
+# threadpos: worlds with a multi-threaded node are never merged, since a
+# thread's record cannot tell apart two iterations of one loop (loop), a
+# thread born on the stack of one already joined (seq), or memory that
+# two threads update between their calls (order).  Each reachable state
+# must be found.  A thread that loops forever makes the search a tree
+# with no end, which a bound turns into INCOMPLETE (spin).
+for m in loop seq order spin; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[invariants]\n' "$B/proc/threadpos" "$m" > "$OUT/tp-$m.model"
+done
+printf 'never = "node[0][0] == 0"\n' >> "$OUT/tp-loop.model"
+printf 'never = "node[0][0] == 0"\n' >> "$OUT/tp-seq.model"
+printf 'any = "node[0][0] == 0"\n' >> "$OUT/tp-spin.model"
+cp "$OUT/tp-order.model" "$OUT/tp-order12.model"
+printf 'not12 = "node[0][0] == 0 or node[0][1] != 12"\n' >> "$OUT/tp-order12.model"
+printf 'not21 = "node[0][0] == 0 or node[0][1] != 21"\n' >> "$OUT/tp-order.model"
+expect "threadpos: a loop's second iteration is reached"    1 "never is violated" --model-file "$OUT/tp-loop.model"
+expect "threadpos: a thread on a joined thread's stack runs" 1 "never is violated" --model-file "$OUT/tp-seq.model"
+expect "threadpos: one order of a memory update is reached" 1 "not12 is violated" --model-file "$OUT/tp-order12.model"
+expect "threadpos: the other order is reached too"          1 "not21 is violated" --model-file "$OUT/tp-order.model"
+expect_by 300 "threadpos: an endless thread is INCOMPLETE"  2 "max states reached" --model-file "$OUT/tp-spin.model" --max-states 300
 # racepipe: two threads share two kernel pipes.  Their contents are not
 # in the world, so the node is refused rather than searched.
 expect "racepipe: threads sharing kernel pipes are refused" 3 "uses kernel fd" $(run racepipe racepipe)

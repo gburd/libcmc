@@ -96,6 +96,17 @@ since two threads can hold the same answer at different points of their
 code.  Records are sorted, so the key is the multiset of thread states,
 not which tid holds which.
 
+The encoding does not hold a thread's memory, and two points of a run
+can share a record: two iterations of a loop park at the same call, and
+glibc gives a new thread the stack of one already joined.  So a world in
+which a live node has run more than one thread is never merged: the
+search neither looks it up in the seen set nor adds it, and follows
+every order of the threads' visible operations as a tree.  The flag is
+per process, so it clears when the node dies or restarts.  The tree is
+bounded by `--max-states`, or 1,000,000 such worlds by default, and a
+search that reaches the bound is INCOMPLETE.  Worlds whose nodes have
+each run one thread are still deduplicated.
+
 The boundary is the system call: interleavings of plain memory accesses
 between two visible operations of different threads are not explored.
 

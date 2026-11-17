@@ -84,6 +84,7 @@ in the kernel, untouched.
 |---|---|---|---|
 | the order of threads' visible operations (`futex`, a call on a checker-owned fd, a state-hook write, `clone`) | exact | every order is a search choice (RUN); one thread of a node runs at a time | proc_gate twothread, racewake, raceemit, raceborn, durack |
 | a call on a kernel fd (a pipe, a file) in a node with more than one thread | refused | exit 3 before it runs; writes to stdout and stderr are allowed | proc_gate racepipe, kernelfd |
+| worlds with a node that has run more than one thread | exact (never merged) | searched as a tree over orders of visible operations; INCOMPLETE after `--max-states` such worlds, 1000000 by default | proc_gate threadpos |
 | `clone`, `clone3` (threads), `futex` wait and wake, `exit`, `pthread_join` | exact | a newborn and its parent are both held at the clone's return until the search runs each | proc_gate twothread_join, raceborn |
 | memory accesses between two visible operations | not explored | a data race with no system call between the racing accesses is not found | (boundary; no fixture) |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |

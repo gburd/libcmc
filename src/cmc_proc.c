@@ -638,6 +638,7 @@ typedef struct {
 	int durable_read_off;		/* bytes of the framed durable record a startup read has consumed */
 	int crashed;				/* killed by a CRASH action: volatile lost, durable kept */
 	int preload_ok;				/* the preload announced itself in this node */
+	int threaded;				/* this process has run more than one thread (world_threaded) */
 } Node;
 
 static Node N[MAXNODES];
@@ -980,7 +981,7 @@ launch(Node *nd)
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
-	nd->nth = 0; memset(nd->th, 0, sizeof nd->th);
+	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0;
 	/* TRACECLONE: a thread the node creates starts in a ptrace stop,
 	 * so the search, not the kernel, decides when it first runs */
 	if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACECLONE) != 0)
@@ -1566,6 +1567,7 @@ birth(Node *nd, Thread *th)
 	if (!t) die(1, "node %d has more than %d threads", nd->id, MAXTHREAD);
 	t->block_kind = BK_NEWBORN; t->ctid_addr = th->clone_ctid;
 	th->block_kind = BK_CLONED;
+	nd->threaded = 1;
 }
 
 /* Carry out notification g_req of thread th on node nd.  Returns 1 if the
@@ -3355,6 +3357,29 @@ report_fault(const int *seq, int len)
 	report_refine(seq, len);
 }
 
+/* Is a node alive that has run more than one thread since it was
+ * launched?  Such a world is never merged with another (see the search
+ * in cmc_proc_main).  Its threads' order decides what is in memory, and
+ * the encoding holds a thread's position (its call, arguments,
+ * instruction and stack pointers) but not that memory: two iterations of
+ * a loop park at one point, glibc gives a thread the stack of one it has
+ * joined, and a value two threads update between their calls is seen by
+ * no call.  The flag stays set once the node's extra threads have exited,
+ * since what they wrote stays in memory; it clears when the process dies
+ * or a RESTART starts a fresh one. */
+static int
+world_threaded(void)
+{
+	for (int i = 0; i < M.nodes; i++)
+		if (N[i].alive && N[i].threaded) return 1;
+	return 0;
+}
+
+/* The bound on worlds searched as a tree (world_threaded) when no
+ * --max-states is given: each one is a node of the tree, and a threaded
+ * program that never stops would otherwise grow it forever. */
+#define TREE_CAP 1000000
+
 /* the BFS frontier: action sequences, appended in one growing pool */
 static int *qpool; static size_t qcap, qused;
 typedef struct { size_t off; int len; uint64_t pfp0, pfp1; } QEnt;
@@ -3527,8 +3552,16 @@ cmc_proc_main(const CmcProcOptions *po)
 
 	/* breadth-first search: shortest counterexample, every distinct world
 	 * expanded once.  Each frontier entry is replayed from a fresh launch
-	 * (stateless), so a world costs one replay of its whole prefix. */
-	size_t distinct = 0, cut = 0, replays = 0; int maxlen = 0;
+	 * (stateless), so a world costs one replay of its whole prefix.  A
+	 * world with a live node that has run threads is not merged with any
+	 * other (world_threaded): it is neither looked up in the seen set nor
+	 * added to it, and counts as distinct.  The search below such a world
+	 * is a tree that follows every order of the threads' visible
+	 * operations, whatever the encoding misses about their memory.  A
+	 * stutter (a world that encodes like its parent) is expanded there
+	 * too, since the thread that ran may be at a point the encoding
+	 * cannot see.  TREE_CAP bounds the tree. */
+	size_t distinct = 0, cut = 0, replays = 0, ntree = 0; int maxlen = 0;
 	size_t progressed = 0, stutter_leaves = 0;	/* no-progress (self-loop) detection */
 	const char *why = NULL;
 	g_step_refine = po->refine_steps;	/* C2 checks run inside run_seq's replay */
@@ -3574,8 +3607,9 @@ cmc_proc_main(const CmcProcOptions *po)
 			}
 		}
 		uint64_t fp[2]; world_fp(fp);
-		int isnew = mark(fp, g_world, g_world_len);
-		if (isnew) { distinct++; if (e.len > maxlen) maxlen = e.len; }
+		int tree = world_threaded();
+		int isnew = tree || mark(fp, g_world, g_world_len);
+		if (isnew) { distinct++; ntree += tree; if (e.len > maxlen) maxlen = e.len; }
 		/* did this action make progress?  A non-root entry whose reached
 		 * world equals its parent's is a stutter: the action was enabled
 		 * but changed nothing the fingerprint sees, a self-loop the
@@ -3596,6 +3630,12 @@ cmc_proc_main(const CmcProcOptions *po)
 		}
 		free(seq);
 		if (po->max_states && distinct >= po->max_states) { why = "max states reached"; break; }
+		if (!po->max_states && ntree >= TREE_CAP)
+		{
+			static char tbuf[160];
+			snprintf(tbuf, sizeof tbuf, "%d worlds with a multi-threaded node were searched without merging (set the bound with --max-states)", TREE_CAP);
+			why = tbuf; break;
+		}
 		if (po->time_limit > 0 && now_s() - t0 > po->time_limit) { why = "time limit reached"; break; }
 	}
 	double dt = now_s() - t0;
@@ -3640,6 +3680,8 @@ cmc_proc_main(const CmcProcOptions *po)
 	/* TLC's wording; depth counts the initial state as 1 */
 	printf("Model checking completed. No error has been found.\n");
 	printf("%zu states generated, %zu distinct states found, 0 states left on queue.\n", replays, distinct);
+	if (ntree)
+		printf("  %zu of them have a multi-threaded node and were searched as a tree, without merging.\n", ntree);
 	printf("The depth of the complete state graph search is %d.\n", maxlen + 1);
 	printf("  %d invariant%s held; %.1f s, %.0f replays/s.\n", M.ninv, M.ninv == 1 ? "" : "s",
 		   dt, dt > 0 ? replays / dt : 0.0);
