@@ -319,25 +319,32 @@ expect "raceborn: sending before the clone holds"         0 "No error has been f
 # between it and the worker's next call (the value durable, its ack not
 # sent).  A hook write held before it ran made the two one step.
 expect "durack: a crash between a durable write and its ack" 0 "No error has been found" $(run durack durack)
-# racepipe: two threads' calls on kernel pipes interleave, so main can
-# read the first pipe's byte after missing the second's
-expect "racepipe: calls on kernel fds interleave"          0 "No error has been found" $(run racepipe racepipe)
+# racepipe: two threads share two kernel pipes.  Their contents are not
+# in the world, so the node is refused rather than searched.
+expect "racepipe: threads sharing kernel pipes are refused" 3 "uses kernel fd" $(run racepipe racepipe)
 
 # A node the checker cannot follow must end the check, never hang it.
 # A fault signal (abort, a failed assert) parks a ptrace-seized thread in
 # a signal-delivery stop, which makes no call: the checker reports the
 # node killed.  A thread blocked in a kernel call it does not see makes
-# none either: the check ends with the lull error after 10 s.
+# none either: the check ends with the lull error after 10 s.  In a node
+# with more than one thread, a call on a kernel fd (a pipe the threads
+# share) is refused before it runs: the pipe's contents are not in the
+# world, so schedules that leave different bytes in it would merge.  A
+# worker's writes to stdout and stderr are allowed.
 for m in main worker; do
 	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[invariants]\nany = "node[0][0] <= 1"\n' "$B/proc/fault" "$m" > "$OUT/fault-$m.model"
 done
-for m in alone block; do
+for m in alone block order mixed stdio; do
 	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[invariants]\nany = "node[0][0] <= 1"\n' "$B/proc/kernelfd" "$m" > "$OUT/kfd-$m.model"
 done
 expect_by 60 "fault: an abort() is reported, not waited on"     1 "killed by signal 6" --model-file "$OUT/fault-main.model"
 expect_by 60 "fault: an abort() in a worker thread is reported" 1 "killed by signal 6" --model-file "$OUT/fault-worker.model"
 expect_by 60 "kernelfd: a read blocked in the kernel ends the check" 1 "made no checked syscall" --model-file "$OUT/kfd-alone.model"
-expect_by 60 "kernelfd: a worker blocked in the kernel ends the check" 1 "made no checked syscall" --model-file "$OUT/kfd-block.model"
+expect_by 60 "kernelfd: a worker's blocking pipe read is refused" 3 "uses kernel fd" --model-file "$OUT/kfd-block.model"
+expect_by 60 "kernelfd: two workers writing one pipe are refused" 3 "uses kernel fd" --model-file "$OUT/kfd-order.model"
+expect_by 60 "kernelfd: a pipe beside an eventfd is refused"     3 "uses kernel fd" --model-file "$OUT/kfd-mixed.model"
+expect_by 60 "kernelfd: a worker may print to stdout and stderr" 0 "No error has been found" --model-file "$OUT/kfd-stdio.model"
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

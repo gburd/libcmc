@@ -1,6 +1,6 @@
-# test/proc/racepipe.c: main may read the first pipe's byte after missing
-# the second's (got = 2), a schedule that interleaves the two threads'
-# calls on kernel pipes.  It must be reachable.
+# test/proc/racepipe.c: two threads share two kernel pipes.  The pipes'
+# contents are not in the world, so the node is refused (exit 3) before
+# a call on one runs.
 [target]
 nodes = 1
 [invariants]

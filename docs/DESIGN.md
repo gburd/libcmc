@@ -67,15 +67,16 @@ holds its answer, and the thread parks (`BK_DONE`).  The checker writes
 a state-hook record into the node's hook pipe itself, from the thread's
 memory, rather than letting the kernel run the write, so a state-hook
 write has the same semantics as every other visible operation.  The
-answer to a parked recv, accept,
-poll or futex wait is held the same way when the search or another
-thread supplies it.  At a quiescent point the action RUN(node, thread)
-sends one held answer and lets that thread alone run to its next
-visible operation, so at most one thread of a node runs at a time and a
-replay is deterministic.  A call on any descriptor is visible, the
-kernel's (a pipe or a file two threads share) as well as the checker's.
-Other calls (the clock, `getrandom`, `mmap`) are answered at once; the
-clock moves only on a TIMEOUT action, when every thread is parked.
+answer to a parked recv, accept, poll or futex wait is held the same
+way when the search or another thread supplies it.  At a quiescent
+point the action RUN(node, thread) sends one held answer and lets that
+thread alone run to its next visible operation, so at most one thread
+of a node runs at a time and a replay is deterministic.  In such a node
+a call on a kernel fd (a pipe or a file the threads may share) other
+than a write to stdout or stderr is refused before it runs, since its
+contents and offset are kernel state the world does not hold.  Other
+calls (the clock, `getrandom`, `mmap`) are answered at once; the clock
+moves only on a TIMEOUT action, when every thread is parked.
 
 A birth is held the same way.  Nodes are seized with
 `PTRACE_O_TRACECLONE`, so a `clone` stops the parent at

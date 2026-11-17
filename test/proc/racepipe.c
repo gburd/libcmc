@@ -7,8 +7,9 @@
  * second pipe while it is empty, the worker writes both, and main then
  * reads 'a'.
  *
- * A checker that ran a thread's calls on kernel fds within one step
- * would see main get both bytes or neither, never the mixed result.
+ * The pipes' contents are kernel state the world encoding does not
+ * hold, so the checker cannot search these orders soundly, and a thread
+ * of a multi-threaded node that calls on a kernel fd is refused (exit 3).
  *
  * Canonical state fd 3: [phase][got], phase 2 once main has read, got =
  * 2 * (read 'a') + (read 'b').

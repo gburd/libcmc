@@ -43,6 +43,7 @@
 
 #if defined(__linux__) && defined(__x86_64__)
 
+#include <asm/termbits.h>			/* TCGETS2, for stdio's isatty() (kernel_fd_call) */
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1318,43 +1319,95 @@ sigpipe_kills(Node *nd, Thread *th)
 static int futex_wake(Node *nd, uint64_t uaddr, int n);
 
 /* Is call nr a visible operation: one whose effect another thread of the
- * node can see other than through memory?  Those are the futex calls and
- * every call on an fd, whether checker-owned (a socket, eventfd or epoll
- * instance, numbered from 500), the state hook (fd 3), the durable record
- * (fd 193) or the kernel's own (a pipe or file two threads may share),
- * and the calls that create a checker-owned one.  In a node with more
- * than one thread each visible operation ends the thread's step, and the
- * search picks which thread runs next.  Everything else (the clock,
- * getrandom, mmap) is answered at once: the clock moves only on a TIMEOUT
- * action, when every thread is parked, and nothing another thread does
- * through memory between two calls is explored.  clone and exit are visible too,
- * but are not held here.  A clone stops both threads at its return (see
- * birth()), which is the same choice point.  An exit's effect, the
+ * node can see other than through memory?  Those are the futex calls,
+ * every call on a checker-owned fd (a socket, eventfd or epoll instance,
+ * numbered from 500), a write to the state hook (fd 3) or the durable
+ * record (fd 193) and a read of the durable record, and the calls that
+ * create a checker-owned fd.  The checker carries out each of them
+ * itself.  In a node with more than one thread each visible operation
+ * ends the thread's step, and the search picks which thread runs next.
+ * A call on any other fd, the kernel's, is refused in such a node (see
+ * kernel_fd_call), except a write to stdout or stderr.  Everything else
+ * (the clock, getrandom, mmap, writes to fd 1 and 2) is answered at once:
+ * the clock moves only on a TIMEOUT action, when every thread is parked,
+ * and nothing another thread does through memory between two calls is
+ * explored.  clone and exit are visible too, but are not held here.  A
+ * clone stops both threads at its return (see birth()), which is the
+ * same choice point.  An exit's effect, the
  * clear-tid wake a pthread_join waits for, is carried out when the thread
  * reaches it, and the thread then has nothing left to run. */
 static int
 visible(long nr, const __u64 *a)
 {
-	(void) a;
 	switch (nr)
 	{
-		/* shared node state, and the state hook */
 		case SYS_futex: case SYS_socket: case SYS_eventfd2:
 		case SYS_epoll_create1: case SYS_epoll_create: case SYS_epoll_ctl:
 		case SYS_epoll_wait: case SYS_epoll_pwait: case SYS_poll: case SYS_ppoll:
 		case SYS_accept: case SYS_accept4:
+			return 1;
 		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
-		/* a call on any fd, the kernel's (a pipe or file two threads share)
-		 * as much as the checker's: two threads' calls on kernel fds
-		 * interleave on Linux, so each ends a step here too */
 		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
 		case SYS_close: case SYS_fcntl:
-		case SYS_readv: case SYS_writev: case SYS_preadv: case SYS_pwritev:
-		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg: case SYS_sendmsg:
-			return 1;
+		{
+			int fd = (int) a[0];
+			return fd >= 500 || fd == 3 || fd == DURABLE_FD;
+		}
 		default:
 			return 0;
 	}
+}
+
+/* Is call nr, in a node with more than one thread, a call on a kernel fd
+ * the model does not answer?  Two threads that share a pipe or a file
+ * interleave there on Linux, and its contents and offset are kernel
+ * state the world encoding does not hold, so a check that sent such a
+ * call to the kernel would search orders it cannot tell apart (and merge
+ * them).  Every intercepted call whose first argument is an fd below the
+ * checker's 500 counts, except the ones the checker answers itself (a
+ * write to the state hook, a read of the durable record) and a write to
+ * stdout or stderr, which no thread reads back.  A negative fd is the
+ * kernel's EBADF, which shares nothing.  Calls the filter does not
+ * intercept (lseek, openat, fsync, flock, sendmsg below fd 500) reach the
+ * kernel unseen, like memory accesses, and are outside the model
+ * (cmc(7)).
+ *
+ * The C library itself makes two such calls from a worker: the first
+ * output on a stdio stream asks whether it is a terminal (ioctl TCGETS or
+ * TCGETS2 on the stream's fd, to choose line buffering), and a failed
+ * assert() writes its message to stderr with writev().  Both are let
+ * through: the first only reads the terminal's settings, the same in
+ * every schedule, and the second writes stderr. */
+static int
+kernel_fd_call(long nr, const __u64 *a)
+{
+	int fd = (int) a[0];
+
+	switch (nr)
+	{
+		case SYS_write: case SYS_writev:
+			if (fd == 1 || fd == 2) return 0;
+			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) return 0;
+			break;
+		case SYS_ioctl:
+			if (fd >= 0 && fd <= 2 && (a[1] == TCGETS || a[1] == TCGETS2)) return 0;
+			break;
+		case SYS_read:
+			if (fd == DURABLE_FD) return 0;
+			break;
+		case SYS_recvfrom: case SYS_sendto: case SYS_close: case SYS_fcntl:
+		case SYS_readv: case SYS_preadv: case SYS_pwritev:
+		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg:
+		case SYS_sendmmsg: case SYS_recvmmsg: case SYS_shutdown: case SYS_dup:
+		case SYS_dup2: case SYS_dup3: case SYS_getsockopt: case SYS_getsockname:
+		case SYS_getpeername: case SYS_splice: case SYS_sendfile:
+		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
+		case SYS_accept: case SYS_accept4:
+			break;
+		default:
+			return 0;
+	}
+	return fd >= 0 && fd < 500;
 }
 
 /* A write to the state hook: fd 3, or DURABLE_FD for the durable record.
@@ -1444,6 +1497,8 @@ try_pending_for(Node *nd)
 	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
 	th->nr = nr; th->ip = g_req->data.instruction_pointer; th->sp = 0;
 	memcpy(th->args, a, sizeof th->args);
+	if (node_multi(nd) && kernel_fd_call(nr, a))
+		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %ld); only checker-owned fds and the state hook are modelled between threads", nd->id, (int) a[0], nr);
 	/* decided before the call is served, which may add or end a thread */
 	int hold = node_multi(nd) && visible(nr, a);
 	if (hold || nr == SYS_clone || nr == SYS_clone3) th->sp = stack_pointer(nd, th);

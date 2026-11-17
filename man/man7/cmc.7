@@ -142,8 +142,17 @@ Other calls (the clock,
 are answered at once and the thread runs on.
 A node with one thread behaves as if threads did not exist.
 .Pp
-A call on any descriptor is a visible operation, the kernel's (a pipe or
-a file two threads share) as well as the checker's.
+In a node with more than one thread, a call on a kernel descriptor (a
+pipe or a file the threads may share) is refused (exit 3) before it
+runs, since its contents and offset are not part of the world.
+Writes to stdout and stderr are allowed.
+Calls the checker does not intercept (such as
+.Fn lseek ,
+.Fn openat ,
+.Fn fsync
+and
+.Fn flock )
+reach the kernel unseen, as memory accesses do.
 .Pp
 The boundary is the system call.
 Interleavings of plain memory accesses between two visible operations
