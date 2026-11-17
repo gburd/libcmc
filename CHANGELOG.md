@@ -27,6 +27,25 @@ Process engine (`cmc --model-file`):
   could pass with a lost update reachable.  [proc_gate: memrace
   unlocked, relaxedadd; twothread]
 
+Command line, API and the abstract checker:
+
+- A number given to a `cmc` option must be a whole decimal number in
+  the option's range: `--crashes x` used to read as 0 and pass a bug
+  that needs a crash.  `--walks 0` and, with `--model-file`, `--depth 0`
+  are refused, as is `--refine` without `--model-file`.
+  [test_cmc: test_cli_input]
+- API: `cmc_run_new()` returns NULL for a `CMC_SIMULATE` search with
+  `walks` of 0, which looked at no state and passed.
+  [test_cmc: test_min4_negative_bounds]
+- `--define TAG` that gates no action in the spec is an error, so a
+  mistyped tag no longer checks the spec without its planted bug.
+  [spec_gate: "a --define that gates no action is an error"]
+- `--tlc-cfg` reads TLC's one-line forms (`INVARIANT TypeOK`,
+  `CONSTANT N = 3`), which it used to drop, and refuses a keyword it
+  does not implement (`SYMMETRY`, `CONSTRAINT`, ...).  Core settings
+  longer than the buffer are an error, not cut off.
+  [test_cmc: test_cli_input]
+
 ## 2.0.0 (2026-11-17)
 
 A soundness release, from an audit of 1.3.0

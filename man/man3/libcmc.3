@@ -552,7 +552,11 @@ returns
 on a bad setting, an unknown property, a bound out of range, a
 durable part without
 .Fn apply_persist ,
-or a duplicating FIFO network.
+a duplicating FIFO network, or a
+.Dv CMC_SIMULATE
+search with
+.Fa walks
+of 0.
 .Fn cmc_apply
 returns 0, or \-1 if the action is not possible or a core broke an
 engine rule.

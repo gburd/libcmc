@@ -412,6 +412,12 @@ static int sp_load(const char *path){
 	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
 	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
 	if(S.ninv==0 && S.nprop==0){ fprintf(stderr,"cmc: %s: no invariant or property\n",path); return -1; }
+	/* a --define that gates nothing is a typo: checking without the
+	 * planted bug it meant to turn on would read as a pass */
+	for(int i=0;i<S.ndef;i++){
+		int used=0; for(int a=0;a<S.nact;a++) if(!strcmp(S.act[a].tag,S.define[i])) used=1;
+		if(!used){ fprintf(stderr,"cmc: --define %s names no [%s] action in %s\n",S.define[i],S.define[i],path); return -1; }
+	}
 	return 0;
 }
 
@@ -998,9 +1004,19 @@ out:	free(mask); free(reg); lv_free();
 	return rc;
 }
 
+/* record the --define tags for sp_load(), which checks each gates an
+ * action; returns -1 for one that cannot be held whole */
+static int set_defines(char **defs, int ndefs){
+	S.ndef=0;
+	for(int i=0;i<ndefs;i++){
+		if(S.ndef>=SP_MAXCONST || strlen(defs[i])>=SP_NAME){ fprintf(stderr,"cmc: --define %s: at most %d tags of under %d bytes\n",defs[i],SP_MAXCONST,SP_NAME); return -1; }
+		snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]);
+	}
+	return 0;
+}
+
 int cmc_spec_main(const char *path, char **defs, int ndefs){
-	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++){ snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]); }
-	if(sp_load(path)) return 3;
+	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
 	sym_init();
 	/* parse-check every invariant and guard once (over the init state) */
 	char err[256];
@@ -1095,7 +1111,7 @@ static struct { char var[SP_NAME]; char idx[SP_NAME]; char expr[SP_EXPR]; } B_ma
 static int B_nmap;
 
 int cmc_refine_load_spec(const char *path, char **defs, int ndefs){
-	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++) snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]);
+	if(set_defines(defs,ndefs)) return -1;
 	return sp_load(path);
 }
 
@@ -1326,8 +1342,7 @@ static void tla_expr_fixup(const char *e, FILE *o){
 }
 
 int cmc_emit_tla(const char *path, char **defs, int ndefs){
-	S.ndef=0; for(int i=0;i<ndefs && S.ndef<SP_MAXCONST;i++) snprintf(S.define[S.ndef++],SP_NAME,"%s",defs[i]);
-	if(sp_load(path)) return 3;
+	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
 	FILE *o=stdout;
 	fprintf(o,"---- MODULE %s ----\n",S.modname);
 	fprintf(o,"\\* Generated from %s by cmc --emit-tla.  Run with TLC,\n",path);

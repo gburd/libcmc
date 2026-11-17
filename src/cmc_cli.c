@@ -19,7 +19,11 @@
 #include "cmc_proc.h"
 #include "cmc_spec.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -67,6 +71,60 @@ add_names(const char **props, int *np, const char *list)
 	free(dup);
 }
 
+/*
+ * The value of option opt: a whole decimal number from lo to hi, or exit
+ * 3.  atoi() would read a mistyped "--crashes x" as 0 and check less than
+ * was asked, which reads as a pass.
+ */
+static unsigned long long
+num_arg(const char *opt, const char *v, unsigned long long lo, unsigned long long hi)
+{
+	char	   *e;
+	unsigned long long x;
+
+	errno = 0;
+	x = strtoull(v, &e, 10);
+	if (!isdigit((unsigned char) v[0]) || *e || errno == ERANGE || x < lo || x > hi)
+	{
+		fprintf(stderr, "cmc: %s needs a number from %llu to %llu, not '%s'\n", opt, lo, hi, v);
+		exit(3);
+	}
+	return x;
+}
+
+/* The value of --time: a number of seconds, at least 0, or exit 3 */
+static double
+seconds_arg(const char *v)
+{
+	char	   *e;
+	double		x = strtod(v, &e);
+
+	if (e == v || *e || !isfinite(x) || x < 0)
+	{
+		fprintf(stderr, "cmc: --time needs a number of seconds, not '%s'\n", v);
+		exit(3);
+	}
+	return x;
+}
+
+/* Appends the setting kv to the comma-separated core settings in
+ * cfg[cap], or exits 3: a setting cut off at the end of the buffer
+ * would check a different model. */
+static void
+cfg_append(char *cfg, size_t cap, const char *kv)
+{
+	size_t		len = strlen(cfg);
+
+	if (len + (len ? 1 : 0) + strlen(kv) >= cap)
+	{
+		fprintf(stderr, "cmc: the core settings are too long (limit %zu bytes)\n", cap - 1);
+		exit(3);
+	}
+	if (len)
+		cfg[len++] = ',';
+	strcpy(cfg + len, kv);
+}
+
 static char *
 trim(char *s)
 {
@@ -80,13 +138,79 @@ trim(char *s)
 	return s;
 }
 
-/* Reads a TLC .cfg: CONSTANTS k = v, INVARIANTS and PROPERTIES names. */
+/* Exits 3 for line ln of TLC .cfg path: a line cmc does not understand
+ * asks for a check cmc would not do, so it is never skipped. */
+static void
+tlc_cfg_refuse(const char *path, int ln, const char *s)
+{
+	fprintf(stderr, "cmc: %s: cannot read line %d: %s (cmc reads CONSTANTS,"
+			" INVARIANTS, PROPERTIES and SPECIFICATION)\n", path, ln, s);
+	exit(3);
+}
+
+/*
+ * Appends the TLC constants on s, "k = v" one or more times, to cfg.  A
+ * value is a word, a "string" or a {set}; commas in it become spaces, as
+ * a comma separates core settings.  Returns 0, or -1 when s is not that.
+ */
+static int
+tlc_constants(char *s, char *cfg, size_t cfglen)
+{
+	while (*s)
+	{
+		char		kv[512];	/* as long as a line, so it always fits */
+		char	   *k = s,
+				   *v;
+		int			kl;
+
+		while (isalnum((unsigned char) *s) || *s == '_')
+			s++;
+		kl = (int) (s - k);
+		s += strspn(s, " \t");
+		if (kl == 0 || *s != '=')
+			return -1;
+		s += 1 + strspn(s + 1, " \t");
+		v = s;
+		if (*s == '{' || *s == '"')
+		{
+			s = strchr(s + 1, *s == '{' ? '}' : '"');
+			if (!s)
+				return -1;
+			s++;
+		}
+		else
+			s += strcspn(s, " \t");
+		if (s == v)
+			return -1;
+		snprintf(kv, sizeof(kv), "%.*s=%.*s", kl, k, (int) (s - v), v);
+		for (char *p = kv + kl; *p; p++)
+			if (*p == ',')
+				*p = ' ';
+		cfg_append(cfg, cfglen, kv);
+		s += strspn(s, " \t");
+	}
+	return 0;
+}
+
+/*
+ * Reads a TLC .cfg: CONSTANTS become core settings, INVARIANTS and
+ * PROPERTIES the properties to check, and SPECIFICATION is the model's
+ * own.  A section keyword may head its items or share their line
+ * ("INVARIANT TypeOK").  Any other keyword or line is an error.
+ */
 static void
 read_tlc_cfg(const char *path, char *cfg, size_t cfglen, const char **props, int *np)
 {
+	static const char *const sections[] = {"CONSTANT", "CONSTANTS", "INVARIANT", "INVARIANTS",
+	"PROPERTY", "PROPERTIES", "SPECIFICATION"};
+	/* TLC's other keywords, which cmc does not implement */
+	static const char *const others[] = {"INIT", "NEXT", "SYMMETRY", "VIEW", "CONSTRAINT",
+		"CONSTRAINTS", "ACTION_CONSTRAINT", "ACTION_CONSTRAINTS", "CHECK_DEADLOCK",
+	"POSTCONDITION", "ALIAS"};
 	FILE	   *f = fopen(path, "r");
 	char		line[512];
-	int			sect = 0;
+	int			sect = -1,
+				ln = 0;
 
 	if (!f)
 	{
@@ -96,49 +220,55 @@ read_tlc_cfg(const char *path, char *cfg, size_t cfglen, const char **props, int
 	cfg[0] = 0;
 	while (fgets(line, sizeof(line), f))
 	{
-		char	   *s = trim(line),
-				   *eq;
+		char	   *s;
+		size_t		kw;
 
-		if (!*s || (s[0] == '\\' && s[1] == '*'))
+		ln++;
+		if (!strchr(line, '\n') && !feof(f))
+			tlc_cfg_refuse(path, ln, "the line is too long");
+		if ((s = strstr(line, "\\*")))
+			*s = 0;				/* a \* comment runs to the end of the line */
+		s = trim(line);
+		if (!*s)
 			continue;
-		if (!strcmp(s, "CONSTANTS") || !strcmp(s, "CONSTANT"))
+		/* a section keyword: CONSTANT(S) 0-1, INVARIANT(S) and PROPERTY(IES)
+		 * 2-5, SPECIFICATION 6 */
+		kw = strcspn(s, " \t");
+		for (size_t k = 0; k < sizeof(others) / sizeof(others[0]); k++)
+			if (strlen(others[k]) == kw && !strncmp(s, others[k], kw))
+				tlc_cfg_refuse(path, ln, s);
+		for (int k = 0; k < 7; k++)
+			if (strlen(sections[k]) == kw && !strncmp(s, sections[k], kw))
+			{
+				sect = k < 2 ? 0 : k < 6 ? 1 : 2;
+				s = trim(s + kw);
+			}
+		if (sect == 0 && tlc_constants(s, cfg, cfglen) != 0)
+			tlc_cfg_refuse(path, ln, s);
+		else if (sect == 1)
 		{
-			sect = 1;
-			continue;
-		}
-		if (!strcmp(s, "INVARIANTS") || !strcmp(s, "INVARIANT") ||
-			!strcmp(s, "PROPERTIES") || !strcmp(s, "PROPERTY"))
-		{
-			sect = 2;
-			continue;
-		}
-		if (!strncmp(s, "SPECIFICATION", 13))
-		{
-			sect = 0;
-			continue;
-		}
-		if (sect == 1 && (eq = strchr(s, '=')))
-		{
-			char	   *k,
-					   *v;
-			char		item[256];
+			for (char *t = s; *t; t += strspn(t, " \t"))
+			{
+				size_t		n = strcspn(t, " \t");
 
-			*eq = 0;
-			k = trim(s);
-			v = trim(eq + 1);
-			snprintf(item, sizeof(item), "%s%s=%s", cfg[0] ? "," : "", k, v);
-			/* "Writes = {w1, w2}": drop the comma inside the braces */
-			for (char *p = item + 1; *p; p++)
-				if (*p == ',' && strchr(item, '{') && p > strchr(item, '{'))
-					*p = ' ';
-			strncat(cfg, item, cfglen - strlen(cfg) - 1);
+				for (size_t c = 0; c < n; c++)
+					if (!isalnum((unsigned char) t[c]) && t[c] != '_')
+						tlc_cfg_refuse(path, ln, s);
+				if (*np >= MAXP - 1)
+					usage();
+				props[(*np)++] = strndup(t, n);
+				t += n;
+			}
 		}
-		else if (sect == 2)
+		else if (sect == 2 && *s)
 		{
-			if (*np >= MAXP - 1)
-				usage();
-			props[(*np)++] = strdup(s);
+			/* the one name of the specification, which is the model's */
+			if (s[strcspn(s, " \t")])
+				tlc_cfg_refuse(path, ln, s);
+			sect = -1;
 		}
+		else if (sect == -1 && *s)
+			tlc_cfg_refuse(path, ln, s);
 	}
 	fclose(f);
 }
@@ -247,21 +377,21 @@ proc_main(int argc, char **argv)
 		else if (!strcmp(a, "--simulate"))
 			po.simulate = 1;
 		else if (!strcmp(a, "--seed"))
-			po.seed = strtoull(ARG(), NULL, 10);
+			po.seed = num_arg(a, ARG(), 0, UINT64_MAX);
 		else if (!strcmp(a, "--walks"))
-			po.walks = strtoull(ARG(), NULL, 10);
+			po.walks = num_arg(a, ARG(), 1, UINT64_MAX);
 		else if (!strcmp(a, "--depth"))
-			po.depth = atol(ARG());
+			po.depth = (long) num_arg(a, ARG(), 1, 1000000);
 		else if (!strcmp(a, "--max-states"))
-			po.max_states = strtoull(ARG(), NULL, 10);
+			po.max_states = num_arg(a, ARG(), 0, SIZE_MAX);
 		else if (!strcmp(a, "--time"))
-			po.time_limit = atof(ARG());
+			po.time_limit = seconds_arg(ARG());
 		else if (!strcmp(a, "--crashes"))
-			po.crashes = atoi(ARG());
+			po.crashes = (int) num_arg(a, ARG(), 0, 255);
 		else if (!strcmp(a, "--drops"))
-			po.drops = atoi(ARG());
+			po.drops = (int) num_arg(a, ARG(), 0, 255);
 		else if (!strcmp(a, "--timeouts"))
-			po.timeouts = atoi(ARG());
+			po.timeouts = (int) num_arg(a, ARG(), 0, 255);
 		else if (!strcmp(a, "--refine"))
 			{ spec_path = ARG(); po.refine = 1; }
 		else if (!strcmp(a, "--refine-steps"))
@@ -277,6 +407,7 @@ proc_main(int argc, char **argv)
 		}
 #undef ARG
 	}
+	if (!po.model_file) { fprintf(stderr, "cmc: --refine needs --model-file FILE\n"); return 3; }
 	if (po.refine_steps && !po.refine) { fprintf(stderr, "cmc: --refine-steps needs --refine SPEC\n"); return 3; }
 	if (po.refine)
 	{
@@ -365,14 +496,17 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		else if (!strcmp(a, "--cfg"))
 		{
 			/* appends, so it can override a --tlc-cfg given before it */
-			if (cfg[0])
-				strncat(cfg, ",", sizeof(cfg) - strlen(cfg) - 1);
-			strncat(cfg, ARG(), sizeof(cfg) - strlen(cfg) - 1);
+			cfg_append(cfg, sizeof(cfg), ARG());
 			cfg_given = true;
 		}
 		else if (!strcmp(a, "--tlc-cfg"))
 		{
-			read_tlc_cfg(ARG(), cfg, sizeof(cfg), props, &np);
+			char		tcfg[sizeof(cfg)];
+
+			/* appends, as --cfg does, so a later --cfg overrides it */
+			read_tlc_cfg(ARG(), tcfg, sizeof(tcfg), props, &np);
+			if (tcfg[0])
+				cfg_append(cfg, sizeof(cfg), tcfg);
 			cfg_given = true;
 		}
 		else if (!strcmp(a, "--inv") || !strcmp(a, "--prop"))
@@ -384,16 +518,16 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		else if (!strcmp(a, "--dfs"))
 		{
 			o.search = CMC_DFS;
-			o.max_depth = atoi(ARG());
+			o.max_depth = (int) num_arg(a, ARG(), 1, INT_MAX);
 		}
 		else if (!strcmp(a, "--simulate"))
 			o.search = CMC_SIMULATE;
 		else if (!strcmp(a, "--seed"))
-			o.seed = strtoull(ARG(), NULL, 10);
+			o.seed = num_arg(a, ARG(), 0, UINT64_MAX);
 		else if (!strcmp(a, "--walks"))
-			o.walks = strtoull(ARG(), NULL, 10);
+			o.walks = num_arg(a, ARG(), 1, UINT64_MAX);
 		else if (!strcmp(a, "--depth"))
-			o.max_depth = atoi(ARG());
+			o.max_depth = (int) num_arg(a, ARG(), 1, INT_MAX);
 		else if (!strcmp(a, "--replay"))
 		{
 			o.search = CMC_REPLAY;
@@ -402,13 +536,13 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		else if (!strcmp(a, "--det"))
 			o.det = true;
 		else if (!strcmp(a, "--max-states"))
-			o.max_states = strtoull(ARG(), NULL, 10);
+			o.max_states = num_arg(a, ARG(), 0, UINT64_MAX);
 		else if (!strcmp(a, "--time"))
-			o.time_limit = atof(ARG());
+			o.time_limit = seconds_arg(ARG());
 		else if (!strcmp(a, "--trace-out"))
 			o.trace_out = ARG();
 		else if (!strcmp(a, "--progress"))
-			o.progress_s = atoi(ARG());
+			o.progress_s = (int) num_arg(a, ARG(), 0, INT_MAX);
 		else if (!strcmp(a, "--quiet"))
 			o.quiet = true;
 		else if (!strcmp(a, "--coverage"))
@@ -416,19 +550,19 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		else if (!strcmp(a, "--list"))
 			list = true;
 		else if (!strcmp(a, "--clients"))
-			o.client_budget = atoi(ARG()), set[0] = true;
+			o.client_budget = (int) num_arg(a, ARG(), 0, 255), set[0] = true;
 		else if (!strcmp(a, "--drops"))
-			o.drop_budget = atoi(ARG()), set[1] = true;
+			o.drop_budget = (int) num_arg(a, ARG(), 0, 255), set[1] = true;
 		else if (!strcmp(a, "--dups"))
-			o.dup_budget = atoi(ARG()), set[2] = true;
+			o.dup_budget = (int) num_arg(a, ARG(), 0, 255), set[2] = true;
 		else if (!strcmp(a, "--crashes"))
-			o.crash_budget = atoi(ARG()), set[3] = true;
+			o.crash_budget = (int) num_arg(a, ARG(), 0, 255), set[3] = true;
 		else if (!strcmp(a, "--net-cap"))
-			o.net_cap = atoi(ARG()), set[4] = true;
+			o.net_cap = (int) num_arg(a, ARG(), 0, 255), set[4] = true;
 		else if (!strcmp(a, "--persist-cap"))
-			o.persist_cap = atoi(ARG()), set[5] = true;
+			o.persist_cap = (int) num_arg(a, ARG(), 0, 255), set[5] = true;
 		else if (!strcmp(a, "--reply-cap"))
-			o.reply_cap = atoi(ARG()), set[6] = true;
+			o.reply_cap = (int) num_arg(a, ARG(), 0, 255), set[6] = true;
 		else if (!strcmp(a, "--net"))
 		{
 			const char *v = ARG();
@@ -442,7 +576,7 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			set[7] = true;
 		}
 		else if (!strcmp(a, "--live-steps"))
-			o.live_steps = atoi(ARG()), set[8] = true;
+			o.live_steps = (int) num_arg(a, ARG(), 1, INT_MAX), set[8] = true;
 		else
 			usage();
 #undef ARG

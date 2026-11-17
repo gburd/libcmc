@@ -1163,6 +1163,13 @@ test_min4_negative_bounds(void)
 		CHECK(r == NULL);
 		cmc_run_free(r);
 	}
+	/* a simulation of no walks looks at nothing, so it cannot pass */
+	cmc_options_default(&o);
+	o.search = CMC_SIMULATE;
+	o.walks = 0;
+	r = cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "walk") != NULL);
+	cmc_run_free(r);
 }
 
 /* ---- soundness plan, phase 2 (docs/plans/soundness-remediation.md) ---- */
@@ -1467,6 +1474,142 @@ test_p25_fair_schedule_fires_timers(void)
 	}
 }
 
+/* ---- the command line (cmc_main) ------------------------------------ */
+
+static const CmcModelEntry cli_models[] = {
+	{"toy", &toy_model},
+	{"toy-bug1", &toy_bug1_model},
+	{"toy-bug3", &toy_bug3_model},
+};
+
+/* p (512 bytes) = the path of a file under $CMC_BUILD */
+static const char *
+cli_path(char *p, const char *name)
+{
+	snprintf(p, 512, "%s/%s", getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".", name);
+	return p;
+}
+
+/* write text to the file at path */
+static void
+cli_write(const char *path, const char *text)
+{
+	FILE	   *f = fopen(path, "w");
+
+	CHECK(f != NULL);
+	if (f)
+	{
+		fputs(text, f);
+		fclose(f);
+	}
+}
+
+/*
+ * Runs cmc_main() on the NULL-terminated argv in a child, with stdout and
+ * stderr in one file, and checks that it exits with want and printed
+ * needle.  The child returns through exit(), not _exit(), so stdio is
+ * flushed and a --coverage build counts it.  Returns whether both held.
+ */
+static int
+cli_expect(int want, const char *needle, const char *const *argv)
+{
+	char		out[512],
+				buf[8192] = "";
+	int			argc = 0,
+				st = 0,
+				ok;
+	pid_t		pid;
+	FILE	   *f;
+
+	cli_path(out, "cli.out");
+	while (argv[argc])
+		argc++;
+	fflush(NULL);
+	pid = fork();
+	if (pid == 0)
+	{
+		if (!freopen(out, "w", stdout) || dup2(fileno(stdout), 2) < 0)
+			_exit(99);
+		exit(cmc_main(argc, (char **) argv, cli_models,
+					  sizeof(cli_models) / sizeof(cli_models[0])));
+	}
+	CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
+	if ((f = fopen(out, "r")))
+	{
+		buf[fread(buf, 1, sizeof(buf) - 1, f)] = 0;
+		fclose(f);
+	}
+	ok = WIFEXITED(st) && WEXITSTATUS(st) == want && strstr(buf, needle) != NULL;
+	if (!ok)
+	{
+		fprintf(stderr, "FAIL cli:");
+		for (int i = 1; i < argc; i++)
+			fprintf(stderr, " %s", argv[i]);
+		fprintf(stderr, "\n  exit %d, wanted %d and \"%s\"; output:\n%s\n",
+				WIFEXITED(st) ? WEXITSTATUS(st) : -1, want, needle, buf);
+		failures++;
+	}
+	return ok;
+}
+
+#define CLI(want, needle, ...) \
+	cli_expect((want), (needle), (const char *const[]) {"cmc", __VA_ARGS__, NULL})
+
+/* input the user mistyped is an error, never a silent 0 or a dropped
+ * setting that checks less than was asked */
+static void
+test_cli_input(void)
+{
+	char		cfg[512],
+				none[512],
+				longcfg[700] = "";
+
+	cli_path(cfg, "cli.cfg");
+	/* the model-file rows stop at the option, before the file is read */
+	cli_path(none, "none.model");
+
+	/* --crashes x read as 0 would pass the planted bug that needs a crash */
+	CLI(3, "--crashes needs a number from 0 to 255, not 'x'",
+		"--model", "toy", "--all-props", "--crashes", "x");
+	CLI(3, "--clients needs a number from 0 to 255, not '1x'",
+		"--model", "toy", "--all-props", "--clients", "1x");
+	CLI(3, "--net-cap needs a number from 0 to 255, not '256'",
+		"--model", "toy", "--all-props", "--net-cap", "256");
+	CLI(3, "--walks needs a number from 1", "--model", "toy", "--all-props",
+		"--simulate", "--walks", "abc");
+	CLI(3, "--seed needs a number", "--model", "toy", "--all-props",
+		"--simulate", "--seed", "-1");
+	CLI(3, "--time needs a number of seconds", "--model", "toy", "--all-props",
+		"--time", "soon");
+	CLI(3, "--dfs needs a number from 1", "--model", "toy", "--all-props", "--dfs", "0");
+	/* zero walks is a simulation that looks at nothing */
+	CLI(3, "--walks needs a number from 1", "--model", "toy", "--all-props",
+		"--simulate", "--walks", "0");
+	CLI(3, "--depth needs a number from 1", "--model-file", none,
+		"--depth", "0");
+	CLI(3, "--walks needs a number from 1", "--model-file", none,
+		"--simulate", "--walks", "0");
+	CLI(3, "--drops needs a number from 0 to 255, not 'two'",
+		"--model-file", none, "--drops", "two");
+	/* --refine belongs to the process front end, which needs a model file */
+	CLI(3, "--refine needs --model-file", "--refine", "x.cml", "--bind", "x.bind");
+	/* TLC's one-line forms: CONSTANT k = v and INVARIANT name */
+	cli_write(cfg, "CONSTANT clients = 2\nINVARIANT PhaseMonotone\n");
+	CLI(1, "PhaseMonotone is violated", "--model", "toy-bug3", "--tlc-cfg", cfg);
+	cli_write(cfg, "CONSTANTS\n  clients = 2\nINVARIANT Mutex\nSYMMETRY Perms\n");
+	CLI(3, "cannot read line 4: SYMMETRY Perms", "--model", "toy", "--tlc-cfg", cfg);
+	/* settings past the buffer would be cut, not checked */
+	while (strlen(longcfg) < 600)
+		strcat(longcfg, "clients=2,");
+	strcat(longcfg, "clients=1");
+	CLI(3, "the core settings are too long", "--model", "toy-bug1", "--inv", "Mutex",
+		"--cfg", longcfg);
+	/* a mistyped tag would check the bound spec without its planted bug */
+	CLI(3, "names no [BUGG] action", "--model-file", none,
+		"--refine", "examples/spec/paxos.cml", "--bind", "examples/spec/paxos.bind",
+		"--define", "BUGG");
+}
+
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
 static void
@@ -1505,6 +1648,7 @@ main(void)
 	test_p23_property_cap();
 	test_p24_replay_enabled_error();
 	test_p25_fair_schedule_fires_timers();
+	test_cli_input();
 	test_version();
 	if (failures)
 	{

@@ -39,6 +39,9 @@ expect "mutex: mutual exclusion holds"       0 "8 distinct states found" --spec 
 expect "mutex: depth matches TLC (4)"        0 "complete state graph search is 4" --spec "$HERE/test/spec/mutex.cml"
 expect "mutex: the bug is caught"            1 "mutual_exclusion is violated" --spec "$HERE/test/spec/mutex.cml" --define BUG
 expect "mutex: shortest trace is 4 actions"  1 "is (4 actions)" --spec "$HERE/test/spec/mutex.cml" --define BUG
+# a mistyped tag would check the spec without its planted bug and pass
+expect "a --define that gates no action is an error" 3 "names no \[BUGG\] action" --spec "$HERE/test/spec/mutex.cml" --define BUGG
+expect "emit-tla: a --define that gates no action is an error" 3 "names no \[BUGG\] action" --emit-tla "$HERE/test/spec/mutex.cml" --define BUGG
 
 echo "-- modules: a protocol spec extends a shared base"
 # Single-decree Paxos (Lamport's Paxos.tla): promises, highest-ballot

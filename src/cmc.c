@@ -642,6 +642,9 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 						  "bounds must be >= 0 (depth and live steps >= 1)");
 	if (r->o.net != CMC_NET_FIFO && r->o.net != CMC_NET_BAG)
 		return run_reject(r, err, errlen, "unknown network model");
+	/* no walk looks at no state, which must not read as a pass */
+	if (r->o.search == CMC_SIMULATE && r->o.walks < 1)
+		return run_reject(r, err, errlen, "a simulation needs at least one walk");
 	r->off_hdr = (size_t) r->nn * r->ss;
 	if (r->direct)
 		r->ws = r->off_hdr;

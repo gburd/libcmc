@@ -157,6 +157,7 @@ in a
 .Pa .cml
 spec; repeatable.
 Used to turn on a planted-bug action.
+A tag that gates no action in the spec is an error.
 .It Fl -refine Ar spec
 Check that the implementation named by
 .Fl -binary
@@ -197,7 +198,7 @@ Override the file's budgets.
 .It Fl -depth Ar d
 Bound the search to
 .Ar d
-actions; a search that reaches it is reported as incomplete.
+actions, at least 1; a search that reaches it is reported as incomplete.
 With
 .Fl -simulate ,
 the length of each walk, default 100.
@@ -246,6 +247,11 @@ become core settings, and its
 and
 .Sy PROPERTIES
 become the properties to check.
+A keyword may stand on its own line or share one with its items, as in
+.Ql INVARIANT TypeOK .
+Any other keyword
+.Pq Sy SYMMETRY , Sy CONSTRAINT , Sy VIEW and the rest
+or line cmc cannot read is an error.
 .It Fl -inv Ar name Ns Op , Ns ... , Fl -prop Ar name Ns Op , Ns ...
 Check these properties.
 The two options are synonyms; each property's kind comes from the model.
@@ -289,7 +295,8 @@ First seed for
 Default 0.
 .It Fl -walks Ar k
 Number of walks for
-.Fl -simulate .
+.Fl -simulate ,
+at least 1.
 Default 1000.
 .It Fl -depth Ar d
 Length of each walk, in states.
@@ -312,6 +319,11 @@ Stop after
 .Ar seconds
 of wall time.
 .El
+.Pp
+Every number an option takes must be a whole decimal number in its
+range; anything else, such as
+.Ql --crashes x ,
+is an error rather than a 0.
 .Ss Choosing the environment
 These options apply to message-passing cores (actor mode).
 Each budget is a count over the whole run, from 0 to 255.
