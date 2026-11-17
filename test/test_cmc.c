@@ -862,6 +862,13 @@ four(const void *c)
 	return 4;
 }
 
+static int
+zero_nodes(const void *c)
+{
+	(void) c;
+	return 0;
+}
+
 static bool
 e6_inv(const CmcWorld *w, CmcWhy *why)
 {
@@ -1065,7 +1072,7 @@ test_m3_output_overflow(void)
 		char		why[512];
 
 		cmc_options_default(&o);
-		_exit(verdict_of(&e8_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		exit(verdict_of(&e8_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
 			  strstr(why, "outputs") ? 0 : 1);
 	}
 	CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
@@ -1357,7 +1364,7 @@ test_p23_property_cap(void)
 		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
 		ok &= r == NULL && strstr(err, "kind") != NULL;
 		cmc_run_free(r);
-		_exit(ok ? 0 : 1);
+		exit(ok ? 0 : 1);
 	}
 	CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
 	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 0);
@@ -1749,6 +1756,250 @@ test_apply_refuses(void)
 		CHECK(res.verdict == CMC_PASS && res.nwitness == 1 && res.witness_depth[0] >= 3);
 		cmc_result_free(&res);
 		cmc_run_free(r);
+	}
+}
+
+/* ---- the engine's own checks of a core ------------------------------
+ * Cores that break a rule the engine enforces, each with the verdict the
+ * rule gives.  A rule that let any of them through would let a core's
+ * bug read as a pass. */
+
+static int	gate_calls;
+
+/* a step whose outputs differ on a repeat: first one, then two sends */
+static void
+gate_out_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind != CMC_EV_CLIENT)
+		return;
+	cmc_out_push(out, CMC_OUT_SEND)->dst = 0;
+	if (gate_calls++ & 1)
+		cmc_out_push(out, CMC_OUT_SEND)->dst = 0;
+}
+
+/* a step whose output body differs on a repeat */
+static void
+gate_body_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	CmcOutput  *o;
+
+	(void) cfg;
+	(void) node;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind != CMC_EV_CLIENT)
+		return;
+	o = cmc_out_push(out, CMC_OUT_SEND);
+	o->len = 1;
+	o->body[0] = (uint8_t) (gate_calls++ & 1);
+}
+
+/* an apply_persist that changes volatile byte 4 */
+static void
+vol_apply(const void *cfg, int node, void *d, const uint8_t *body, uint16_t len)
+{
+	(void) cfg;
+	(void) node;
+	(void) body;
+	(void) len;
+	((uint8_t *) d)[4] = 1;
+}
+
+/* an apply_persist that writes a different durable byte each time */
+static void
+nondet_apply(const void *cfg, int node, void *d, const uint8_t *body, uint16_t len)
+{
+	(void) cfg;
+	(void) node;
+	(void) body;
+	(void) len;
+	((uint8_t *) d)[0] = (uint8_t) (gate_calls++ & 1 ? 2 : 1);
+}
+
+/* CLIENT persists one byte */
+static void
+persist1_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_PERSIST)->len = 1;
+}
+
+/* a direct-mode core whose action list differs on a repeat */
+static int
+nondet_actions(const void *cfg, const void *sv, CmcAction *a, int max)
+{
+	(void) cfg;
+	(void) sv;
+	if (max < 2)
+		return -1;
+	a[0] = 1;
+	a[1] = (CmcAction) (gate_calls++ & 1) + 2;
+	return 2;
+}
+
+static void
+direct_describe(const void *cfg, CmcAction a, FILE *f)
+{
+	(void) cfg;
+	fprintf(f, "step %u", (unsigned) a);
+}
+
+static bool
+never_ok(const CmcWorld *w, CmcWhy *why)
+{
+	(void) w;
+	(void) why;
+	return false;
+}
+
+static void
+test_core_rules(void)
+{
+	static const CmcProp qui[] = {CMC_QUIESCENT_PROP(Q, always_true)};
+	static const CmcProp ev[] = {CMC_EVENTUALLY_PROP(E, always_true)};
+	static const CmcProp wit[] = {CMC_WITNESS_PROP(W, never_ok)};
+	CmcCore		c;
+	CmcModel	m;
+	CmcOptions	o;
+	char		why[512],
+				err[256];
+	CmcRun	   *r;
+
+	/* the determinism gate sees outputs that differ, in count or body */
+	c = mute_core;
+	m = (CmcModel) {"gate", &c, nd_props, 1, 0};
+	cmc_options_default(&o);
+	o.det = true;
+	o.net = CMC_NET_BAG;
+	c.step = gate_out_step;
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "different outputs on a repeat"));
+	c.step = gate_body_step;
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "different outputs on a repeat"));
+	/* apply_persist may write only the durable bytes, and the same each time */
+	c = mute_core;
+	c.durable_size = 1;
+	c.step = persist1_step;
+	c.apply_persist = vol_apply;
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "apply_persist changed volatile state"));
+	c.apply_persist = nondet_apply;
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "apply_persist differs on a repeat"));
+	/* a crash that keeps the pending record applies it through the core */
+	o.det = false;
+	o.crash_budget = 1;
+	c.apply_persist = vol_apply;
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "apply_persist changed volatile state"));
+	/* a direct core's action list must be a function of the state */
+	c = cap_core;
+	c.direct_actions = nondet_actions;
+	c.describe_action = direct_describe;
+	m = (CmcModel) {"dgate", &c, nd_props, 1, 0};
+	cmc_options_default(&o);
+	o.det = true;
+	for (int s = 0; s < 3; s++)
+	{
+		o.search = s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : CMC_SIMULATE;
+		CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+			  strstr(why, "action list differs on a repeat"));
+	}
+	/* a direct core has no quiescence of timers, and no fair schedule */
+	c = cap_core;
+	m = (CmcModel) {"dq", &c, qui, 1, 0};
+	cmc_options_default(&o);
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "too many enabled actions"));
+	m.props = ev;
+	r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "actor mode"));
+	cmc_run_free(r);
+	/* a direct core's trace names its actions through describe_action */
+	{
+		char	   *text = NULL;
+		size_t		tlen = 0;
+		FILE	   *f = open_memstream(&text, &tlen);
+
+		c.describe_action = direct_describe;
+		m.props = wit;
+		r = mk(&m, CMC_BFS, NULL, NULL);
+		cmc_describe_action(r, 5, f);
+		c.describe_action = NULL;
+		cmc_describe_action(r, 6, f);
+		fclose(f);
+		CHECK(strstr(text, "step 5") && strstr(text, "action 0000000000000006"));
+		free(text);
+		cmc_run_free(r);
+	}
+	/* a core the engine cannot hold, or with a durable part it cannot write */
+	c = mute_core;
+	m = (CmcModel) {"setup", &c, nd_props, 1, 0};
+	cmc_options_default(&o);
+	c.cfg_size = 300;
+	r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "cfg too large"));
+	c = mute_core;
+	c.nnodes = four;
+	c.durable_size = 9;
+	r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "durable_size exceeds state_size"));
+	c.durable_size = 1;
+	r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "needs apply_persist"));
+	c.durable_size = 0;
+	/* a settings string of key=value items, each one the core accepts */
+	r = cmc_run_new(&m, "clients", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "want key=value"));
+	r = cmc_run_new(&m, "clients=3", NULL, &o, err, sizeof(err));
+	CHECK(r == NULL && strstr(err, "bad cfg clients=3 for core mute"));
+	r = cmc_run_new(&m, NULL, NULL, &o, err, sizeof(err));
+	CHECK(r != NULL);
+	cmc_run_free(r);
+	/* every bound out of range, one at a time */
+	for (int i = 0; i < 13; i++)
+	{
+		cmc_options_default(&o);
+		switch (i)
+		{
+			case 0: o.max_depth = 0; break;
+			case 1: o.live_steps = 0; break;
+			case 2: o.time_limit = -1; break;
+			case 3: o.progress_s = -1; break;
+			case 4: o.net = (CmcNet) 7; break;
+			case 5: o.net_cap = 256; break;
+			case 6: o.reply_cap = 256; break;
+			case 7: o.persist_cap = 256; break;
+			case 8: o.client_budget = 256; break;
+			case 9: o.drop_budget = 256; break;
+			case 10: o.dup_budget = 256; o.net = CMC_NET_BAG; break;
+			case 11: o.crash_budget = 256; break;
+			case 12: o.out = NULL; break;
+		}
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		CHECK(i == 12 ? r != NULL : r == NULL);
+		cmc_run_free(r);
+	}
+	/* a node count the engine cannot hold */
+	c.nnodes = nd_nnodes;
+	{
+		static const CmcCore none = {
+			.name = "none", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+			.cfg_set = nd_cfg_set, .nnodes = zero_nodes, .init = zero8, .step = mute_step,
+		};
+		CmcModel	mn = {"none", &none, nd_props, 1, 0};
+
+		r = cmc_run_new(&mn, "", NULL, &o, err, sizeof(err));
+		CHECK(r == NULL && strstr(err, "node count 0 out of range"));
 	}
 }
 
@@ -2162,6 +2413,7 @@ main(void)
 	test_p24_replay_enabled_error();
 	test_p25_fair_schedule_fires_timers();
 	test_output_rules();
+	test_core_rules();
 	test_apply_refuses();
 	test_cli_input();
 	test_cli_runs();
