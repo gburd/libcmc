@@ -82,7 +82,8 @@ Process engine (`cmc --model-file`):
   between two visible calls are not explored.  A single-threaded node
   is unchanged.  On 1.3.0 a multi-threaded node ran in one order.
   [proc_gate: racewake, raceemit, raceborn, threadpos, durack,
-  kernelfd, racepipe, twothread, twothread_join]
+  kernelfd, racepipe, twothread, twothread_join; twothread_join run
+  1000 times on two loaded CPUs]
 - State-hook writes are carried out by the checker, so a crash can fall
   between a durable write and the next call.  [proc_gate: durack]
 - A node that aborts (a failed `assert`) or faults is reported as a
