@@ -1208,7 +1208,7 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 				int			i = (int) CMC_ACT_D(a);
 				uint8_t    *e;
 
-				if (i >= NMSG(r, w))
+				if (i >= NMSG(r, w) || (kind == CMC_A_DROP && !DROPS(r, w)))
 					goto bad;
 				e = MSG(r, w, i);
 				if (FIFO(r))
@@ -1218,8 +1218,6 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 						goto bad;
 					if (kind == CMC_A_DROP)
 					{
-						if (!DROPS(r, w))
-							goto bad;
 						DROPS(r, w)--;
 						conn_reset(r, w, e[0], e[1], true);
 						return 0;
@@ -1242,8 +1240,6 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 				msg_remove_one(r, w, i);
 				if (kind == CMC_A_DROP)
 				{
-					if (!DROPS(r, w))
-						goto bad;
 					DROPS(r, w)--;
 					return 0;
 				}

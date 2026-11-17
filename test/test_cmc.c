@@ -1474,6 +1474,145 @@ test_p25_fair_schedule_fires_timers(void)
 	}
 }
 
+/* ---- cmc_apply refuses an action that is not enabled ----------------- */
+
+/* a node that sets timer 1 and waiter 2 on CLIENT, persists and sends to
+ * itself, and replies on WAKE: it reaches every action kind */
+static void
+all_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	CmcOutput  *o;
+
+	(void) cfg;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		cmc_out_push(out, CMC_OUT_SET_TIMER)->arg = 1;
+		cmc_out_push(out, CMC_OUT_WAKE)->arg = 2;
+		o = cmc_out_push(out, CMC_OUT_PERSIST);
+		o->len = 1;
+		o->body[0] = 7;
+		o = cmc_out_push(out, CMC_OUT_SEND);
+		o->dst = (uint8_t) (1 - node);
+		o->len = 1;
+	}
+	else if (ev->kind == CMC_EV_WAKE)
+		cmc_out_push(out, CMC_OUT_REPLY)->arg = ev->arg;
+}
+
+static bool
+woke(const CmcWorld *w, CmcWhy *why)
+{
+	(void) why;
+	return cmc_nreplies(w) > 0;
+}
+
+static void
+all_describe(const void *cfg, int node, const void *sv, FILE *f)
+{
+	(void) cfg;
+	fprintf(f, "n%d=%u", node, ((const uint8_t *) sv)[0]);
+}
+
+static const CmcProp all_props[] = {CMC_WITNESS_PROP(Woke, woke)};
+static const CmcCore all_core = {
+	.name = "all", .state_size = 8, .durable_size = 1, .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = two,
+	.init = zero8, .step = all_step, .apply_persist = dur_apply, .describe = all_describe,
+};
+static const CmcModel all_model = {"all", &all_core, all_props, 1, 0};
+
+static void
+test_apply_refuses(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	CmcResult	res;
+	uint8_t    *w;
+	CmcAction	a[CMC_MAX_ACTIONS];
+	int			na;
+	char	   *text = NULL;
+	size_t		tlen = 0;
+	FILE	   *f;
+	static const CmcAction never[] = {
+		CMC_ACT(CMC_A_DELIVER, 0, 1, 0, 9),		/* no message 9 */
+		CMC_ACT(CMC_A_DUP, 0, 1, 0, 0),			/* no dup budget */
+		CMC_ACT(CMC_A_DROP, 0, 1, 0, 0),		/* no drop budget */
+		CMC_ACT(CMC_A_FIRE, 9, 1, 0, 0),		/* no node 9 */
+		CMC_ACT(CMC_A_FIRE, 0, 3, 0, 0),		/* timer 3 not armed */
+		CMC_ACT(CMC_A_FIRE, 0, 20, 0, 0),		/* no timer 20 */
+		CMC_ACT(CMC_A_FLUSH, 1, 0, 0, 0),		/* nothing pending at node 1 */
+		CMC_ACT(CMC_A_WAKE, 0, 3, 0, 0),		/* waiter 3 not set */
+		CMC_ACT(CMC_A_WAKE, 0, 9, 0, 0),		/* no waiter 9 */
+		CMC_ACT(CMC_A_WAKE, 9, 2, 0, 0),		/* no node 9 */
+		CMC_ACT(CMC_A_RESET, 0, 1, 0, 0),		/* no reset pending */
+		CMC_ACT(CMC_A_RESET, 0, 9, 0, 0),		/* no peer 9 */
+		CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0),		/* client budget spent */
+		CMC_ACT(CMC_A_CLIENT, 9, 0, 0, 0),		/* no node 9 */
+		CMC_ACT(CMC_A_CRASH, 0, 0, 0, 0),		/* no crash budget */
+		CMC_ACT(0x7f, 0, 0, 0, 0),				/* no such kind */
+	};
+
+	cmc_options_default(&o);
+	o.net = CMC_NET_BAG;
+	r = mk(&all_model, CMC_BFS, NULL, &o);
+	w = malloc(cmc_world_size(r));
+	cmc_world_init(r, w);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) == 0);
+	na = cmc_enabled(r, w, a, CMC_MAX_ACTIONS);
+	/* DELIVER 0->1, FIRE 0/1, FLUSH 0, WAKE 0/2, CLIENT 1 */
+	CHECK(na == 5);
+	CHECK(cmc_enabled(r, w, a, 2) == -1);	/* the caller's array is too small */
+	/* each is refused, and leaves the world as it was */
+	{
+		uint8_t    *w0 = malloc(cmc_world_size(r));
+
+		memcpy(w0, w, cmc_world_size(r));
+		for (size_t i = 0; i < sizeof(never) / sizeof(never[0]); i++)
+		{
+			CHECK(cmc_apply(r, w, never[i]) != 0);
+			CHECK(memcmp(w, w0, cmc_world_size(r)) == 0);
+			memcpy(w, w0, cmc_world_size(r));
+		}
+		free(w0);
+	}
+	/* each action kind's description, in a trace */
+	f = open_memstream(&text, &tlen);
+	for (int i = 0; i < na; i++)
+		cmc_describe_action(r, a[i], f);
+	cmc_describe_action(r, CMC_ACT(CMC_A_DUP, 1, 0, 0, 0), f);
+	cmc_describe_action(r, CMC_ACT(CMC_A_DROP, 1, 0, 0, 0), f);
+	cmc_describe_action(r, CMC_ACT(CMC_A_CRASH, 0, 2, 0, 0), f);
+	cmc_describe_action(r, CMC_ACT(CMC_A_RESET, 0, 1, 0, 0), f);
+	cmc_describe_action(r, CMC_ACT(0x7f, 0, 0, 0, 0), f);
+	cmc_print_trace(r, (CmcAction[]) {CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0),
+		CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)}, 2, f);
+	fclose(f);
+	CHECK(strstr(text, "WAKE node 0 waiter 2") && strstr(text, "FLUSH node 0") &&
+		  strstr(text, "DUP 0->1 #0") && strstr(text, "DROP 0->1 #0") &&
+		  !strstr(text, "DROP 0->1 #0 (resets") &&
+		  strstr(text, "CRASH node 0 (2 pending persists reached disk)") &&
+		  strstr(text, "CONN_RESET node 0 peer 1") && strstr(text, "action 7f00000000000000") &&
+		  strstr(text, "node 0: n0=0") && strstr(text, "(apply failed: action"));
+	free(text);
+	free(w);
+	cmc_run_free(r);
+
+	/* the wake and its reply are reached, in every search */
+	for (int s = 0; s < 3; s++)
+	{
+		cmc_options_default(&o);
+		o.net = CMC_NET_BAG;
+		o.walks = 50;
+		r = mk(&all_model, s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : CMC_SIMULATE, NULL, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_PASS && res.nwitness == 1 && res.witness_depth[0] >= 3);
+		cmc_result_free(&res);
+		cmc_run_free(r);
+	}
+}
+
 /* ---- the command line (cmc_main) ------------------------------------ */
 
 static const CmcModelEntry cli_models[] = {
@@ -1648,6 +1787,7 @@ main(void)
 	test_p23_property_cap();
 	test_p24_replay_enabled_error();
 	test_p25_fair_schedule_fires_timers();
+	test_apply_refuses();
 	test_cli_input();
 	test_version();
 	if (failures)
