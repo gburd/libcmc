@@ -1290,6 +1290,30 @@ test_p22_simulate_checks_last_state(void)
 	CHECK(strcmp(prop, "EventuallyReplied") == 0);
 }
 
+/* a BFS that stops at its witnesses has not searched the rest, so it
+ * cannot pass: toy-bug1's Mutex violation lies past ReachCS */
+static void
+test_stop_on_witness(void)
+{
+	const char *props[] = {"Mutex", "ReachCS", NULL};
+	CmcOptions	o;
+	char		why[512];
+
+	cmc_options_default(&o);
+	o.stop_on_witness = true;
+	CHECK(verdict_of(&toy_bug1_model, &o, props, NULL, 0, why, sizeof(why), NULL) ==
+		  CMC_INCOMPLETE && strstr(why, "witness") != NULL);
+	/* a witness of the initial state stops the search before it starts */
+	{
+		static const CmcProp p0[] = {CMC_WITNESS_PROP(Always, always_true)};
+		CmcModel	m = {"w0", &mute_core, p0, 1, 0};
+		int			depth = -1;
+
+		CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), &depth) ==
+			  CMC_INCOMPLETE && depth == 1);
+	}
+}
+
 /* 2.3: more properties of one kind than the engine holds are refused when
  * the run is set up, whether listed in the model or named twice.  Run in a
  * child: on an engine without the check this writes past the arrays. */
@@ -2134,6 +2158,7 @@ main(void)
 	test_p21_crash_clears_self_channel();
 	test_p22_simulate_checks_last_state();
 	test_p23_property_cap();
+	test_stop_on_witness();
 	test_p24_replay_enabled_error();
 	test_p25_fair_schedule_fires_timers();
 	test_output_rules();

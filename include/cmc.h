@@ -274,7 +274,8 @@ typedef struct CmcOptions
 	uint64_t	max_states;		/* 0 = unbounded; reaching it = INCOMPLETE */
 	double		time_limit;		/* seconds; 0 = none */
 	bool		det;			/* determinism gate */
-	bool		stop_on_witness;	/* stop when every witness is reached */
+	bool		stop_on_witness;	/* BFS: stop, INCOMPLETE, once every
+									 * witness is reached */
 	bool		quiet;			/* no trace or progress printing */
 	bool		coverage;		/* print per-action-kind counts (TLC -coverage) */
 	int			progress_s;		/* progress line period, 0 = off */

@@ -42,6 +42,9 @@ Command line, API and the abstract checker:
   ran no search for it and reported `CMC_PASS` with 0 states.  It also
   returns NULL for `CMC_REPLAY` with no `replay_in`, which would open a
   NULL path.  [test_cmc: test_min4_negative_bounds]
+- API: a BFS stopped by `stop_on_witness` is `CMC_INCOMPLETE`, not
+  `CMC_PASS`: it had not searched the rest of the graph, so toy-bug1's
+  Mutex violation passed with it set.  [test_cmc: test_stop_on_witness]
 - `--define TAG` that gates no action in the spec is an error, so a
   mistyped tag no longer checks the spec without its planted bug.
   [spec_gate: "a --define that gates no action is an error"]

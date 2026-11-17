@@ -1957,7 +1957,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 	}
 	all_wit = check_wit(r, s, 1);
 	if (r->nwit && all_wit && r->o.stop_on_witness)
-		goto done;
+		goto stopped;
 	q_push(&q, s);
 
 	while (q_pop(&q, s))
@@ -2032,7 +2032,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 			}
 			all_wit = check_wit(r, t, level + 1);
 			if (r->nwit && all_wit && r->o.stop_on_witness)
-				goto done;
+				goto stopped;
 			q_push(&q, t);
 			next_level++;
 		}
@@ -2067,6 +2067,11 @@ run_bfs(CmcRun *r, CmcResult *res)
 	}
 	goto done;
 
+stopped:
+	/* the rest of the graph was not searched, so this is no pass */
+	res->verdict = CMC_INCOMPLETE;
+	snprintf(res->why, sizeof(res->why), "stopped once every witness was reached");
+	goto done;
 fail_at_s:
 	cmc_fingerprint(s, r->ws, pfp);
 	res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 1;
