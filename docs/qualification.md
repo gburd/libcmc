@@ -98,6 +98,8 @@ in the kernel, untouched.
 | crash and restart | approximate | a crash keeps the fd-193 record; a restart hands it back on the first read of fd 193 | proc_gate durlog, restart |
 | `eventually P` | exact for an exhaustive search | unmet after a full search is a violation; a bounded or simulated run is INCOMPLETE | proc_gate twothread reach |
 | a run that never progressed | refused | INCOMPLETE without an `eventually` property | proc_gate noprogress |
+| a fault signal (`abort`, a failed `assert`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`) | exact at the default disposition | the node is killed and the run ends with a violation (exit 1) and its trace; a handler is exit 3 | proc_gate fault |
+| a thread blocked in, or busy outside, the calls the checker sees | refused | exit 1 after 10 s with no checked call | proc_gate kernelfd |
 | `--refine` (C1) and `--refine-steps` (C2) | exact for the bound variables | C2 needs every spec variable bound; checks init, gated actions, exact states | proc_gate mono, spec_gate C2 rows |
 
 ## Abstract checker (`cmc --spec`)

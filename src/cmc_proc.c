@@ -93,6 +93,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #define MAXEFD 8				/* eventfds per node */
 #define MAXEPOLL 4				/* epoll instances per node */
 #define LULL_MS 10000			/* a running node silent this long is an error */
+#define LULL_SLICE_MS 20		/* how often a silent node is checked for a signal stop */
 #define SNAP 64					/* canonical state bytes per node */
 /* The durable canonical-emit stream.  fd 3 is the volatile stream; the
  * durable one must avoid the low fds the dynamic loader uses while
@@ -1267,10 +1268,10 @@ end_close(int conn, int e, int dead)
 /* one hex signal mask ("SigBlk:" and the like) from a thread's
  * /proc status; die if it cannot be read */
 static uint64_t
-sigmask_of(const Node *nd, const Thread *th, const char *key)
+sigmask_of(const Node *nd, pid_t tid, const char *key)
 {
 	char path[64], line[128]; size_t kl = strlen(key);
-	snprintf(path, sizeof path, "/proc/%d/task/%d/status", (int) nd->pid, (int) th->tid);
+	snprintf(path, sizeof path, "/proc/%d/task/%d/status", (int) nd->pid, (int) tid);
 	FILE *f = fopen(path, "r");
 	if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
 	uint64_t m = 0; int found = 0;
@@ -1297,10 +1298,10 @@ static int
 sigpipe_kills(Node *nd, Thread *th)
 {
 	uint64_t bit = (uint64_t) 1 << (SIGPIPE - 1);
-	if (sigmask_of(nd, th, "SigIgn:") & bit) return 0;
-	if (sigmask_of(nd, th, "SigBlk:") & bit)
+	if (sigmask_of(nd, th->tid, "SigIgn:") & bit) return 0;
+	if (sigmask_of(nd, th->tid, "SigBlk:") & bit)
 		die(3, "node %d writes into a reset connection with SIGPIPE blocked; a pending SIGPIPE is not modelled", nd->id);
-	if (sigmask_of(nd, th, "SigCgt:") & bit)
+	if (sigmask_of(nd, th->tid, "SigCgt:") & bit)
 		die(3, "node %d writes into a reset connection with a SIGPIPE handler installed; a handler is not modelled", nd->id);
 	kill_node(nd);
 	nd->alive = 0; drain_canon(nd); node_gone(nd);
@@ -1387,10 +1388,15 @@ static int
 try_pending_for(Node *nd)
 {
 	if (!nd->alive) return 0;
+	/* SECCOMP_IOCTL_NOTIF_RECV blocks even on an O_NONBLOCK listener
+	 * (measured on Linux 6.18), so ask poll first: a thread busy or
+	 * blocked in a call the checker does not see must leave the wait to
+	 * drive_quiescent, whose lull check reports it */
+	struct pollfd pf = {nd->listener, POLLIN, 0};
+	if (poll(&pf, 1, 0) != 1 || !(pf.revents & POLLIN)) return 0;
 	memset(g_req, 0, g_sz.seccomp_notif);
-	/* non-blocking RECV: use ioctl; returns -1/ENOENT if none ready.  It
-	 * delivers a notification from ANY of this node's threads, so a tid
-	 * already parked in a deferred slot does not stop the search from
+	/* It delivers a notification from ANY of this node's threads, so a
+	 * tid already parked in a deferred slot does not stop the search from
 	 * servicing another tid's call. */
 	if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_RECV, g_req) != 0)
 		return 0;
@@ -2117,18 +2123,58 @@ kill_node(Node *nd)
 	reap_node(nd);
 }
 
-/* Detect that a node has exited.  Only an exit or a fatal signal is a
- * death; a ptrace stop of the leader is a signal the model does not
- * deliver, so it ends the check rather than being read as an exit. */
+/* Detect that a node has exited, or that one of its threads stopped for
+ * a signal.  Only an exit or a fatal signal is a death.  A thread other
+ * than the leader stops on its own tid, so each known thread is asked
+ * too; an abort() in a worker stops the worker, not the leader. */
+static void signal_stop(Node *nd, pid_t tid, int st);
 static void
 reap(Node *nd)
 {
 	if (!nd->alive) return;
-	int st; pid_t r = waitpid(nd->pid, &st, WNOHANG | __WALL);
+	int st;
+	for (int i = 0; i < nd->nth; i++)
+	{
+		const Thread *th = &nd->th[i];
+		if (!th->inuse || th->tid == nd->pid) continue;
+		if (waitpid(th->tid, &st, WNOHANG | __WALL) == th->tid && WIFSTOPPED(st))
+		{ signal_stop(nd, th->tid, st); return; }
+	}
+	pid_t r = waitpid(nd->pid, &st, WNOHANG | __WALL);
 	if (r != nd->pid) return;
-	if (WIFSTOPPED(st))
-		die(3, "node %d stopped with signal %d; a signal other than SIGPIPE is not modelled", nd->id, WSTOPSIG(st));
+	if (WIFSTOPPED(st)) { signal_stop(nd, nd->pid, st); return; }
 	nd->pid = 0; nd->alive = 0; drain_canon(nd); node_gone(nd);
+}
+
+/* The first node a fault signal killed in this replay, and the signal:
+ * the search reports it as a violation (see signal_stop).  -1: none. */
+static int g_fault_node = -1, g_fault_sig;
+
+/* Thread tid of node nd is in a signal-delivery stop (waitpid status
+ * st): the node is ptrace-seized, so a signal parks the thread instead
+ * of acting.  A fault signal (SIGABRT from abort() or a failed assert,
+ * SIGSEGV, SIGBUS, SIGFPE, SIGILL) at its default disposition ends the
+ * process on Linux.  The checker kills the node instead of delivering
+ * it, so no core file is written, and records the fault: a program that
+ * kills itself this way has found a bug of its own, and treating that as
+ * an ordinary exit could pass it.  A handler would run instead, and is
+ * not modelled.  An ignored fault signal may or may not end the process
+ * (abort() and the kernel reset it to the default first, kill() and
+ * raise() do not), and the stop cannot tell which, so it is not
+ * modelled either, nor is any other signal.  Each ends the check. */
+static void
+signal_stop(Node *nd, pid_t tid, int st)
+{
+	int sig = WSTOPSIG(st);
+	int fault = sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE || sig == SIGILL;
+	if (!fault || st >> 16 != 0)
+		die(3, "node %d stopped with signal %d; a signal other than SIGPIPE or a fault is not modelled", nd->id, sig);
+	uint64_t bit = (uint64_t) 1 << (sig - 1);
+	if ((sigmask_of(nd, tid, "SigCgt:") | sigmask_of(nd, tid, "SigIgn:")) & bit)
+		die(3, "node %d raised signal %d with a handler installed or the signal ignored; neither is modelled", nd->id, sig);
+	kill_node(nd);
+	nd->alive = 0; drain_canon(nd); node_gone(nd);
+	if (g_fault_node < 0) { g_fault_node = nd->id; g_fault_sig = sig; }
 }
 
 /* answer a thread's deferred syscall with return value val (a negative
@@ -2366,7 +2412,17 @@ drive_quiescent(void)
 		for (int i = 0; i < M.nodes; i++)
 			if (node_has_running(&N[i])) { pf[np].fd = N[i].listener; pf[np].events = POLLIN; np++; }
 		if (np == 0) break;			/* every node quiescent or dead */
-		int r = poll(pf, np, LULL_MS);
+		/* wait in slices: a thread stopped by a signal makes no call and
+		 * wakes no poll, so look for one (reap) between slices */
+		int r = 0, died = 0;
+		for (int waited = 0; !died && waited < LULL_MS; waited += LULL_SLICE_MS)
+		{
+			r = poll(pf, np, LULL_SLICE_MS);
+			if (r != 0) break;
+			for (int i = 0; i < M.nodes; i++)
+				if (N[i].alive) { reap(&N[i]); died |= !N[i].alive; }
+		}
+		if (died) continue;
 		if (r < 0 && errno == EINTR) continue;
 		/* a notify fd that reports POLLHUP has lost its owning process: the
 		 * node exited (its last thread ran off the end or called
@@ -2719,7 +2775,7 @@ static void
 reset_world(void)
 {
 	memset(bag, 0, sizeof bag); memset(conns, 0, sizeof conns);
-	nrep = 0; logical_ns = CLK_BASE;
+	nrep = 0; logical_ns = CLK_BASE; g_fault_node = -1;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
 	bud.restarts = M.restarts;
 }
@@ -3206,6 +3262,16 @@ report_refine(const int *seq, int len)
 	kill_all();
 }
 
+/* report a node that a fault signal killed (signal_stop): the trace to
+ * it and the world there, as for a violated invariant */
+static void
+report_fault(const int *seq, int len)
+{
+	printf("Error: node %d was killed by signal %d (%s), a fault the program raised (an abort, a failed assert, a bad access).\n",
+		   g_fault_node, g_fault_sig, strsignal(g_fault_sig));
+	report_refine(seq, len);
+}
+
 /* the BFS frontier: action sequences, appended in one growing pool */
 static int *qpool; static size_t qcap, qused;
 typedef struct { size_t off; int len; uint64_t pfp0, pfp1; } QEnt;
@@ -3327,6 +3393,14 @@ cmc_proc_main(const CmcProcOptions *po)
 			for (;;)
 			{
 				int which = -1; states++;
+				if (g_fault_node >= 0)
+				{
+					kill_all();
+					printf("Walk %" PRIu64 " (seed %" PRIu64 "):\n", w + 1, po->seed);
+					report_fault(seq, len);
+					free(seq);
+					return 1;
+				}
 				if (!check_invariants(&which))
 				{
 					if (which == -2) { kill_all(); return 3; }
@@ -3400,6 +3474,7 @@ cmc_proc_main(const CmcProcOptions *po)
 			free(seq); return 1;
 		}
 
+		if (g_fault_node >= 0) { kill_all(); report_fault(seq, e.len); free(seq); return 1; }
 		int which = -1; int ok = check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
 		if (ok && po->refine && !po->refine_steps)

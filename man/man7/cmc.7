@@ -438,6 +438,18 @@ A target must be built
 .Fl no-pie ,
 use the port convention, and do its I/O through the calls above; a node
 that blocks in anything else for 10 seconds is an error.
+A node that kills itself with a fault signal
+.Dv ( SIGABRT
+from
+.Fn abort
+or a failed
+.Fn assert ,
+.Dv SIGSEGV ,
+.Dv SIGBUS ,
+.Dv SIGFPE ,
+.Dv SIGILL )
+is a violation, reported with the trace to it; a handler for the signal
+is refused.
 A read gets at most one write.
 Each TCP connection has its own queue in each direction.
 .Fn close

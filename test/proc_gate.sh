@@ -59,6 +59,9 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
+for f in fault kernelfd; do
+	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
+done
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -71,7 +74,7 @@ $CC -O1 -no-pie -w -DBUG -o "$B/proc/zab-bug" "$HERE/examples/zab/zab.c" || { ec
 # expect DESC EXIT NEEDLE cmc-args...: the exit status, and a line of output
 expect() {
 	desc=$1 want=$2 needle=$3; shift 3
-	"$CMC" "$@" > "$OUT/out.txt" 2>&1
+	$PFX "$CMC" "$@" > "$OUT/out.txt" 2>&1
 	rc=$?
 	if [ "$rc" = "$want" ] && grep -q -- "$needle" "$OUT/out.txt"; then
 		echo "ok   $desc -> exit $rc"
@@ -80,6 +83,14 @@ expect() {
 		sed 's/^/     /' "$OUT/out.txt" | head -30
 		fail=1
 	fi
+}
+# expect_by SECS DESC EXIT NEEDLE cmc-args...: expect, for a run that
+# must end by itself within SECS seconds (a hang is exit 124, a FAIL)
+PFX=
+expect_by() {
+	PFX="timeout $1"; shift
+	expect "$@"
+	PFX=
 }
 run() {		# run MODEL BINARY: the --model-file arguments for a fixture
 	echo "--model-file $T/$1.model --binary $B/proc/$2"
@@ -306,6 +317,22 @@ expect "raceborn: sending before the clone holds"         0 "No error has been f
 # racepipe: two threads' calls on kernel pipes interleave, so main can
 # read the first pipe's byte after missing the second's
 expect "racepipe: calls on kernel fds interleave"          0 "No error has been found" $(run racepipe racepipe)
+
+# A node the checker cannot follow must end the check, never hang it.
+# A fault signal (abort, a failed assert) parks a ptrace-seized thread in
+# a signal-delivery stop, which makes no call: the checker reports the
+# node killed.  A thread blocked in a kernel call it does not see makes
+# none either: the check ends with the lull error after 10 s.
+for m in main worker; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[invariants]\nany = "node[0][0] <= 1"\n' "$B/proc/fault" "$m" > "$OUT/fault-$m.model"
+done
+for m in alone block; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[invariants]\nany = "node[0][0] <= 1"\n' "$B/proc/kernelfd" "$m" > "$OUT/kfd-$m.model"
+done
+expect_by 60 "fault: an abort() is reported, not waited on"     1 "killed by signal 6" --model-file "$OUT/fault-main.model"
+expect_by 60 "fault: an abort() in a worker thread is reported" 1 "killed by signal 6" --model-file "$OUT/fault-worker.model"
+expect_by 60 "kernelfd: a read blocked in the kernel ends the check" 1 "made no checked syscall" --model-file "$OUT/kfd-alone.model"
+expect_by 60 "kernelfd: a worker blocked in the kernel ends the check" 1 "made no checked syscall" --model-file "$OUT/kfd-block.model"
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
