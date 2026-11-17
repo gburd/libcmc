@@ -62,9 +62,12 @@ In a node with more than one thread, the order of the threads' visible
 operations is a search choice.  A visible operation is a `futex` call,
 any call on a checker-owned fd, a write to fd 3 or fd 193, or a
 `clone`.  When a thread reaches one, the checker carries it out (bytes
-are queued, a futex waiter is woken) but holds its answer, and the
-thread parks (`BK_DONE`).  A call the kernel performs, a state-hook
-write, is held before it runs.  The answer to a parked recv, accept,
+are queued, a futex waiter is woken, a state record is written) but
+holds its answer, and the thread parks (`BK_DONE`).  The checker writes
+a state-hook record into the node's hook pipe itself, from the thread's
+memory, rather than letting the kernel run the write, so a state-hook
+write has the same semantics as every other visible operation.  The
+answer to a parked recv, accept,
 poll or futex wait is held the same way when the search or another
 thread supplies it.  At a quiescent point the action RUN(node, thread)
 sends one held answer and lets that thread alone run to its next
@@ -85,8 +88,8 @@ node's threads from `/proc/PID/task` before the leader, whose exit the
 kernel withholds until they are reaped.
 
 A thread's record in the world encoding holds its held answer (the
-result and every byte the call wrote into its memory, or the record a
-held state-hook write will emit) and, in a multi-threaded node, the call
+result and every byte the call wrote into its memory) and, in a
+multi-threaded node, the call
 it is parked in, with its arguments and instruction and stack pointers,
 since two threads can hold the same answer at different points of their
 code.  Records are sorted, so the key is the multiset of thread states,

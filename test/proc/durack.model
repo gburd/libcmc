@@ -1,0 +1,16 @@
+# A model file for test/proc/durack.c: a worker makes the client's value
+# durable and then acks it.  A crash between the two leaves the value
+# durable and the client unacked, which Linux reaches; it must be
+# reachable here.
+
+[target]
+nodes = 1
+
+[environment]
+client_write = 5
+crashes = 1
+
+[invariants]
+# a crashed node reports its one-byte durable record (node[0][1] is -1);
+# no reply carries the value yet
+durable_unacked = "eventually node[0][0] == 5 and node[0][1] < 0 and (count r in replies : r.val == 5) == 0"

@@ -126,10 +126,9 @@ a
 call, any call on a socket, eventfd or epoll instance the checker owns,
 a write to the state hook (fd 3 or fd 193), or a
 .Fn clone .
-The operation is carried out when the thread reaches it, so its effect
-(bytes queued, a waiter woken) is in the world at once, but its answer is
-held and the thread parks.
-A call the kernel performs, a state-hook write, is held before it runs.
+The checker carries the operation out when the thread reaches it, so
+its effect (bytes queued, a waiter woken, a state record written) is in
+the world at once, but its answer is held and the thread parks.
 A new thread and its parent are both held at the clone's return, the new
 thread before its first instruction.
 When every thread is parked, RUN gives one held thread its answer, and

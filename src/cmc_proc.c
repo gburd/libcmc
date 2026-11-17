@@ -631,6 +631,7 @@ typedef struct {
 	const char *binary; int id;
 	int fd3[2];					/* volatile canonical-emit pipe */
 	int fd4[2];					/* durable canonical-emit pipe (survives a crash) */
+	int hook_w[2];				/* the checker's write ends of fd3 and fd4 (serve_hook) */
 	unsigned char canon[SNAP]; int canon_len;
 	unsigned char durable[SNAP]; int durable_len;
 	int durable_read_off;		/* bytes of the framed durable record a startup read has consumed */
@@ -956,7 +957,9 @@ launch(Node *nd)
 		execv(nd->binary, av);
 		_exit(2);
 	}
-	close(sp[1]); close(nd->fd3[1]); close(nd->fd4[1]);
+	/* the checker keeps the write ends: it writes a node's state-hook
+	 * records into them itself (serve_hook) */
+	close(sp[1]); nd->hook_w[0] = nd->fd3[1]; nd->hook_w[1] = nd->fd4[1];
 	char cb[CMSG_SPACE(sizeof(int))] = {0}; char d;
 	struct iovec iov = {&d, 1}; struct msghdr mh = {0};
 	mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cb; mh.msg_controllen = sizeof cb;
@@ -965,6 +968,10 @@ launch(Node *nd)
 	if (cm) memcpy(&nd->listener, CMSG_DATA(cm), sizeof(int));
 	close(sp[0]);
 	if (nd->listener < 0) return -1;
+	/* close-on-exec, so a node launched later does not inherit this one's
+	 * hook.  Not O_NONBLOCK: the status flags are shared with the node's
+	 * own fd 3, and it would see them; serve_hook polls instead. */
+	for (int k = 0; k < 2; k++) fcntl(nd->hook_w[k], F_SETFD, FD_CLOEXEC);
 	/* make the notify fd non-blocking: with threads, drive_quiescent must
 	 * poll the listeners and RECV only a ready notification, never block
 	 * one node's RECV while another node's running thread needs service */
@@ -1350,6 +1357,36 @@ visible(long nr, const __u64 *a)
 	}
 }
 
+/* A write to the state hook: fd 3, or DURABLE_FD for the durable record.
+ * The checker carries it out itself: it reads the bytes from the
+ * thread's memory and writes them into the node's hook pipe, then
+ * answers with the length.  So a hook write is a call the checker
+ * answers like any other visible operation: its effect happens when the
+ * thread reaches it, and in a node with more than one thread its answer
+ * is held until the search runs the thread.  drain_canon() reads the
+ * pipe as before, so the record checks (too long, left unfinished)
+ * apply unchanged.  A write of at most PIPE_BUF bytes into a pipe with
+ * room for them is whole, which poll's POLLOUT promises. */
+static void
+serve_hook(Node *nd, const __u64 *a)
+{
+	unsigned char buf[MSGLEN];
+	size_t		len = (size_t) a[2];
+	int			w = (int) a[0] == 3 ? nd->hook_w[0] : nd->hook_w[1];
+
+	if (len > sizeof buf)
+		die(3, "node %d writes %zu bytes to its state hook in one call; the limit is %zu", nd->id, len, sizeof buf);
+	size_t		got = cr_read(nd->pid, a[1], buf, len);
+	if (got == 0 && len > 0) { g_resp->error = -EFAULT; return; }
+	if (got < len) cr_fail(nd->id, "a state-hook write sends from a buffer that ends");
+	struct pollfd pf = {w, POLLOUT, 0};
+	if (len > 0 && (poll(&pf, 1, 0) != 1 || !(pf.revents & POLLOUT)))
+		die(1, "node %d writes more state records between two quiescent points than the checker's pipe holds", nd->id);
+	if (len > 0 && write(w, buf, len) != (ssize_t) len)
+		die(1, "node %d: cannot pass a state record to the checker: %s", nd->id, strerror(errno));
+	g_resp->val = (long long) len;
+}
+
 static int serve(Node *nd, Thread *th);
 static void birth(Node *nd, Thread *th);
 static void reap_tid(pid_t tid);
@@ -1381,9 +1418,8 @@ stack_pointer(const Node *nd, const Thread *th)
  * serve() carries the call out.  In a node with one thread its answer is
  * sent at once.  In a node with more than one, a visible operation's
  * answer is held instead (BK_DONE) and the thread parks, until the
- * search runs it (A_RUN): a call the checker answers has its effect now
- * and returns later, and a call the kernel performs (CONTINUE: a write to
- * the state hook) is held before it runs. */
+ * search runs it (A_RUN): every visible operation is one the checker
+ * carries out itself, so it has its effect now and returns later. */
 static int
 try_pending_for(Node *nd)
 {
@@ -1425,17 +1461,6 @@ try_pending_for(Node *nd)
 	}
 	th->block_kind = BK_DONE; th->block_id = g_req->id;
 	th->held_val = g_resp->val; th->held_err = g_resp->error; th->held_flags = g_resp->flags;
-	/* a held write to the state hook has not run yet: keep the record it
-	 * will write, since worlds about to emit different states differ */
-	if ((th->held_flags & SECCOMP_USER_NOTIF_FLAG_CONTINUE) && (nr == SYS_write || nr == SYS_sendto) &&
-		((int) a[0] == 3 || (int) a[0] == DURABLE_FD))
-	{
-		unsigned char rec[MSGLEN];
-		size_t len = (size_t) a[2];
-		if (len > sizeof rec) die(3, "node %d writes %zu bytes to its state hook in one call; the limit is %zu", nd->id, len, sizeof rec);
-		size_t got = cr_read(nd->pid, a[1], rec, len);
-		cap_begin(th); capture(rec, got); g_cap = NULL;
-	}
 	return 1;
 }
 
@@ -1631,7 +1656,8 @@ serve(Node *nd, Thread *th)
 		case SYS_write: case SYS_sendto:
 		{
 			int fd = (int) a[0];
-			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, fd 3, libs) */
+			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) { serve_hook(nd, a); break; }
+			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, libs) */
 			/* sendto's flags: MSG_NOSIGNAL is honoured; any other would
 			 * change the call (MSG_DONTWAIT, MSG_MORE, MSG_OOB) and is
 			 * refused, as is a destination address on a connected socket */
@@ -2361,7 +2387,8 @@ crash_node(Node *nd)
 	if (nd->listener > 0) close(nd->listener);
 	if (nd->fd3[0] > 0) close(nd->fd3[0]);
 	if (nd->fd4[0] > 0) close(nd->fd4[0]);
-	nd->listener = nd->fd3[0] = nd->fd4[0] = -1;
+	for (int k = 0; k < 2; k++) if (nd->hook_w[k] > 0) close(nd->hook_w[k]);
+	nd->listener = nd->fd3[0] = nd->fd4[0] = nd->hook_w[0] = nd->hook_w[1] = -1;
 }
 
 /* RESTART a crashed node (Tier 3 ask 6): relaunch it as a fresh process
@@ -3133,7 +3160,8 @@ kill_all(void)
 		if (N[i].listener > 0) close(N[i].listener);
 		if (N[i].fd3[0] > 0) close(N[i].fd3[0]);
 		if (N[i].fd4[0] > 0) close(N[i].fd4[0]);
-		N[i].listener = N[i].fd3[0] = N[i].fd4[0] = -1;
+		for (int k = 0; k < 2; k++) if (N[i].hook_w[k] > 0) close(N[i].hook_w[k]);
+		N[i].listener = N[i].fd3[0] = N[i].fd4[0] = N[i].hook_w[0] = N[i].hook_w[1] = -1;
 	}
 }
 
@@ -3360,7 +3388,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	if (pie < 0) { fprintf(stderr, "cmc: %s is not an ELF executable\n", M.binary); return 3; }
 	if (pie) { fprintf(stderr, "cmc: %s must be a non-PIE ELF (build with -no-pie)\n", M.binary); return 3; }
 	if (find_preload()) return 3;
-	for (int i = 0; i < MAXNODES; i++) { N[i].binary = M.binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = -1; }
+	for (int i = 0; i < MAXNODES; i++) { N[i].binary = M.binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = N[i].hook_w[0] = N[i].hook_w[1] = -1; }
 	if (seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &g_sz))
 	{ fprintf(stderr, "cmc: seccomp user notification is not available: %s\n", strerror(errno)); return 3; }
 	g_req = calloc(1, g_sz.seccomp_notif); g_resp = calloc(1, g_sz.seccomp_notif_resp);
