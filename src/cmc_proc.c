@@ -1449,22 +1449,37 @@ static void reap_tid(pid_t tid);
  * /proc/PID/task/TID/syscall ("nr a0 .. a5 sp pc").  The libc wrapper's
  * instruction pointer is the same for every write() a program makes, so
  * the stack pointer is what tells two call sites of one wrapper apart;
- * with no address randomisation it is the same on every replay. */
+ * with no address randomisation it is the same on every replay.
+ *
+ * The notification can reach the checker before the thread has gone to
+ * sleep waiting for its answer, and until it has, the file reads
+ * "running".  So a "running" line is retried, for up to a second. */
 static uint64_t
 stack_pointer(const Node *nd, const Thread *th)
 {
 	char		path[64], line[256];
 	unsigned long long v[9];
+	struct timespec pause = {0, 100 * 1000};
 
 	snprintf(path, sizeof path, "/proc/%d/task/%d/syscall", (int) nd->pid, (int) th->tid);
-	FILE	   *f = fopen(path, "r");
-	if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
-	int			ok = fgets(line, sizeof line, f) != NULL &&
-		sscanf(line, "%llu %llx %llx %llx %llx %llx %llx %llx %llx",
-			   &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) == 9;
-	fclose(f);
-	if (!ok) die(1, "node %d: %s does not show a thread in a system call", nd->id, path);
-	return v[7];
+	for (int tries = 0; tries < 10000; tries++)
+	{
+		FILE	   *f = fopen(path, "r");
+		if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
+		int			got = fgets(line, sizeof line, f) != NULL;
+		fclose(f);
+		if (got && strncmp(line, "running", 7) == 0)
+		{
+			nanosleep(&pause, NULL);
+			continue;
+		}
+		if (got && sscanf(line, "%llu %llx %llx %llx %llx %llx %llx %llx %llx",
+						  &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8]) == 9)
+			return v[7];
+		break;
+	}
+	die(1, "node %d: %s does not show a thread in a system call", nd->id, path);
+	return 0;
 }
 
 /* Service one ready notification on node nd without blocking the search.
