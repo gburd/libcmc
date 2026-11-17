@@ -33,7 +33,7 @@ static size_t nmodels;
 
 #define MAXP 64
 
-static void
+static _Noreturn void
 usage(void)
 {
 	fprintf(stderr,
@@ -54,6 +54,16 @@ usage(void)
 		fprintf(stderr, " %s", models[k].name);
 	fprintf(stderr, "\n");
 	exit(3);
+}
+
+/* argv[*i + 1], the value of option argv[*i], or the usage message when
+ * the command line ends first */
+static const char *
+next_arg(int argc, char **argv, int *i)
+{
+	if (*i + 1 >= argc)
+		usage();
+	return argv[++*i];
 }
 
 static void
@@ -267,7 +277,7 @@ read_tlc_cfg(const char *path, char *cfg, size_t cfglen, const char **props, int
 				tlc_cfg_refuse(path, ln, s);
 			sect = -1;
 		}
-		else if (sect == -1 && *s)
+		else if (sect == -1)
 			tlc_cfg_refuse(path, ln, s);
 	}
 	fclose(f);
@@ -367,7 +377,7 @@ proc_main(int argc, char **argv)
 	{
 		const char *a = argv[i];
 
-#define ARG() (i + 1 < argc ? argv[++i] : (usage(), ""))
+#define ARG() next_arg(argc, argv, &i)
 		if (!strcmp(a, "--model-file"))
 			po.model_file = ARG();
 		else if (!strcmp(a, "--binary"))
@@ -419,6 +429,34 @@ proc_main(int argc, char **argv)
 	return cmc_proc_main(&po);
 }
 
+/* cmc --spec FILE or cmc --emit-tla FILE (mode), with --define TAG ...:
+ * every other option is an error, and so is an option with no value */
+static int
+spec_main(int argc, char **argv, const char *mode)
+{
+	const char *path = NULL;
+	char	   *defs[16];
+	int			ndefs = 0;
+
+	for (int j = 1; j < argc; j++)
+	{
+		bool		def = !strcmp(argv[j], "--define");
+
+		if (!def && strcmp(argv[j], mode))
+		{
+			fprintf(stderr, "cmc: %s is not supported with %s\n", argv[j], mode);
+			return 3;
+		}
+		if (j + 1 == argc || (def && ndefs == 16))
+			usage();
+		if (def)
+			defs[ndefs++] = argv[++j];
+		else
+			path = argv[++j];
+	}
+	return strcmp(mode, "--spec") ? cmc_emit_tla(path, defs, ndefs) : cmc_spec_main(path, defs, ndefs);
+}
+
 int
 cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 {
@@ -441,43 +479,18 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		if (!strcmp(argv[i], "--model-file") || !strcmp(argv[i], "--refine"))
 			return proc_main(argc, argv);
 	/* cmc --spec FILE.cml [--define TAG ...]: the abstract-model front
-	 * end (cmc_spec.c), model-checking a declarative spec on its own. */
+	 * end (cmc_spec.c), model-checking a declarative spec on its own;
+	 * cmc --emit-tla FILE.cml [--define TAG ...]: translate it to TLA+ */
 	for (int i = 1; i < argc; i++)
-		if (!strcmp(argv[i], "--spec"))
-		{
-			const char *path = NULL;
-			char *defs[16]; int ndefs = 0;
-			for (int j = 1; j < argc; j++)
-			{
-				if (!strcmp(argv[j], "--spec") && j + 1 < argc) path = argv[++j];
-				else if (!strcmp(argv[j], "--define") && j + 1 < argc && ndefs < 16) defs[ndefs++] = argv[++j];
-				else { fprintf(stderr, "cmc: %s is not supported with --spec\n", argv[j]); return 3; }
-			}
-			if (!path) usage();
-			return cmc_spec_main(path, defs, ndefs);
-		}
-	/* cmc --emit-tla FILE.cml [--define TAG ...]: translate to TLA+ */
-	for (int i = 1; i < argc; i++)
-		if (!strcmp(argv[i], "--emit-tla"))
-		{
-			const char *path = NULL;
-			char *defs[16]; int ndefs = 0;
-			for (int j = 1; j < argc; j++)
-			{
-				if (!strcmp(argv[j], "--emit-tla") && j + 1 < argc) path = argv[++j];
-				else if (!strcmp(argv[j], "--define") && j + 1 < argc && ndefs < 16) defs[ndefs++] = argv[++j];
-				else { fprintf(stderr, "cmc: %s is not supported with --emit-tla\n", argv[j]); return 3; }
-			}
-			if (!path) usage();
-			return cmc_emit_tla(path, defs, ndefs);
-		}
+		if (!strcmp(argv[i], "--spec") || !strcmp(argv[i], "--emit-tla"))
+			return spec_main(argc, argv, argv[i]);
 	cmc_options_default(&o);
 	o.progress_s = 60;
 	for (int i = 1; i < argc; i++)
 	{
 		const char *a = argv[i];
 
-#define ARG() (i + 1 < argc ? argv[++i] : (usage(), ""))
+#define ARG() next_arg(argc, argv, &i)
 		if (!strcmp(a, "--version"))
 		{
 			printf("cmc (libcmc) %s\n", CMC_VERSION);

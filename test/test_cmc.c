@@ -1474,6 +1474,107 @@ test_p25_fair_schedule_fires_timers(void)
 	}
 }
 
+/* ---- the engine's rules on what a core emits -------------------------
+ * One configurable core: on CLIENT it emits the outputs bad_kind picks,
+ * each of which breaks one engine rule.  Each must end the check with an
+ * engine violation that names the rule, never pass or crash. */
+
+static int	bad_kind;
+
+static void
+bad_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	CmcOutput  *o;
+
+	(void) cfg;
+	(void) node;
+	(void) sv;
+	out->n = 0;
+	if (ev->kind != CMC_EV_CLIENT)
+		return;
+	switch (bad_kind)
+	{
+		case 0:					/* a body longer than a message holds */
+			cmc_out_push(out, CMC_OUT_SEND)->len = CMC_MSG_MAX + 1;
+			break;
+		case 1:					/* a send to a node that does not exist */
+			cmc_out_push(out, CMC_OUT_SEND)->dst = 5;
+			break;
+		case 2:					/* a timer id past the last */
+			cmc_out_push(out, CMC_OUT_CANCEL_TIMER)->arg = CMC_MAX_TIMERS;
+			break;
+		case 3:					/* a waiter id past the last */
+			cmc_out_push(out, CMC_OUT_WAKE)->arg = CMC_MAX_WAKES;
+			break;
+		case 4:					/* more persists than --persist-cap */
+			for (int i = 0; i < 3; i++)
+				cmc_out_push(out, CMC_OUT_PERSIST)->len = 1;
+			break;
+		case 5:					/* more replies than --reply-cap */
+			for (int i = 0; i < 9; i++)
+				cmc_out_push(out, CMC_OUT_REPLY);
+			break;
+		case 6:					/* more messages than --net-cap */
+			for (int i = 0; i < 9; i++)
+			{
+				o = cmc_out_push(out, CMC_OUT_SEND);
+				o->len = 1;
+				o->body[0] = (uint8_t) i;
+			}
+			break;
+		case 7:					/* an output kind there is none of */
+			cmc_out_push(out, 99);
+			break;
+		case 8:					/* an output count out of range */
+			out->n = -1;
+			break;
+	}
+}
+
+static const CmcCore bad_core = {
+	.name = "bad", .state_size = 8, .durable_size = 1, .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = nd_nnodes,
+	.init = zero8, .step = bad_step, .apply_persist = dur_apply,
+};
+static const CmcModel bad_model = {"bad", &bad_core, nd_props, 1, 0};
+
+static void
+test_output_rules(void)
+{
+	static const char *const want[] = {"output body too long", "SEND to bad node 5",
+		"bad timer id 16", "bad waiter id 8", "persist_cap 2 exceeded",
+		"reply_cap 8 exceeded", "net_cap 8 exceeded", "unknown output kind 99",
+	"core emitted -1 outputs"};
+	char		path[512];
+
+	snprintf(path, sizeof(path), "%s/bad.replay",
+			 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
+	for (bad_kind = 0; bad_kind < 9; bad_kind++)
+		for (int s = 0; s < 4; s++)
+		{
+			CmcOptions	o;
+			CmcRun	   *r;
+			CmcResult	res;
+
+			/* BFS, DFS and simulation each report it, and BFS's trace
+			 * replays to it */
+			cmc_options_default(&o);
+			o.net = CMC_NET_BAG;
+			o.walks = 1;
+			o.replay_in = path;
+			r = mkc(&bad_model, s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : s == 2 ? CMC_SIMULATE :
+					CMC_REPLAY, "", NULL, &o);
+			cmc_check(r, &res);
+			CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "cmc:engine"));
+			CHECK(strstr(res.why, want[bad_kind]) != NULL && res.trace_len == 2);
+			if (s == 0)
+				CHECK(cmc_write_replay(r, path, res.trace, res.trace_len - 1) == 0);
+			cmc_result_free(&res);
+			cmc_run_free(r);
+		}
+	bad_kind = 0;
+}
+
 /* ---- cmc_apply refuses an action that is not enabled ----------------- */
 
 /* a node that sets timer 1 and waiter 2 on CLIENT, persists and sends to
@@ -1615,10 +1716,30 @@ test_apply_refuses(void)
 
 /* ---- the command line (cmc_main) ------------------------------------ */
 
+/* toy-bug1 with its first property (Mutex) always checked, under a
+ * table name that differs from its own; filled in by test_cli_runs() */
+static CmcModel always_model;
+
+/* an invariant that fails without saying why */
+static bool
+never_true(const CmcWorld *w, CmcWhy *why)
+{
+	(void) w;
+	(void) why;
+	return false;
+}
+
+static const CmcProp mute_props[] = {CMC_INVARIANT(Never, never_true)};
+static const CmcModel mute_model = {"mute", &mute_core, mute_props, 1, 0};
+
 static const CmcModelEntry cli_models[] = {
 	{"toy", &toy_model},
 	{"toy-bug1", &toy_bug1_model},
+	{"toy-bug2", &toy_bug2_model},
 	{"toy-bug3", &toy_bug3_model},
+	{"always", &always_model},
+	{"cap", &cap_model},
+	{"mute", &mute_model},
 };
 
 /* p (512 bytes) = the path of a file under $CMC_BUILD */
@@ -1650,7 +1771,7 @@ cli_write(const char *path, const char *text)
  * flushed and a --coverage build counts it.  Returns whether both held.
  */
 static int
-cli_expect(int want, const char *needle, const char *const *argv)
+cli_expect(int want, const char *needle, const char *absent, const char *const *argv)
 {
 	char		out[512],
 				buf[8192] = "";
@@ -1678,21 +1799,26 @@ cli_expect(int want, const char *needle, const char *const *argv)
 		buf[fread(buf, 1, sizeof(buf) - 1, f)] = 0;
 		fclose(f);
 	}
-	ok = WIFEXITED(st) && WEXITSTATUS(st) == want && strstr(buf, needle) != NULL;
+	ok = WIFEXITED(st) && WEXITSTATUS(st) == want && strstr(buf, needle) != NULL &&
+		(!absent || !strstr(buf, absent));
 	if (!ok)
 	{
 		fprintf(stderr, "FAIL cli:");
 		for (int i = 1; i < argc; i++)
 			fprintf(stderr, " %s", argv[i]);
-		fprintf(stderr, "\n  exit %d, wanted %d and \"%s\"; output:\n%s\n",
-				WIFEXITED(st) ? WEXITSTATUS(st) : -1, want, needle, buf);
+		fprintf(stderr, "\n  exit %d, wanted %d and \"%s\"%s%s; output:\n%s\n",
+				WIFEXITED(st) ? WEXITSTATUS(st) : -1, want, needle,
+				absent ? " without " : "", absent ? absent : "", buf);
 		failures++;
 	}
 	return ok;
 }
 
 #define CLI(want, needle, ...) \
-	cli_expect((want), (needle), (const char *const[]) {"cmc", __VA_ARGS__, NULL})
+	cli_expect((want), (needle), NULL, (const char *const[]) {"cmc", __VA_ARGS__, NULL})
+/* the same, and the output must not contain absent */
+#define CLI_NOT(want, needle, absent, ...) \
+	cli_expect((want), (needle), (absent), (const char *const[]) {"cmc", __VA_ARGS__, NULL})
 
 /* input the user mistyped is an error, never a silent 0 or a dropped
  * setting that checks less than was asked */
@@ -1720,6 +1846,14 @@ test_cli_input(void)
 		"--simulate", "--seed", "-1");
 	CLI(3, "--time needs a number of seconds", "--model", "toy", "--all-props",
 		"--time", "soon");
+	CLI(3, "--time needs a number of seconds, not '5s'", "--model", "toy", "--all-props",
+		"--time", "5s");
+	CLI(3, "--time needs a number of seconds, not 'inf'", "--model", "toy", "--all-props",
+		"--time", "inf");
+	CLI(3, "--time needs a number of seconds, not '-1'", "--model", "toy", "--all-props",
+		"--time", "-1");
+	CLI(3, "--seed needs a number from 0 to 18446744073709551615, not '18446744073709551616'",
+		"--model", "toy", "--all-props", "--simulate", "--seed", "18446744073709551616");
 	CLI(3, "--dfs needs a number from 1", "--model", "toy", "--all-props", "--dfs", "0");
 	/* zero walks is a simulation that looks at nothing */
 	CLI(3, "--walks needs a number from 1", "--model", "toy", "--all-props",
@@ -1747,6 +1881,207 @@ test_cli_input(void)
 	CLI(3, "names no [BUGG] action", "--model-file", none,
 		"--refine", "examples/spec/paxos.cml", "--bind", "examples/spec/paxos.bind",
 		"--define", "BUGG");
+}
+
+/* the options and the output of an in-process check, in each search */
+static void
+test_cli_runs(void)
+{
+	char		rp[512],
+				cfg[512];
+
+	cli_path(rp, "cli.replay");
+	cli_path(cfg, "cli.cfg");
+	always_model = toy_bug1_model;
+	always_model.name = "always_toy";
+	always_model.nalways = 1;
+	CLI(0, "cmc (libcmc) " CMC_VERSION, "--version");
+	CLI(3, "models: toy toy-bug1", "--help");
+	CLI(3, "usage: cmc --model-file", "--model", "nosuch", "--all-props");
+	CLI(3, "usage:", "--model");
+	CLI(3, "usage:", "--model", "toy", "--all-props", "--net", "tree");
+	CLI(3, "name properties with", "--model", "toy");
+	CLI(3, "model toy_model has no property Nope", "--model", "toy", "--inv", "Nope");
+	CLI(3, "a FIFO connection never duplicates", "--model", "toy", "--all-props", "--dups", "1");
+	CLI(3, "usage:", "--all-props");
+	/* an option at the end of the line with no value */
+	for (int i = 0; i < 24; i++)
+	{
+		static const char *const opt[] = {"--cfg", "--tlc-cfg", "--inv", "--dfs", "--seed",
+			"--walks", "--depth", "--replay", "--max-states", "--time", "--trace-out",
+			"--progress", "--clients", "--drops", "--dups", "--crashes", "--net-cap",
+			"--persist-cap", "--reply-cap", "--net", "--live-steps", "--prop", "--model",
+		"--bfs"};
+
+		/* --bfs takes no value, so the line is merely short of a model */
+		CLI(3, "usage:", "--all-props", opt[i]);
+	}
+	CLI(3, "usage:", "--model", "toy", "--inv", "a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t,u,v,"
+		"w,x,y,z,A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U,V,W,X,Y,Z,0,1,2,3,4,5,6,7,8,9,_,.");
+	CLI(0, "34 distinct states found", "--model", "toy", "--all-props", "--net", "bag");
+	CLI(0, "Mutex (always)\nPhaseMonotone\n", "--model", "always", "--list");
+	CLI(0, "EventuallyAllReplied\n", "--model", "toy", "--list");
+	/* every search, each with the line that says how it ended */
+	CLI(0, "34 distinct states found", "--model", "toy", "--all-props", "--bfs", "--det",
+		"--clients", "1", "--drops", "0", "--crashes", "0", "--net-cap", "8",
+		"--persist-cap", "2", "--reply-cap", "8", "--net", "fifo", "--live-steps", "1000",
+		"--max-states", "0", "--time", "60", "--progress", "0", "--quiet");
+	CLI(0, "ReachCS first reached at depth 4", "--model", "toy", "--all-props");
+	CLI(0, "Depth-first search completed within depth 40", "--model", "toy",
+		"--all-props", "--dfs", "40");
+	CLI(0, "No error found in 10 walks (not exhaustive)", "--model", "toy", "--all-props",
+		"--simulate", "--seed", "3", "--walks", "10", "--depth", "50");
+	CLI(0, "coverage: CLIENT node 1 (kind 7)", "--model", "toy", "--inv", "Mutex",
+		"--coverage");
+	CLI(2, "INCOMPLETE (no violation found): max_states reached", "--model", "toy",
+		"--inv", "Mutex", "--max-states", "5");
+	CLI(1, "Witness ReachCS: NOT reached", "--model", "toy", "--inv", "Mutex,ReachCS",
+		"--clients", "0");
+	CLI(1, "Error: Witness ReachCS is violated.", "--model", "toy", "--prop", "ReachCS",
+		"--clients", "0");
+	/* a counterexample: its trace, unless --quiet, and its replay file */
+	CLI(1, "Error: The behavior up to this point is:", "--model", "toy-bug1", "--inv", "Mutex");
+	CLI_NOT(1, "Invariant Mutex is violated", "State 1:", "--model", "toy-bug1", "--inv",
+			"Mutex", "--quiet");
+	CLI(1, "Action property PhaseMonotone is violated", "--model", "toy-bug3", "--prop",
+		"PhaseMonotone");
+	CLI(1, "Quiescence property AllReplied is violated", "--model", "toy-bug2", "--inv",
+		"AllReplied");
+	CLI(1, "(states 1-3: the shortest path found; then the fair schedule)", "--model",
+		"toy-bug2", "--inv", "EventuallyAllReplied");
+	CLI(1, "Engine check cmc:engine is violated", "--model", "cap", "--all-props");
+	/* a violation with no reason, and so no line for it */
+	CLI_NOT(1, "Error: Invariant Never is violated.\nError: The behavior", "\n  \n",
+			"--model", "mute", "--all-props");
+	/* a vacuous witness has no trace, so no replay file */
+	CLI_NOT(1, "Witness ReachCS is violated", "Replay file", "--model", "toy", "--prop",
+			"ReachCS", "--clients", "0", "--trace-out", rp);
+	/* one at the initial state replays from no action */
+	CLI(1, "Replay file written to", "--model", "mute", "--all-props", "--trace-out", rp);
+	CLI(1, "Invariant Never is violated", "--replay", rp, "--all-props");
+	CLI(1, "Could not write /nonexistent/x.replay", "--model", "toy-bug1", "--inv", "Mutex",
+		"--trace-out", "/nonexistent/x.replay");
+	CLI(1, "Replay file written to", "--model", "toy-bug1", "--inv", "Mutex", "--crashes", "0",
+		"--trace-out", rp);
+	/* --replay takes the model, cfg and budgets from the file */
+	CLI(1, "Invariant Mutex is violated", "--replay", rp, "--inv", "Mutex");
+	CLI(1, "Invariant Mutex is violated", "--replay", rp, "--model", "toy-bug1", "--inv",
+		"Mutex", "--cfg", "clients=2");
+	/* the file's cfg */
+	cli_write(rp, "# cmc replay v2\nmodel toy_model\ncfg clients=1\nenv client=1 drop=0"
+			  " dup=0 crash=0 net=8 persist=2 reply=8 mode=fifo live=1000\n");
+	CLI(0, "cfg \"clients=1\"", "--replay", rp, "--inv", "Mutex");
+	CLI(3, "recorded with cfg \"clients=1\"", "--replay", rp, "--inv", "Mutex", "--cfg",
+		"clients=2");
+	cli_write(rp, "# cmc replay v2\nmodel toy_model\ncfgx\n");
+	CLI(3, "lacks its model, cfg or env line", "--replay", rp, "--inv", "Mutex");
+	CLI(1, "Replay file written to", "--model", "toy-bug1", "--inv", "Mutex", "--crashes", "0",
+		"--trace-out", rp);
+	/* flags given agree with the file, so each one replaces the file's */
+	CLI(1, "Invariant Mutex is violated", "--replay", rp, "--inv", "Mutex", "--clients", "1",
+		"--drops", "0", "--dups", "0", "--net-cap", "8", "--persist-cap", "2", "--reply-cap",
+		"8", "--net", "fifo", "--live-steps", "1000");
+	CLI(3, "recorded with different environment bounds", "--replay", rp, "--inv", "Mutex",
+		"--crashes", "1");
+	CLI(3, "recorded with model toy_bug1_model, not toy_model", "--replay", rp,
+		"--model", "toy", "--inv", "Mutex");
+	CLI(3, "cannot open /nonexistent/x.replay", "--replay", "/nonexistent/x.replay",
+		"--model", "toy", "--inv", "Mutex");
+	CLI(3, "usage:", "--replay", "/nonexistent/x.replay", "--inv", "Mutex");
+	cli_write(rp, "# cmc replay v2\nmodel always_toy\ncfg\nenv garbled\n");
+	CLI(3, "bad env line in replay file", "--replay", rp, "--inv", "ReachCS");
+	/* the file names the model by its own name, not its table name */
+	cli_write(rp, "# cmc replay v2\nmodel always_toy\ncfg\nenv client=1 drop=0 dup=0 crash=0"
+			  " net=8 persist=2 reply=8 mode=bag live=1000\nact 0701000000000000\n");
+	CLI(0, "Replay completed: 2 states, no property violated.", "--replay", rp,
+		"--inv", "ReachCS");
+	/* a TLC .cfg, with --cfg after it overriding its constants */
+	cli_write(cfg, "\\* a comment\nCONSTANTS\n  clients = 2\n\nSPECIFICATION Spec\n"
+			  "INVARIANTS\n  Mutex \\* trailing comment\nPROPERTIES\n  ReachCS\n");
+	CLI(1, "Invariant Mutex is violated", "--model", "toy-bug1", "--tlc-cfg", cfg);
+	CLI(0, "cfg \"clients=2,clients=1\"", "--model", "toy-bug1", "--tlc-cfg", cfg,
+		"--cfg", "clients=1");
+	CLI(3, "cannot open /nonexistent/x.cfg", "--model", "toy", "--tlc-cfg",
+		"/nonexistent/x.cfg");
+	cli_write(cfg, "CONSTANT Writes = {w1, w2} Mode = \"a b\"\nINVARIANT Mutex\n");
+	CLI(3, "bad cfg Writes={w1  w2} for core toy", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "CONSTANTS\n  clients 2\n");
+	CLI(3, "cannot read line 2: clients 2", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "CONSTANT clients = {1\n");
+	CLI(3, "cannot read line 1", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "INVARIANT Mutex, ReachCS\n");
+	CLI(3, "cannot read line 1: Mutex, ReachCS", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "SPECIFICATION Spec Other\n");
+	CLI(3, "cannot read line 1: Spec Other", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "clients = 2\n");
+	CLI(3, "cannot read line 1: clients = 2", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "CONSTANT clients =\n");
+	CLI(3, "cannot read line 1", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "CONSTANT = 2\n");
+	CLI(3, "cannot read line 1", "--model", "toy", "--tlc-cfg", cfg);
+	cli_write(cfg, "INVARIANT Mutex-2\n");
+	CLI(3, "cannot read line 1: Mutex-2", "--model", "toy", "--tlc-cfg", cfg);
+	/* a file written on Windows, with nothing but a section heading */
+	cli_write(cfg, "\tINVARIANTS \r\n  Mutex\r\nSPECIFICATION\r\n  Spec\r\n");
+	CLI(0, "cfg \"\"", "--model", "toy", "--tlc-cfg", cfg);
+	/* a line longer than the reader holds is refused, not read in two */
+	{
+		char		lng[700];
+
+		memset(lng, 'x', 600);
+		strcpy(lng + 600, "\n");
+		cli_write(cfg, lng);
+		CLI(3, "the line is too long", "--model", "toy", "--tlc-cfg", cfg);
+	}
+}
+
+/* the front ends' own option checks (the model file is never read) */
+static void
+test_cli_front_ends(void)
+{
+	char		none[512];
+
+	cli_path(none, "none.model");
+	CLI(3, "--bogus is not supported with --model-file", "--model-file", none, "--bogus");
+	CLI(3, "--refine-steps needs --refine", "--model-file", none, "--refine-steps");
+	CLI(3, "--refine needs --bind", "--model-file", none, "--refine", "x.cml");
+	CLI(3, "cannot open x.cml", "--model-file", none, "--refine", "x.cml", "--bind", "x.bind");
+	CLI(3, "binding: cannot open /nonexistent/x.bind", "--model-file", none, "--refine",
+		"examples/spec/paxos.cml", "--bind", "/nonexistent/x.bind");
+	CLI(3, "usage:", "--model-file", none, "--binary");
+	CLI(3, "cannot open model file", "--model-file", none, "--binary", "x", "--bfs",
+		"--simulate", "--seed", "1", "--walks", "2", "--max-states", "3", "--time", "4",
+		"--crashes", "1", "--timeouts", "1");
+	CLI(3, "--model is not supported with --spec", "--spec", "x.cml", "--model", "toy");
+	CLI(3, "usage:", "--spec");
+	CLI(3, "usage:", "--emit-tla", "x.cml", "--define");
+	CLI(3, "cannot open x.cml", "--spec", "x.cml", "--define", "BUG");
+	CLI(3, "cannot open x.cml", "--emit-tla", "x.cml");
+	CLI(3, "--spec is not supported with --emit-tla", "--emit-tla", "x.cml", "--spec", "y");
+	/* more --define tags than the front ends hold */
+	{
+		const char *argv[40] = {"cmc", "--spec", "x.cml"};
+		int			n = 3;
+
+		for (int i = 0; i < 17; i++)
+		{
+			argv[n++] = "--define";
+			argv[n++] = "T";
+		}
+		argv[n] = NULL;
+		cli_expect(3, "usage:", NULL, argv);
+		argv[1] = "--model-file";
+		argv[2] = none;
+		cli_expect(3, "usage:", NULL, argv);
+	}
+	/* a binding the spec cannot use */
+	{
+		char		bind[512];
+
+		cli_write(cli_path(bind, "cli.bind"), "[map]\n");
+		CLI(3, "binding: binding has no [map]", "--model-file", none, "--refine",
+			"examples/spec/paxos.cml", "--bind", bind);
+	}
 }
 
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
@@ -1787,8 +2122,11 @@ main(void)
 	test_p23_property_cap();
 	test_p24_replay_enabled_error();
 	test_p25_fair_schedule_fires_timers();
+	test_output_rules();
 	test_apply_refuses();
 	test_cli_input();
+	test_cli_runs();
+	test_cli_front_ends();
 	test_version();
 	if (failures)
 	{
