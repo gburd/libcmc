@@ -149,6 +149,15 @@ epolls(void)
 	code(epoll_ctl(ep, EPOLL_CTL_DEL, e, NULL));	/* ENOENT */
 	code(epoll_wait(ep, out, 2, 0) == 0 ? 0 : -1);
 	code(epoll_pwait(ep, out, 2, 0, NULL) == 0 ? 0 : -1);
+	/* two ready, room for one; and the older epoll_create */
+	int			ep2 = epoll_create(4);
+	int			r1 = eventfd(1, 0), r2 = eventfd(1, 0);
+
+	ev.events = EPOLLIN;
+	epoll_ctl(ep2, EPOLL_CTL_ADD, r1, &ev);
+	epoll_ctl(ep2, EPOLL_CTL_ADD, r2, &ev);
+	code(epoll_wait(ep2, out, 1, 0) == 1 ? 0 : -1);
+	code(fcntl(ep2, F_GETFD) == 0 ? 0 : -1);
 }
 
 /* poll and ppoll with zero and no timeout on a ready eventfd and a
@@ -190,6 +199,7 @@ clocks(void)
 		code(r == 256 || r == (long) sizeof big ? 0 : -1);
 	}
 	code(syscall(SYS_sched_yield));
+	code(fcntl(0, F_GETFD) >= 0 ? 0 : -1);
 }
 
 /* futex: a wait whose value has changed is EAGAIN; a wake of nobody is 0 */
@@ -365,6 +375,7 @@ main(int argc, char **argv)
 		int			one = 1;
 
 		close(gone);
+		code(listen(ls, 8));
 		code(connect(e, (struct sockaddr *) &a, sizeof a));
 		code(connect(ep, (struct sockaddr *) &a, sizeof a));
 		code(connect(ls, (struct sockaddr *) &a, sizeof a));
@@ -438,6 +449,23 @@ main(int argc, char **argv)
 
 		code(syscall(SYS_read, e, ro, 8));
 	}
+	else if (!strcmp(mode, "selfdial"))
+	{
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+		int			c = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+
+		code(connect(c, (struct sockaddr *) &me, sizeof me));
+		code(fcntl(c, F_GETFD) == FD_CLOEXEC ? 0 : -1);
+		int			s = accept4(ls, NULL, NULL, SOCK_CLOEXEC);
+
+		code(s);
+		code(fcntl(s, F_GETFD) == FD_CLOEXEC ? 0 : -1);
+		code(write(c, "z", 1));
+		char		ch = 0;
+
+		code(read(s, &ch, 1) == 1 && ch == 'z' ? 0 : -1);
+	}
 	else if (!strcmp(mode, "pollclosed"))
 	{
 		/* poll of a closed fd: POLLNVAL at once, as on Linux */
@@ -449,6 +477,48 @@ main(int argc, char **argv)
 		p.events = POLLIN;
 		p.revents = 0;
 		code(poll(&p, 1, -1) == 1 && p.revents == POLLNVAL ? 0 : -1);
+	}
+	else if (!strcmp(mode, "ipv6"))
+		code(socket(AF_INET6, SOCK_STREAM, 0));
+	else if (!strcmp(mode, "connectlow"))
+	{
+		struct sockaddr_in low = addr(BASE - 1);
+		int			s = socket(AF_INET, SOCK_STREAM, 0);
+
+		code(connect(s, (struct sockaddr *) &low, sizeof low));
+	}
+	else if (!strcmp(mode, "sendtoaddr"))
+	{
+		struct sockaddr_in a = addr(BASE + 1);
+		int			s = socket(AF_INET, SOCK_STREAM, 0);
+
+		connect(s, (struct sockaddr *) &a, sizeof a);
+		code(sendto(s, "x", 1, 0, (struct sockaddr *) &a, sizeof a));
+	}
+	else if (!strcmp(mode, "fcntldup"))
+	{
+		int			e = eventfd(0, 0);
+
+		code(fcntl(e, F_DUPFD, 0));
+	}
+	else if (!strcmp(mode, "epollop"))
+	{
+		int			ep = epoll_create1(0), e = eventfd(0, 0);
+		struct epoll_event ev = {.events = EPOLLIN};
+
+		code(epoll_ctl(ep, 99, e, &ev));
+	}
+	else if (!strcmp(mode, "futexrequeue"))
+	{
+		static uint32_t w1, w2;
+
+		code(syscall(SYS_futex, &w1, FUTEX_REQUEUE_PRIVATE, 1, 1, &w2, 0));
+	}
+	else if (!strcmp(mode, "ppollsec"))
+	{
+		struct timespec t = {1, 0};
+
+		code(ppoll(NULL, 0, &t, NULL));
 	}
 	else if (!strcmp(mode, "notconnpipe"))
 	{

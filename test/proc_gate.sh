@@ -426,6 +426,9 @@ expect "memrace: a locked counter holds"                      0 "No error has be
 expect "memrace: a seq_cst handoff holds"                     0 "No error has been found" --model-file "$OUT/mr-seqcst-tsan.model"
 expect "memrace: a relaxed handoff is a data race"            1 "data race on node 0" --model-file "$OUT/mr-relaxed-tsan.model"
 expect "memrace: a relaxed atomic makes a pass INCOMPLETE"    2 "weaker than seq_cst" --model-file "$OUT/mr-relaxedadd-tsan.model"
+# two nodes running the racy program: the first report wins
+sed 's/^nodes = 1$/nodes = 2/' "$OUT/mr-unlocked-tsan.model" > "$OUT/mr-unlocked2-tsan.model"
+expect "memrace: two racing nodes, one report"                1 "data race on node" --model-file "$OUT/mr-unlocked2-tsan.model"
 # sendmsg on a kernel socket (below fd 500) is seen too: a second filter
 # stops it for the checker, which sends it on in a node with one thread
 # and refuses it in one with more.  In worker mode main's send can land
@@ -597,7 +600,11 @@ for bad in "node[0][0] != " "node[0][0] <= " "node[0][0] >= " "node[0][0] < " "n
 	mf "bad$k" 3 "cannot parse" "${H}[invariants]\nb = \"$bad\"\n"
 	k=$((k + 1))
 done
-inv sides2 0 "No error has been found" "node[0][-1] == 0 - 1"
+inv sides2 0 "No error has been found" "node[0][-1] == 0 - 1" "node[1][99] == 0 - 1"
+for bad in "count  in nodes : 1 == 1" "node[0]. == 0" "r == 0" "all b in node[1] : b.src == 0"; do
+	mf "bad$k" 3 "cannot parse" "${H}[invariants]\nb = \"$bad\"\n"
+	k=$((k + 1))
+done
 mf badword 3 "cannot parse" "${H}[invariants]\nb = \"node_x == 0\"\n"
 mf invexprlong 3 "invariant name or expression too long" "${H}[invariants]\nx = \"$(printf '%300s' '' | tr ' ' 'x')\"\n"
 mf evtab 0 "No error has been found" "${H}[invariants]\nok = \"eventually	node[1][0] == 5\"\n"
@@ -627,7 +634,7 @@ echo "-- the corners of the calls the checker answers itself"
 # each mode below that covers one of these failed.
 SC=$OUT/syscorner
 mkdir -p "$SC"
-for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf; do
+for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf selfdial; do
 	(cd "$SC" && timeout 30 "$B/proc/syscorner" 0 "$m" 3>"$SC/$m.state" > /dev/null 2>&1)
 	# shellcheck disable=SC2046
 	set -- $(od -An -tu1 "$SC/$m.state" | tr -s ' \n' ' ')
@@ -654,6 +661,13 @@ scm() {	# scm MODE EXIT NEEDLE
 }
 scm nbclient 3 "a non-blocking connect (EINPROGRESS) is not modelled"
 scm robufefd 3 "an eventfd read at an address it does not own"
+scm ipv6 3 "is not modelled (only AF_INET, SOCK_STREAM)"
+scm connectlow 3 "connects to port 19999, which is no node's"
+scm sendtoaddr 3 "sendto flags 0 or a destination address are not modelled"
+scm fcntldup 1 "fcntl cmd 0 on virtual fd 500 has no model"
+scm epollop 1 "epoll_ctl op 99 has no model"
+scm futexrequeue 1 "futex op 3 has no model"
+scm ppollsec 3 "ppoll with a finite timeout is not modelled"
 scm efdwrite4 1 "writes 4 bytes to an eventfd"
 scm efdread4 1 "reads 4 bytes from an eventfd"
 scm efdflags 3 "eventfd flags 0x2 are not modelled"
