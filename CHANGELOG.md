@@ -60,6 +60,12 @@ Command line, API and the abstract checker:
   on a scalar variable or none on a function, and a `[fields]` offset
   that is not 0 to 254 are errors now.  [spec_gate: "a variable bound
   twice is an error" and the rows after it]
+- `cmc --refine` checks each bound variable of the observed abstract
+  state against its declared domain.  An implementation whose observed
+  value left the spec's state space (x = 7 for `var x : 0 .. 2`) used
+  to refine whenever the invariant held there; it is an error now
+  (exit 3).  [spec_gate: "C1: an observed value outside its domain is
+  refused"]
 - `cmc --emit-tla` translates `not`, `in`, `some` and `all` inside a
   `count` body, which it copied as .cml words, so TLC refused the
   module.  [emit_gate: countops; spec_gate: "emit-tla: not, in, some

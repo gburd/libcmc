@@ -370,6 +370,12 @@ obs "an unknown field is an error"            3 "unknown field" "node[0].hi" 0
 obs "node with no [ is an error"              3 "expected \[ after node" "node 0" 0
 obs "node[i] with no index or field"          3 "needs \[k\] or .field" "node[0] + 1" 0
 obs "a reply field other than src or val"     3 "reply has .src and .val" "count r in replies : r.dst == 0" 1
+# an observed state outside the declared domains is refused, even where
+# the invariant holds (x : 0 .. 9, invariant x <= 3 fails first, so TRUE)
+printf 'module d\nvar x : 0 .. 2\ninit x == 0\ninvariant t: TRUE\n' > "$OUT/dom.cml"
+printf '[map]\nx = "node[0][0]"\n' > "$OUT/dom.bind"
+expectp "C1: an observed value outside its domain is refused" 3 "outside the spec: x = 7 is outside its domain" "$RD" -1 "$OUT/dom.cml" "$OUT/dom.bind" 0 7
+expectp "C2: an observed value outside its domain is refused" 3 "outside the spec" "$RD" "$OUT/dom.cml" "$OUT/dom.bind" 0 7
 obs "a set where an integer belongs"          3 "binding x: expected an integer, not a set" "{node[0][0]}" 0
 # 1.4: a truncated expression is an error, never a shorter invariant
 expect "an over-long expression is a model error"  3 "too long" --spec "$S/truncate.cml"

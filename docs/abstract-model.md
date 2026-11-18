@@ -127,7 +127,9 @@ binding, a field offset that is not 0 to 254) is an error, never
 skipped.
 
 At each reached implementation state the abstract state is built from the
-binding and the abstract invariants are checked against it.  The binding
+binding, each bound variable is checked against its declared domain (a
+value outside it is an error, not a state of the spec), and the
+abstract invariants are checked against it.  The binding
 may reference only what the code emits, never its internals, so the
 refinement is exactly as honest as the state hook is complete.  Point the
 same spec and binding at a second implementation to check it too.

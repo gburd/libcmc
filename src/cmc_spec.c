@@ -715,23 +715,26 @@ static int dom_has(const char *dom, long x, char *err, size_t errcap){
  * type annotations allow): a model error, never a silently explored
  * state.  Returns 0 if in, -1 (message in err) if not or on an
  * evaluation error. */
-static int in_domains(const State *st, char *err, size_t errcap){
+static int var_in_domain(int vi, const Value *v, char *err, size_t errcap){
 	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
-	for(int vi=0;vi<S.nvar;vi++){ const Var *V=&S.var[vi]; const Value *v=&st->v[vi];
-		if(!V->is_fun){
-			if(v->tag!=T_INT){ snprintf(err,errcap,"%s is %s, not an integer",V->name,tag_name(v->tag)); return -1; }
-			int in=dom_has(V->dom,v->i,err,errcap); if(in<0) return -1;
-			if(!in){ snprintf(err,errcap,"%s = %ld is outside its domain %s",V->name,v->i,V->dom); return -1; }
-			continue;
-		}
-		Value keys; if(!sp_eval_set(V->fdom,&env,&keys,err,errcap)) return -1;
-		if(v->tag!=T_FUN || keys.tag!=T_SET || v->n!=keys.n){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
-		for(int j=0;j<v->n;j++){
-			if(v->k[j]!=keys.e[j]){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
-			int in=dom_has(V->dom,v->v[j],err,errcap); if(in<0) return -1;
-			if(!in){ snprintf(err,errcap,"%s[%ld] = %ld is outside its range %s",V->name,v->k[j],v->v[j],V->dom); return -1; }
-		}
+	const Var *V=&S.var[vi];
+	if(!V->is_fun){
+		if(v->tag!=T_INT){ snprintf(err,errcap,"%s is %s, not an integer",V->name,tag_name(v->tag)); return -1; }
+		int in=dom_has(V->dom,v->i,err,errcap); if(in<0) return -1;
+		if(!in){ snprintf(err,errcap,"%s = %ld is outside its domain %s",V->name,v->i,V->dom); return -1; }
+		return 0;
 	}
+	Value keys; if(!sp_eval_set(V->fdom,&env,&keys,err,errcap)) return -1;
+	if(v->tag!=T_FUN || keys.tag!=T_SET || v->n!=keys.n){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
+	for(int j=0;j<v->n;j++){
+		if(v->k[j]!=keys.e[j]){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
+		int in=dom_has(V->dom,v->v[j],err,errcap); if(in<0) return -1;
+		if(!in){ snprintf(err,errcap,"%s[%ld] = %ld is outside its range %s",V->name,v->k[j],v->v[j],V->dom); return -1; }
+	}
+	return 0;
+}
+static int in_domains(const State *st, char *err, size_t errcap){
+	for(int vi=0;vi<S.nvar;vi++) if(var_in_domain(vi,&st->v[vi],err,errcap)) return -1;
 	return 0;
 }
 
@@ -1238,6 +1241,15 @@ static int build_abstract(const CmcObs *obs, State *out, char *err, size_t errca
 			r.tag=T_INT;	/* a flag, as in a function entry */
 			st.v[vi]=r;
 		}
+	}
+	/* A bound variable outside its declared domain is no state of the
+	 * spec, whatever the invariant says there (the TLA+ type invariant
+	 * fails on it).  An unbound one is not observed (C1 binds only what
+	 * the invariant reads).  It is an error, not a verdict: cmc_proc.c's
+	 * state-level caller reads only an invariant index or -2. */
+	for(int m=0;m<B_nmap;m++){
+		int vi=var_index(B_map[m].var); char derr[200];
+		if(var_in_domain(vi,&st.v[vi],derr,sizeof derr)){ snprintf(err,errcap,"the observed state is outside the spec: %s",derr); return -1; }
 	}
 	*out=st; return 0;
 }
