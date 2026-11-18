@@ -514,6 +514,77 @@ filesm sockerr sockerr "" "" "linux = \"node[0][0] == 0 or (node[0][0] == 1$inv)
 reached = \"eventually node[0][0] == 1\""
 expect_by 60 "files: an owned socket gets Linux's errnos" 0 "No error has been found" --model-file "$OUT/fs-sockerr.model"
 
+echo "-- the model file and the invariant language"
+# Every malformed model file is refused before a node starts, with the
+# line at fault; every invariant the language defines evaluates as its
+# meaning says, on repl's states (node 1 stores what the client wrote,
+# 5, and node 0 acks it; a reply is r.src 0, r.val 5).
+MF=$OUT/modelfile
+mkdir -p "$MF"
+mf() {	# mf NAME EXIT NEEDLE CONTENT: a model file, checked against repl
+	printf '%b' "$4" > "$MF/$1.model"
+	expect_by 60 "model file: $1" "$2" "$3" --model-file "$MF/$1.model" --binary "$B/proc/repl"
+}
+H='[target]\nnodes = 2\n[environment]\nclient_write = 5\n'
+mf long 3 "line too long" "${H}[invariants]\nx = \"$(printf '%600s' '' | tr ' ' 'x')\"\n"
+mf header 3 "malformed section header" "[target\nnodes = 2\n"
+mf trailing 3 "malformed section header" "[target] x\nnodes = 2\n"
+mf section 3 "unknown section \\[bogus\\]" "[bogus]\n"
+mf noeq 3 "expected key = value" "[target]\nnodes\n"
+mf quote 3 "unterminated or trailing text" "${H}[invariants]\nx = \"node[0][0] == 0\n"
+mf quoted 3 "unterminated or trailing text" "${H}[invariants]\nx = \"node[0][0] == 0\" y\n"
+mf outside 3 "nodes outside a section" "nodes = 2\n"
+mf nobinary 3 "binary is empty" "[target]\nbinary =\nnodes = 2\n"
+mf nodes 3 "nodes = \"9\": expected an integer from 1 to 8" "[target]\nnodes = 9\n"
+mf maxwrite 3 "max_write = \"0\"" "[target]\nnodes = 2\nmax_write = 0\n"
+mf state 3 "state = disk is not supported" "[target]\nnodes = 2\nstate = disk\n"
+mf statecanon 0 "No error has been found" "[target]\nnodes = 2\nstate = canon\nmax_write = 64\n[environment]\nclient_write = 5\n[invariants]\nok = \"node[0][0] < 9\" # a comment\n"
+for k in client_write timeouts crashes drops restarts depth; do
+	mf "env-$k" 3 "$k = \"x\": expected an integer" "[target]\nnodes = 2\n[environment]\n$k = x\n"
+done
+mf depthok 2 "depth bound reached" "$H""depth = 2\n[invariants]\nok = \"node[0][0] < 9\"\n"
+mf fieldlong 3 "field name too long" "[target]\nnodes = 2\n[fields]\n$(printf '%40s' '' | tr ' ' 'f') = 1\n"
+mf fieldtwice 3 "field a defined twice" "[target]\nnodes = 2\n[fields]\na = 1\na = 2\n"
+mf fieldoff 3 "a = \"255\": expected an integer from 0 to 254" "[target]\nnodes = 2\n[fields]\na = 255\n"
+mf fieldmany 3 "more than 16 fields" "[target]\nnodes = 2\n[fields]\n$(for i in $(seq 0 16); do printf 'f%d = %d\\n' "$i" "$i"; done)"
+mf invmany 3 "more than 8 invariants" "${H}[invariants]\n$(for i in $(seq 0 8); do printf 'i%d = \"node[0][0] < 9\"\\n' "$i"; done)"
+mf invlong 3 "invariant name or expression too long" "${H}[invariants]\n$(printf '%40s' '' | tr ' ' 'n') = \"node[0][0] < 9\"\n"
+mf invtwice 3 "invariant a defined twice" "${H}[invariants]\na = \"node[0][0] < 9\"\na = \"node[0][0] < 9\"\n"
+mf unknownkey 3 "unknown key bogus in \\[target\\]" "[target]\nnodes = 2\nbogus = 1\n"
+mf nonodes 3 "\\[target\\] nodes is required" "[target]\nargs = x\n[invariants]\nx = \"node[0][0] < 9\"\n"
+mf noinv 3 "no invariant to check" "[target]\nnodes = 2\n"
+expect_by 60 "model file: a missing file" 3 "cannot open model file" --model-file "$MF/no-such.model" --binary "$B/proc/repl"
+# the invariant language, each with a parse error or its meaning
+inv() {	# inv NAME EXIT NEEDLE EXPR...: invariants over repl's states
+	n=$1 want=$2 needle=$3; shift 3
+	body=""
+	k=0
+	for e in "$@"; do body="$body""i$k = \"$e\"\n"; k=$((k + 1)); done
+	mf "inv-$n" "$want" "$needle" "${H}[fields]\nval = 0\n[invariants]\n$body"
+}
+inv holds 0 "No error has been found" \
+	"node[1][0] == 0 or node[1][0] == 5" \
+	"node[1].val != 7 and node[1].val <= 5 and node[1].val >= 0 and not (node[1].val > 5) and node[1].val < 6" \
+	"(node[1][0] + 1) * 2 - 2 >= 0 and node[1][0] mod 5 == 0 and node[1][9] < 1" \
+	"all r in replies : r.src == 0 and r.val == 5 and r == r" \
+	"some i in nodes : i == 1" "count i in nodes : i >= 0 == 2" \
+	"all b in node[1] : b in node[1]" "(count r in replies : r.val == 5) <= 1"
+inv reached 0 "No error has been found" "eventually (some r in replies : r.val == 5) and (count b in node[1] : b == 5) == 1"
+# `and` and `or` mixed at one level are refused: left to right, the
+# invariant below meant (x == 7 or x == 5) and x == 9, which 2.0.0 found
+# violated in a state that `x == 7 or (x == 5 and x == 9)` would let pass
+inv mixed 3 "cannot parse" "node[1][0] == 7 or node[1][0] == 5 and node[1][0] == 9"
+inv grouped 0 "No error has been found" "node[1][0] != 7 or (node[1][0] == 5 and node[1][0] == 9)" "(node[1][0] == 0 or node[1][0] == 5) and node[1][0] < 9"
+for bad in "node[0" "node[x][0] == 0" "node[0]" "node[0][0" "node[0].nope == 0" "nodez == 1" "(node[0][0] == 0" \
+	"node[0][0] ==" "node[0][0] == 0 junk" "node[0][0] mod 0 == 0" "all i in : i == 0" "all i nodes : i == 0" \
+	"all i in nodes i == 0" "count in nodes : 1 == 1" "count i nodes : 1 == 1" "count i in bogus : 1 == 1" \
+	"count i in nodes 1 == 1" "1 in replies" "1 in nodes" "some r in replies : r.bogus == 0" "1 + == 2" "1 * == 2" \
+	"node[0][0] ? 1" "(1 + 1" "some i in node[9] : i == 0" "some i in node[0 : i == 0" "some i in node[q] : 1 == 1" \
+	"some i in node[0) : 1 == 1" "count i in nodes : (1 == 1"; do
+	mf "bad$k" 3 "cannot parse" "${H}[invariants]\nb = \"$bad\"\n"
+	k=$((k + 1))
+done
+
 echo "-- the corners of the calls the checker answers itself"
 # syscorner.c records each call's outcome.  Run natively first: its record
 # is then the model's invariant (cmc reaches it, and only it).  On 2.0.0
