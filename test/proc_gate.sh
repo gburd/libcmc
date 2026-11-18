@@ -59,7 +59,7 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files syscorner; do
+for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files syscorner edges; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
@@ -628,6 +628,37 @@ scm bigwrite 1 "writes 4096 bytes in one call"
 scm notconn 1 "writes fd 500, which is no connection"
 scm readnotconn 1 "reads fd 501, which is no connection"
 scm connect 3 "connects to port 20099, which is no node's"
+
+echo "-- edges: limits, partial transfers, refusals and signals"
+# edges.c: each mode passes a limit or a malformed argument and must end
+# the check as named, or records a corner whose answer is Linux's
+ED=$OUT/edges
+mkdir -p "$ED"
+edm() {	# edm MODE EXIT NEEDLE [INVARIANT]
+	inv=${4:-any = "node[0][0] < 9"}
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\n%b\n' "$B/proc/edges" "$1" "$inv" > "$ED/$1.model"
+	expect_by 60 "edges $1: $3" "$2" "$3" --model-file "$ED/$1.model"
+}
+edm partwrite 3 "write sends from a buffer that ends"
+edm parthook 3 "a state-hook write sends from a buffer that ends"
+edm partrandom 3 "getrandom fills a buffer at an address it does not own"
+edm partefd 3 "an eventfd read at an address it does not own"
+edm partpoll 0 "No error has been found" 'efault = "node[0][0] < 1 or node[0][1] == 24"\nreached = "eventually node[0][0] == 1"'
+edm bighook 3 "writes 5000 bytes to its state hook in one call"
+edm floodhook 1 "more state records between two quiescent points than the checker's pipe holds"
+edm manyconn 1 "more than 16 connections wait at node 1"
+edm epollitems 1 "epoll instance watches more than 16 fds"
+edm negpoll 1 "polls -1 fds"
+for m in dup2 dup3 splice sendfile; do edm "$m" 3 "on checker-owned fd 500 is not modelled"; done
+for m in recvfrom sendto close fcntl readv writev pread pwrite dup ioctl; do
+	edm "worker-$m" 3 "a thread of a multi-threaded node uses kernel fd"
+done
+# the C library's own calls a worker may make: no refusal (INCOMPLETE,
+# since the fixture is not built with the race runtime)
+for m in stdin_tty stdout durable; do edm "worker-$m" 2 "without the race runtime"; done
+edm segvhandler 3 "raised signal 11 with a handler installed or the signal ignored"
+edm usr1 3 "stopped with signal 10"
+edm corners 0 "No error has been found" 'linux = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 21 and node[0][4] == 1 and node[0][5] == 1 and node[0][6] == 1 and node[0][7] == 1 and node[0][8] == 1)"\nreached = "eventually node[0][0] == 1"'
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
