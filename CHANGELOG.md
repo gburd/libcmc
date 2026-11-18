@@ -51,6 +51,20 @@ Process engine (`cmc --model-file`):
   part of each threaded tree.
   [proc_gate: dialexit, which needs both outcomes; badptr and dialexit
   each run 300 times and must give one verdict and count]
+- The file system is read-only to a node.  Every open is intercepted:
+  a read-only one goes to the kernel, and one with write access,
+  `O_CREAT`, `O_TRUNC`, `O_APPEND` or `O_TMPFILE` ends the check (exit
+  3) naming the path, except `/dev/null`.  The calls that change the
+  namespace or metadata are refused, as are `ftruncate`, `fallocate`,
+  `flock` and `io_uring_setup`.  On 2.0.0 a node that kept its state in
+  a file passed a crash test on bytes that outlived the crash outside
+  the world, and a worker's `lseek` on a shared fd was not seen.
+  `lseek`, `fsync`, `fdatasync`, `ftruncate` and `sync_file_range` on a
+  checker-owned fd get Linux's answers for a socket, and `fsync` of fd
+  193 succeeds.  A node built with `--coverage` is refused: it writes
+  its counters to files.  [proc_gate: files persist, lseek, config,
+  devnull, badpath, durfsync, sockerr (against a native run), and one
+  row for each refused call]
 - The default bound on a threaded program's tree search (1,000,000
   worlds) can be set at build time with `-DCMC_TREE_CAP=n`, so a gate
   reaches it: the search stops there INCOMPLETE (exit 2) and

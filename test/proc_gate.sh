@@ -59,7 +59,7 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack threadpos memrace syncpoint sendmsg; do
+for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
@@ -432,6 +432,68 @@ printf '[target]\nbinary = %s\nnodes = 1\nargs = worker\n[invariants]\nnever_b =
 printf '[target]\nbinary = %s\nnodes = 1\nargs = alone\n[invariants]\nback = "node[0][0] == 0 or node[0][1] == 120"\nreached = "eventually node[0][0] == 1"\n' "$B/proc/sendmsg" > "$OUT/sm-alone.model"
 expect_by 60 "sendmsg: a worker's send on a kernel socket is refused" 3 "uses kernel fd" --model-file "$OUT/sm-worker.model"
 expect_by 60 "sendmsg: one thread's send on a kernel socket runs" 0 "No error has been found" --model-file "$OUT/sm-alone.model"
+
+echo "-- the file system is read-only to a node (plan 2.1, item 2)"
+# Durable state goes through fd 193, which the world holds.  A file a
+# node writes would survive a crash and every later replay outside the
+# world: persist keeps its state in a file, crashes, restarts and reads
+# it back, which 2.0.0 passed; its write open is refused now.  A
+# read-only open, and lseek and fsync on it in a node with one thread,
+# still go to the kernel (config); a worker's lseek on an fd main also
+# uses is refused (lseek), as is every call that changes the namespace
+# or metadata.  On an owned socket lseek, fsync and the rest get Linux's
+# answer, which sockerr compares with a native run.
+FD=$OUT/files
+mkdir -p "$FD"
+printf 'k' > "$FD/config"
+filesm() {	# filesm NAME MODE PATH [extra model lines]: a model for files.c
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s %s\n[environment]\n%s\n[invariants]\n%s\n' \
+		"$B/proc/files" "$2" "$3" "$4" "$5" > "$OUT/fs-$1.model"
+}
+filesm persist persist "$FD/state" "crashes = 1
+restarts = 1" 'fresh = "node[0][0] != 2"'
+: > "$FD/state"
+expect_by 60 "files: a file written for state is refused"        3 "opens $FD/state for writing" --model-file "$OUT/fs-persist.model"
+filesm config config "$FD/config" "" 'read = "node[0][0] != 9 and (node[0][0] == 0 or node[0][1] == 107)"
+reached = "eventually node[0][0] == 1"'
+expect_by 60 "files: a configuration file is read, sought, fsynced" 0 "No error has been found" --model-file "$OUT/fs-config.model"
+filesm lseek lseek "$FD/config" "" 'any = "node[0][0] <= 1"'
+expect_by 60 "files: a worker's lseek on a shared fd is refused"  3 "uses kernel fd" --model-file "$OUT/fs-lseek.model"
+filesm devnull devnull "" "" 'wrote = "node[0][0] != 9"
+reached = "eventually node[0][0] == 1"'
+expect_by 60 "files: /dev/null may be opened for writing"        0 "No error has been found" --model-file "$OUT/fs-devnull.model"
+filesm badpath badpath "" "" 'any = "node[0][0] <= 1"'
+expect_by 60 "files: a path the checker cannot read is refused"  3 "cannot read" --model-file "$OUT/fs-badpath.model"
+filesm durfsync durfsync "" "" 'synced = "node[0][0] != 9"
+reached = "eventually node[0][0] == 1"'
+expect_by 60 "files: fsync of fd 193 succeeds"                   0 "No error has been found" --model-file "$OUT/fs-durfsync.model"
+# each call that changes the file system ends the check, and none of
+# them touches $FD/none (a refused call never runs)
+for m in open_wronly openat_rdwr openat_creat openat_trunc openat_append openat_tmpfile openat2 creat \
+	unlink unlinkat rename renameat renameat2 mkdir mkdirat rmdir link linkat symlink symlinkat \
+	truncate mknod mknodat chmod fchmodat fchmodat2 chown lchown fchownat utime utimes futimesat \
+	utimensat setxattr lsetxattr setxattrat removexattr lremovexattr removexattrat file_setattr; do
+	filesm "$m" "$m" "$FD/none" "" 'any = "node[0][0] <= 1"'
+	expect_by 60 "files: $m is refused" 3 "read-only to a node" --model-file "$OUT/fs-$m.model"
+done
+for m in fchmod fchown futimens fsetxattr fremovexattr ftruncate fallocate flock io_uring_setup; do
+	filesm "$m" "$m" "$FD/config" "" 'any = "node[0][0] <= 1"'
+	expect_by 60 "files: $m is refused" 3 "read-only to a node\|not modelled" --model-file "$OUT/fs-$m.model"
+done
+if [ -e "$FD/none" ]; then echo "FAIL files: a refused call made $FD/none"; fail=1; fi
+# Linux's errnos for lseek, fsync, fdatasync, ftruncate and
+# sync_file_range on a TCP socket, natively, then under cmc on an owned one
+native=$(cd "$FD" && timeout 30 "$B/proc/files" 0 sockerr 3>"$FD/sockerr.state" > /dev/null 2>&1; od -An -tu1 "$FD/sockerr.state" | tr -s ' \n' ' ' | sed 's/^ //')
+# the records are [2][0][0] then [8][1][seven codes]
+codes=$(echo "$native" | cut -d' ' -f6-12)
+if [ "$codes" = "1 2 2 2 2 1 2" ]; then echo "ok   files: Linux gives a socket ESPIPE, EINVAL x4, ESPIPE, EINVAL"
+else echo "FAIL files: Linux gave '$codes' for a socket, the fixture expects '1 2 2 2 2 1 2'"; fail=1; fi
+inv=""
+k=1
+for c in $codes; do inv="$inv and node[0][$k] == $c"; k=$((k + 1)); done
+filesm sockerr sockerr "" "" "linux = \"node[0][0] == 0 or (node[0][0] == 1$inv)\"
+reached = \"eventually node[0][0] == 1\""
+expect_by 60 "files: an owned socket gets Linux's errnos" 0 "No error has been found" --model-file "$OUT/fs-sockerr.model"
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

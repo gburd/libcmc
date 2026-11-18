@@ -80,9 +80,22 @@ than a write to stdout or stderr is refused before it runs, since its
 contents and offset are kernel state the world does not hold.  Other
 calls (the clock, `getrandom`, `mmap`, a write to stdout or stderr) are
 answered at once; the clock moves only on a TIMEOUT action, when every
-thread is parked.  Calls the seccomp filter does not intercept (`lseek`,
-`openat`, `fsync`, `flock`) reach the kernel unseen, like memory
-accesses.
+thread is parked.  That includes `lseek`, `fsync` and the other calls
+on an open file, which the filter intercepts.
+
+The file system is read-only to a node.  Its durable state goes through
+fd 193, which the world holds; a file it wrote would survive a crash
+and every later replay outside the world.  The filter intercepts every
+open (`open`, `openat`, `openat2`, `creat`, `open_by_handle_at`): a
+read-only one continues to the kernel, and one that could change a file
+ends the check with the path, which `fs_path()` reads from the node a
+page at a time.  The calls that change the namespace or metadata, and
+`io_uring_setup` (its operations reach the kernel with no system call),
+are refused.  `lseek`, `fsync` and the rest answer a checker-owned fd as
+Linux answers a socket.  The filter grew past a hundred tests; each
+`OWN()` is a self-contained equality test with jump offsets 0 and 1, so
+its length never reaches classic BPF's 8-bit jump limit, and proc_gate
+has a row per refused call to show each one routes.
 
 `sendmsg` on a kernel fd needs a second filter.  The launch child itself
 sends the listener to the checker with `sendmsg` on a socketpair, after

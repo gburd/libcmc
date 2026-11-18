@@ -83,6 +83,22 @@
 #define SECCOMP_USER_NOTIF_FLAG_CONTINUE (1UL << 0)
 #endif
 static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(SYS_seccomp, op, flags, a); }
+/* file system calls newer than some C libraries' headers (x86-64 numbers) */
+#ifndef SYS_openat2
+#define SYS_openat2 437
+#endif
+#ifndef SYS_fchmodat2
+#define SYS_fchmodat2 452
+#endif
+#ifndef SYS_setxattrat
+#define SYS_setxattrat 463
+#endif
+#ifndef SYS_removexattrat
+#define SYS_removexattrat 466
+#endif
+#ifndef SYS_file_setattr
+#define SYS_file_setattr 469
+#endif
 
 #define BASE 20000				/* node i listens on 127.0.0.1:BASE+i */
 #define MAXNODES 8
@@ -905,6 +921,25 @@ install_filter(void)
 		OWN(SYS_sendmmsg), OWN(SYS_recvmmsg), OWN(SYS_shutdown), OWN(SYS_dup),
 		OWN(SYS_dup2), OWN(SYS_dup3), OWN(SYS_getsockopt), OWN(SYS_getsockname),
 		OWN(SYS_getpeername), OWN(SYS_ioctl), OWN(SYS_splice), OWN(SYS_sendfile),
+		/* the file system, which is read-only to a node (fs_call): every
+		 * open, so one that can change a file is refused; the calls that
+		 * change the namespace or a file's metadata; and the calls on an
+		 * open file that the model answers for its own fds.  Each OWN is
+		 * its own two-instruction test with jumps of 0 and 1, so the list
+		 * can grow without reaching classic BPF's 8-bit jump offsets. */
+		OWN(SYS_open), OWN(SYS_openat), OWN(SYS_openat2), OWN(SYS_creat),
+		OWN(SYS_unlink), OWN(SYS_unlinkat), OWN(SYS_rename), OWN(SYS_renameat),
+		OWN(SYS_renameat2), OWN(SYS_mkdir), OWN(SYS_mkdirat), OWN(SYS_rmdir),
+		OWN(SYS_link), OWN(SYS_linkat), OWN(SYS_symlink), OWN(SYS_symlinkat),
+		OWN(SYS_truncate), OWN(SYS_mknod), OWN(SYS_mknodat),
+		OWN(SYS_chmod), OWN(SYS_fchmod), OWN(SYS_fchmodat), OWN(SYS_fchmodat2),
+		OWN(SYS_chown), OWN(SYS_fchown), OWN(SYS_lchown), OWN(SYS_fchownat),
+		OWN(SYS_utime), OWN(SYS_utimes), OWN(SYS_futimesat), OWN(SYS_utimensat),
+		OWN(SYS_setxattr), OWN(SYS_lsetxattr), OWN(SYS_fsetxattr), OWN(SYS_setxattrat),
+		OWN(SYS_removexattr), OWN(SYS_lremovexattr), OWN(SYS_fremovexattr), OWN(SYS_removexattrat),
+		OWN(SYS_file_setattr), OWN(SYS_open_by_handle_at), OWN(SYS_io_uring_setup),
+		OWN(SYS_lseek), OWN(SYS_fsync), OWN(SYS_fdatasync), OWN(SYS_ftruncate),
+		OWN(SYS_fallocate), OWN(SYS_flock), OWN(SYS_sync_file_range),
 #undef OWN
 		/* sendmsg: notify only when its fd (the low word of args[0]) is a
 		 * checker-owned one, 500 or above; install_trace_filter() catches
@@ -1280,6 +1315,153 @@ refuse_on_owned(const Node *nd, long nr, const __u64 *a)
 		die(3, "node %d: system call %ld on checker-owned fd %d is not modelled", nd->id, nr, fd);
 }
 
+/* The file system is read-only to a node.  Its durable state goes
+ * through fd 193, which the world holds and a crash keeps; a file a node
+ * wrote would survive into the next replay and past a crash, outside the
+ * world, so a replay could diverge or a crash test pass on bytes the
+ * model never accounted for.
+ *
+ * The path argument of a call that opens or names a file is read from
+ * the node's memory.  A path the checker cannot read whole (an unmapped
+ * pointer, or longer than PATH_MAX) is refused too, rather than guessed:
+ * the kernel would fail it, or open something. */
+#define FS_PATHMAX 4096
+static const char *
+fs_path(const Node *nd, uint64_t addr, char *buf)
+{
+	size_t got = 0;
+	/* a page at a time: process_vm_readv stops at the first unmapped
+	 * page, so a path near the end of a mapping still reads */
+	while (got < FS_PATHMAX)
+	{
+		size_t chunk = 4096 - (size_t) ((addr + got) & 4095);
+		if (chunk > FS_PATHMAX - got) chunk = FS_PATHMAX - got;
+		size_t k = cr_read(nd->pid, addr + got, buf + got, chunk);
+		if (memchr(buf + got, 0, k)) return buf;
+		if (k < chunk) break;
+		got += k;
+	}
+	die(3, "node %d: a file system call passes a path the checker cannot read", nd->id);
+	return NULL;
+}
+
+/* An open that cannot change a file: read-only access, and none of the
+ * flags that create, truncate or append to one.  O_TMPFILE contains
+ * O_DIRECTORY, so it is tested whole. */
+static int
+open_readonly(uint64_t flags)
+{
+	if ((flags & O_ACCMODE) != O_RDONLY) return 0;
+	if (flags & (O_CREAT | O_TRUNC | O_APPEND)) return 0;
+	return (flags & O_TMPFILE) != O_TMPFILE;
+}
+
+/* Answer a file system call (fs_call is 1 for it), or end the check.
+ *   open, openat, openat2, creat: a read-only open goes to the kernel;
+ *     any other, except one of /dev/null, is refused, naming the path.
+ *   the calls that change the namespace or metadata: refused, naming
+ *     the path when there is one; open_by_handle_at like an open; and
+ *     io_uring_setup, whose operations bypass seccomp.
+ *   lseek, fsync, fdatasync, ftruncate, fallocate, flock and
+ *     sync_file_range on a checker-owned fd: Linux's answer for a
+ *     socket, measured on Linux 7.3 for each (lseek ESPIPE; fsync,
+ *     fdatasync and ftruncate EINVAL; sync_file_range ESPIPE), or a
+ *     refusal where the answer depends on more than the fd being a
+ *     socket (fallocate, flock).  fsync and fdatasync of fd 193
+ *     succeed: the record is durable when written.  On a kernel fd
+ *     lseek, fsync, fdatasync and sync_file_range go to the kernel
+ *     (kernel_fd_call() refuses them first in a node with more than one
+ *     thread).  ftruncate and fallocate are refused there, since the
+ *     only file a node can have open for writing is one it inherited;
+ *     so is flock, which works on a read-only fd and leaves a lock other
+ *     nodes see, kernel state the world does not hold.
+ * Returns 1 if nr is one of these (g_resp holds the answer), else 0. */
+static int
+fs_call(const Node *nd, long nr, const __u64 *a)
+{
+	char path[FS_PATHMAX];
+	uint64_t flags;
+	int fd = (int) a[0];
+
+	switch (nr)
+	{
+		case SYS_open: flags = a[1]; fs_path(nd, a[0], path); break;
+		case SYS_openat: flags = a[2]; fs_path(nd, a[1], path); break;
+		case SYS_creat: flags = O_CREAT | O_WRONLY | O_TRUNC; fs_path(nd, a[0], path); break;
+		case SYS_openat2:
+		{
+			struct { uint64_t flags, mode, resolve; } how;
+			if (a[3] < sizeof how || cr_read(nd->pid, a[2], &how, sizeof how) != sizeof how)
+				die(3, "node %d: openat2 passes an open_how the checker cannot read", nd->id);
+			flags = how.flags; fs_path(nd, a[1], path);
+			break;
+		}
+		case SYS_unlink: case SYS_rmdir: case SYS_mkdir: case SYS_truncate: case SYS_mknod:
+		case SYS_chmod: case SYS_chown: case SYS_lchown: case SYS_utime: case SYS_utimes:
+		case SYS_rename: case SYS_link: case SYS_symlink:
+		case SYS_setxattr: case SYS_lsetxattr: case SYS_removexattr: case SYS_lremovexattr:
+			die(3, "node %d: system call %ld changes the file system at %s; the file system is read-only to a node (durable state goes through fd %d)",
+				nd->id, nr, fs_path(nd, nr == SYS_symlink ? a[1] : a[0], path), DURABLE_FD);
+			return 1;
+		case SYS_unlinkat: case SYS_mkdirat: case SYS_mknodat: case SYS_fchmodat: case SYS_fchmodat2:
+		case SYS_fchownat: case SYS_futimesat: case SYS_renameat: case SYS_renameat2: case SYS_linkat:
+		case SYS_symlinkat: case SYS_setxattrat: case SYS_removexattrat:
+			die(3, "node %d: system call %ld changes the file system at %s; the file system is read-only to a node (durable state goes through fd %d)",
+				nd->id, nr, fs_path(nd, nr == SYS_symlinkat ? a[2] : a[1], path), DURABLE_FD);
+			return 1;
+		case SYS_utimensat:
+			/* a NULL path is futimens(), on the fd itself */
+			if (!a[1]) die(3, "node %d: futimens on fd %d changes the file system; the file system is read-only to a node", nd->id, fd);
+			die(3, "node %d: system call %ld changes the file system at %s; the file system is read-only to a node (durable state goes through fd %d)",
+				nd->id, nr, fs_path(nd, a[1], path), DURABLE_FD);
+			return 1;
+		case SYS_fchmod: case SYS_fchown: case SYS_fsetxattr: case SYS_fremovexattr:
+			die(3, "node %d: system call %ld on fd %d changes the file system; the file system is read-only to a node", nd->id, nr, fd);
+			return 1;
+		case SYS_file_setattr:
+			die(3, "node %d: file_setattr changes the file system at %s; the file system is read-only to a node", nd->id, fs_path(nd, a[1], path));
+			return 1;
+		case SYS_open_by_handle_at:
+			if (!open_readonly(a[2]))
+				die(3, "node %d: opens a file by handle for writing (flags %#llo); the file system is read-only to a node", nd->id, (unsigned long long) a[2]);
+			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+			return 1;
+		case SYS_io_uring_setup:
+			/* io_uring's operations reach the kernel without a system call
+			 * each, so seccomp never sees them: a socket, a file write, an
+			 * open would all go unchecked */
+			die(3, "node %d: io_uring is not modelled (its operations bypass the checker)", nd->id);
+			return 1;
+		case SYS_lseek: case SYS_fsync: case SYS_fdatasync: case SYS_ftruncate:
+		case SYS_fallocate: case SYS_flock: case SYS_sync_file_range:
+			if (fd == DURABLE_FD && (nr == SYS_fsync || nr == SYS_fdatasync)) { g_resp->val = 0; return 1; }
+			if (fd >= 500 && fd < nd->next_fd)
+			{
+				if (nr == SYS_lseek) { g_resp->error = (int) a[2] > 4 ? -EINVAL : -ESPIPE; return 1; }
+				if (nr == SYS_fsync || nr == SYS_fdatasync || nr == SYS_ftruncate) { g_resp->error = -EINVAL; return 1; }
+				if (nr == SYS_sync_file_range) { g_resp->error = (a[3] & ~7ULL) ? -EINVAL : -ESPIPE; return 1; }
+				die(3, "node %d: system call %ld on checker-owned fd %d is not modelled", nd->id, nr, fd);
+			}
+			if (nr == SYS_ftruncate || nr == SYS_fallocate)
+				die(3, "node %d: system call %ld on fd %d changes a file; the file system is read-only to a node", nd->id, nr, fd);
+			if (nr == SYS_flock)
+				die(3, "node %d: flock on fd %d is not modelled (a lock is kernel state other nodes see)", nd->id, fd);
+			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+			return 1;
+		default:
+			return 0;
+	}
+	/* an open */
+	if (open_readonly(flags) || !strcmp(path, "/dev/null"))
+	{
+		g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+		return 1;
+	}
+	die(3, "node %d: opens %s for writing (flags %#llo); the file system is read-only to a node (durable state goes through fd %d)",
+		nd->id, path, (unsigned long long) flags, DURABLE_FD);
+	return 1;
+}
+
 /* A node that forks becomes two processes the model cannot tell apart,
  * sharing one listener and its connections, and the child survives the
  * check.  End the check before the fork happens (the call is never
@@ -1452,9 +1634,9 @@ visible(long nr, const __u64 *a)
  * stdout or stderr, which no thread reads back.  A negative fd is the
  * kernel's EBADF, which shares nothing.  A sendmsg below fd 500 is not
  * notified but stopped by the second filter, and trace_stop() refuses it
- * the same way.  Calls the filter does not intercept (lseek, openat,
- * fsync, flock) reach the kernel unseen, like memory accesses, and are
- * outside the model (cmc(7)).
+ * the same way.  lseek, fsync, fdatasync, ftruncate, fallocate, flock and
+ * sync_file_range count too: two threads that share a file share its
+ * offset.
  *
  * The C library itself makes two such calls from a worker: the first
  * output on a stdio stream asks whether it is a terminal (ioctl TCGETS or
@@ -1487,6 +1669,11 @@ kernel_fd_call(long nr, const __u64 *a)
 		case SYS_getpeername: case SYS_splice: case SYS_sendfile:
 		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
 		case SYS_accept: case SYS_accept4:
+			break;
+		case SYS_lseek: case SYS_fsync: case SYS_fdatasync: case SYS_ftruncate:
+		case SYS_fallocate: case SYS_flock: case SYS_sync_file_range:
+			/* the checker answers fsync and fdatasync of the durable record */
+			if (fd == DURABLE_FD && (nr == SYS_fsync || nr == SYS_fdatasync)) return 0;
 			break;
 		default:
 			return 0;
@@ -2186,6 +2373,21 @@ serve(Node *nd, Thread *th)
 		}
 		case SYS_fork: case SYS_vfork:
 			refuse_fork(nd);
+			break;
+		case SYS_open: case SYS_openat: case SYS_openat2: case SYS_creat:
+		case SYS_unlink: case SYS_unlinkat: case SYS_rename: case SYS_renameat:
+		case SYS_renameat2: case SYS_mkdir: case SYS_mkdirat: case SYS_rmdir:
+		case SYS_link: case SYS_linkat: case SYS_symlink: case SYS_symlinkat:
+		case SYS_truncate: case SYS_mknod: case SYS_mknodat:
+		case SYS_chmod: case SYS_fchmod: case SYS_fchmodat: case SYS_fchmodat2:
+		case SYS_chown: case SYS_fchown: case SYS_lchown: case SYS_fchownat:
+		case SYS_utime: case SYS_utimes: case SYS_futimesat: case SYS_utimensat:
+		case SYS_setxattr: case SYS_lsetxattr: case SYS_fsetxattr: case SYS_setxattrat:
+		case SYS_removexattr: case SYS_lremovexattr: case SYS_fremovexattr: case SYS_removexattrat:
+		case SYS_file_setattr: case SYS_open_by_handle_at: case SYS_io_uring_setup:
+		case SYS_lseek: case SYS_fsync: case SYS_fdatasync: case SYS_ftruncate:
+		case SYS_fallocate: case SYS_flock: case SYS_sync_file_range:
+			fs_call(nd, nr, a);
 			break;
 		case SYS_clone: case SYS_clone3:
 		{

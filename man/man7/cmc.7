@@ -155,15 +155,79 @@ runs, since its contents and offset are not part of the world.
 That includes
 .Fn sendmsg
 on a kernel socket.
+That includes
+.Fn lseek ,
+.Fn fsync
+and the other calls on an open file, since two threads that share a
+file share its offset.
 Writes to stdout and stderr are allowed, as is the C library's query
 of whether one of them is a terminal.
-Calls the checker does not intercept (such as
-.Fn lseek ,
+.Pp
+The file system is read-only to a node: durable state goes through
+descriptor 193, which the world holds and a crash keeps, and a file a
+node wrote would outlive a crash and every replay outside the world.
+.Fn open ,
 .Fn openat ,
+.Fn openat2
+and
+.Fn creat
+are intercepted.
+A read-only open goes to the kernel (the loader, the C library's locale
+and time zone files, a configuration file); an open with write access,
+.Dv O_CREAT ,
+.Dv O_TRUNC ,
+.Dv O_APPEND
+or
+.Dv O_TMPFILE
+ends the check (exit 3), naming the path, unless the path is
+.Pa /dev/null .
+So does a path the checker cannot read from the node's memory.
+A node built with
+.Fl -coverage
+is refused for that reason: its counters are written to files at exit.
+The calls that change the namespace or a file's metadata are refused
+(exit 3): the
+.Fn unlink ,
+.Fn rename ,
+.Fn mkdir ,
+.Fn rmdir ,
+.Fn link ,
+.Fn symlink ,
+.Fn mknod ,
+.Fn truncate ,
+.Fn chmod ,
+.Fn chown ,
+.Fn utime
+and
+.Fn setxattr
+families,
+.Fn ftruncate
+and
+.Fn fallocate
+on any file,
+.Fn flock ,
+and
+.Fn io_uring_setup ,
+whose operations would bypass the checker.
+On a descriptor the checker owns,
+.Fn lseek
+gets
+.Er ESPIPE ,
+.Fn fsync ,
+.Fn fdatasync
+and
+.Fn ftruncate
+get
+.Er EINVAL ,
+and
+.Fn sync_file_range
+gets
+.Er ESPIPE ,
+as a socket does on Linux;
 .Fn fsync
 and
-.Fn flock )
-reach the kernel unseen, as memory accesses do.
+.Fn fdatasync
+of descriptor 193 succeed.
 .Pp
 A world in which a live node has run more than one thread is never
 merged with another: it is neither looked up in nor added to the set of

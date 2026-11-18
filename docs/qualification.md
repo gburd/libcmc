@@ -30,7 +30,8 @@ model gives.  None of this page makes a pass mean more than that.
 ## Process engine (`cmc --model-file`)
 
 The engine runs each node as a real process under seccomp user
-notification and answers the system calls below.  `readv`, `writev`,
+notification and answers the system calls below.  The file system is
+read-only to a node (see below).  `readv`, `writev`,
 `pread`, `pwrite`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
 `dup` family, `getsockopt`, `getsockname`, `getpeername`, `ioctl`,
 `splice` and `sendfile` are refused on a checker-owned fd (exit 3), and
@@ -91,10 +92,23 @@ in the kernel, untouched.
 | memory accesses between two choice points, with the race runtime (`-fsanitize=thread`, `libcmc-race.a`) | checked | a happens-before race is a violation with both code addresses; atomics are choice points; code outside the instrumentation (other libraries, gcc's `memcpy`) is not checked; an unmodelled edge gives a false alarm, never a missed race | proc_gate memrace, raceemit |
 | memory accesses between two choice points, without the race runtime | INCOMPLETE | a multi-threaded node cannot pass, and an unmet `eventually` is INCOMPLETE | proc_gate memrace, twothread |
 | an atomic weaker than `seq_cst` | INCOMPLETE | the search runs a sequentially consistent machine; a pass that used one is INCOMPLETE | proc_gate memrace relaxedadd |
-| calls the filter does not intercept (`lseek`, `openat`, `fsync`, `flock`) | not modelled | they reach the kernel unseen and are not choice points, like memory accesses | (boundary; no fixture) |
+| `lseek`, `fsync`, `fdatasync`, `sync_file_range` on a kernel fd in a node with more than one thread | refused | exit 3 before it runs, like any call on a kernel fd | proc_gate files lseek |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |
 | `fork`, `vfork`, `clone` without `CLONE_THREAD` | refused | exit 3, before the child exists | proc_gate "a fork is refused" |
 | a `FUTEX_WAKE` of a strict subset of several waiters | refused | exit 1 | (code; no fixture yet) |
+
+### The file system
+
+| construct | status | limit | gate |
+|---|---|---|---|
+| `open`, `openat`, `openat2`, `creat`, `open_by_handle_at` read-only | exact | the kernel opens the file; the file system is read-only to a node, so what it reads is the same on every replay | proc_gate files config |
+| an open for writing, or with `O_CREAT`, `O_TRUNC`, `O_APPEND` or `O_TMPFILE` | refused | exit 3, naming the path; `/dev/null` is allowed | proc_gate files persist, devnull, open_wronly through creat |
+| a path the checker cannot read from the node's memory | refused | exit 3 | proc_gate files badpath |
+| `unlink`, `rename`, `mkdir`, `rmdir`, `link`, `symlink`, `mknod`, `truncate`, `chmod`, `chown`, `utime`, `setxattr` and `removexattr` families, `file_setattr` | refused | exit 3 | proc_gate files, one row per call |
+| `ftruncate`, `fallocate`, `flock` on a kernel fd; `io_uring_setup` | refused | exit 3 | proc_gate files ftruncate, fallocate, flock, io_uring_setup |
+| `lseek`, `fsync`, `fdatasync`, `sync_file_range` on a kernel fd, one thread | exact | the kernel answers | proc_gate files config |
+| `lseek`, `fsync`, `fdatasync`, `ftruncate`, `sync_file_range` on a checker-owned fd | exact | Linux's answer for a socket (`ESPIPE`, `EINVAL`); `fallocate` and `flock` there are refused | proc_gate files sockerr, against a native run |
+| `fsync`, `fdatasync` of fd 193 | exact | succeed: the record is durable when written | proc_gate files durfsync |
 
 ### State, search and verdicts
 
