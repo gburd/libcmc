@@ -731,6 +731,11 @@ edm pidfd 3 "reaches another process through a pidfd"
 edm killself 0 "No error has been found" 'sent = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 1)"\nreached = "eventually node[0][0] == 1"'
 edm segvhandler 3 "raised signal 11 with a handler installed or the signal ignored"
 edm usr1 3 "stopped with signal 10"
+edm segv 1 "killed by signal 11"
+edm fpe 1 "killed by signal 8"
+edm bus 1 "killed by signal 7"
+edm ill 1 "killed by signal 4"
+edm bothfault 1 "killed by signal 6"
 edm corners 0 "No error has been found" 'linux = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 21 and node[0][4] == 1 and node[0][5] == 1 and node[0][6] == 1 and node[0][7] == 1 and node[0][8] == 1)"\nreached = "eventually node[0][0] == 1"'
 edm threads 1 "creates more than 8 threads"
 edm badsocket 3 "is not modelled (only AF_INET, SOCK_STREAM)"

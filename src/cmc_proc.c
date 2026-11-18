@@ -2816,7 +2816,7 @@ trace_stop(Node *nd, pid_t tid)
 {
 	struct user_regs_struct regs;
 	long nr = -1;
-	if (ptrace(PTRACE_GETREGS, tid, 0, &regs) == 0) nr = (long) regs.orig_rax;
+	if (ptrace(PTRACE_GETREGS, tid, 0, &regs) == 0) nr = (long) regs.orig_rax;	/* GCOVR_EXCL_LINE: the thread is in the stop just reported */
 	if (nr == SYS_execve || nr == SYS_execveat)
 	{
 		/* the first is the launch's own exec of the node's binary; any
@@ -2833,7 +2833,7 @@ trace_stop(Node *nd, pid_t tid)
 		int fd = nr == SYS_sendmsg ? (int) regs.rdi : -1;
 		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %d); only checker-owned fds and the state hook are modelled between threads", nd->id, fd, SYS_sendmsg);
 	}
-	if (ptrace(PTRACE_CONT, tid, 0, 0) != 0)
+	if (ptrace(PTRACE_CONT, tid, 0, 0) != 0)	/* GCOVR_EXCL_LINE: the thread is in the stop just reported */
 		die(1, "node %d: cannot resume thread %d at a sendmsg: %s", nd->id, (int) tid, strerror(errno));
 }
 

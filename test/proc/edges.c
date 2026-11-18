@@ -131,6 +131,8 @@ main(int argc, char **argv)
 	const char *mode = argc > 2 ? argv[2] : "";
 
 	emit(0);
+	if (!strcmp(mode, "bothfault"))
+		abort();
 	if (id != 0)
 	{
 		int			ls = socket(AF_INET, SOCK_STREAM, 0);
@@ -275,6 +277,16 @@ main(int argc, char **argv)
 	}
 	else if (!strcmp(mode, "usr1"))
 		raise(SIGUSR1);
+	else if (!strcmp(mode, "segv"))
+		raise(SIGSEGV);
+	else if (!strcmp(mode, "fpe"))
+		raise(SIGFPE);
+	else if (!strcmp(mode, "bus"))
+		raise(SIGBUS);
+	else if (!strcmp(mode, "ill"))
+		raise(SIGILL);
+	else if (!strcmp(mode, "bothfault"))
+		abort();				/* on both nodes (see main): one fault is reported */
 	else if (!strcmp(mode, "threads"))
 	{
 		/* more threads than the checker tracks */
