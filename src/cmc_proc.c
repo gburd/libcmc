@@ -1375,14 +1375,12 @@ static void
 refuse_on_owned(const Node *nd, long nr, const __u64 *a)
 {
 	int fd = (int) a[0];
-	int owned = fd >= 500 && fd < nd->next_fd;
-	if ((nr == SYS_dup2 || nr == SYS_dup3) && (int) a[1] >= 500 && (int) a[1] < nd->next_fd) owned = 1;
-	if (nr == SYS_splice || nr == SYS_sendfile)
-	{
-		int other = nr == SYS_splice ? (int) a[2] : (int) a[1];
-		if (other >= 500 && other < nd->next_fd) owned = 1;
-	}
-	if (owned)
+	/* the call's other fd: dup2's and dup3's target, splice's output,
+	 * sendfile's input */
+	int other = nr == SYS_dup2 || nr == SYS_dup3 ? (int) a[1] : nr == SYS_splice ? (int) a[2] :
+		nr == SYS_sendfile ? (int) a[1] : -1;
+	if (!(fd >= 500 && fd < nd->next_fd) && other >= 500 && other < nd->next_fd) fd = other;
+	if (fd >= 500 && fd < nd->next_fd)
 		die(3, "node %d: system call %ld on checker-owned fd %d is not modelled", nd->id, nr, fd);
 }
 
