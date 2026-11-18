@@ -585,6 +585,13 @@ check_invariant(const char *expr)
  * fd -- it is how an event loop finds the handler for the fd -- so the
  * checker stores it and writes it back unchanged; it is never a search
  * distinction (an ASLR pointer must not leak into the fingerprint). */
+/* owned fds per node (numbered from 500, never reused within a process) */
+#define MAXOWNED 256
+/* fdflag bits */
+#define FD_NB 1					/* O_NONBLOCK */
+#define FD_CX 2					/* FD_CLOEXEC */
+#define FD_PLAIN 4				/* a socket() not yet connected or listening */
+
 typedef struct {
 	int epfd;					/* the virtual fd epoll_create1 returned */
 	int nit;					/* entries in the interest list */
@@ -639,6 +646,10 @@ typedef struct {
 	int cfd[MAXCONN]; int cpeer[MAXCONN]; int cnonblock[MAXCONN]; int ccloexec[MAXCONN]; int nc;
 	int cconn[MAXCONN]; int cend[MAXCONN];	/* each fd's connection (-1: a timer fd) and which end this node holds */
 	int ls_nonblock; int ls_cloexec;	/* O_NONBLOCK / FD_CLOEXEC on the listener socket */
+	/* the file flags of each owned fd (index fd - 500) that is neither a
+	 * connection nor the listener: a socket not yet dialled or listening
+	 * (FD_PLAIN), an eventfd's FD_CLOEXEC, an epoll instance's flags */
+	unsigned char fdflag[MAXOWNED];
 	int listener_fd;			/* the fd passed to listen(), or -1; the server's accept fd */
 	int pend[MAXCONN]; int npend;	/* connections waiting at this node's listener, oldest first */
 	int efd[MAXEFD]; uint64_t efdval[MAXEFD]; int efdnb[MAXEFD]; int nefd;
@@ -804,6 +815,33 @@ static Conn conns[MAXCONNS];
 
 /* record which connection end a node's fd is; the peer is kept for
  * naming and for the fd's class in the world encoding */
+/* What poll reports for POLLOUT on fd, as Linux does: a connection and
+ * an eventfd are writable (the model has no full send buffer); a plain
+ * socket, never connected, reports POLLOUT with POLLHUP; the listener
+ * and an epoll instance are never writable.  fd_flags() and cfd_slot()
+ * are defined below. */
+static unsigned writable(Node *nd, int fd);
+
+/* the fdflag entry of owned fd fd, ending the check past MAXOWNED */
+static unsigned char *
+fd_flags(Node *nd, int fd)
+{
+	if (fd < 500 || fd - 500 >= MAXOWNED) die(1, "node %d opens more than %d checker-owned fds", nd->id, MAXOWNED);
+	return &nd->fdflag[fd - 500];
+}
+
+static int cfd_slot(Node *nd, int fd);
+static int efd_slot(Node *nd, int fd);
+
+static unsigned
+writable(Node *nd, int fd)
+{
+	if (fd < 500 || fd >= nd->next_fd) return 0;
+	if (cfd_slot(nd, fd) >= 0 || efd_slot(nd, fd) >= 0) return POLLOUT;
+	if (fd == nd->listener_fd) return 0;
+	return (*fd_flags(nd, fd) & FD_PLAIN) ? POLLOUT | POLLHUP : 0;
+}
+
 static void cfd_set(Node *nd, int fd, int peer, int conn, int end){ if(nd->nc>=MAXCONN) die(1,"node %d has more than %d connections",nd->id,MAXCONN); nd->cfd[nd->nc]=fd; nd->cpeer[nd->nc]=peer; nd->cconn[nd->nc]=conn; nd->cend[nd->nc]=end; nd->cnonblock[nd->nc]=0; nd->ccloexec[nd->nc]=0; nd->nc++; }
 /* forget a node's fd slot k, keeping the rest in open order */
 static void
@@ -1115,6 +1153,7 @@ launch(Node *nd)
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
+	memset(nd->fdflag, 0, sizeof nd->fdflag);
 	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0; nd->race_ok = 0;
 	return 0;
 }
@@ -1885,7 +1924,9 @@ serve(Node *nd, Thread *th)
 			int dom = (int) a[0], type = (int) a[1];
 			if (dom != AF_INET || (type & ~SOCK_CLOEXEC) != SOCK_STREAM)
 				die(3, "node %d: socket(%d, %#x) is not modelled (only AF_INET, SOCK_STREAM)", nd->id, dom, type);
-			g_resp->val = nd->next_fd++; break;
+			int fd = nd->next_fd++;
+			*fd_flags(nd, fd) = FD_PLAIN | ((type & SOCK_CLOEXEC) ? FD_CX : 0);
+			g_resp->val = fd; break;
 		}
 		case SYS_readv: case SYS_writev: case SYS_preadv: case SYS_pwritev:
 		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg: case SYS_sendmsg:
@@ -1947,7 +1988,17 @@ serve(Node *nd, Thread *th)
 			g_resp->val = (long) n; break;
 		}
 		case SYS_setsockopt: case SYS_bind: g_resp->val = 0; break;
-		case SYS_listen: nd->listener_fd = (int) a[0]; g_resp->val = 0; break;
+		case SYS_listen:
+		{
+			/* the socket's flags, set while it was plain, are the
+			 * listener's from now on */
+			int fd = (int) a[0];
+			unsigned char *f = fd_flags(nd, fd);
+			nd->listener_fd = fd;
+			nd->ls_nonblock = (*f & FD_NB) != 0; nd->ls_cloexec = (*f & FD_CX) != 0;
+			*f = 0;
+			g_resp->val = 0; break;
+		}
 		case SYS_close:
 		{
 			/* a checker-owned fd: close this end of its connection (a FIN,
@@ -1963,6 +2014,8 @@ serve(Node *nd, Thread *th)
 				cfd_del(nd, cs);
 				if (c >= 0) end_close(c, e, 0);
 			}
+			else if (fd < nd->next_fd && fd - 500 < MAXOWNED && (nd->fdflag[fd - 500] & FD_PLAIN))
+				nd->fdflag[fd - 500] = 0;	/* a plain socket closed is gone */
 			g_resp->val = 0; break;
 		}
 		case SYS_connect:
@@ -1983,6 +2036,12 @@ serve(Node *nd, Thread *th)
 			/* a socket already dialled: a refused one may be dialled again
 			 * (its slot is reused), a connected one is EISCONN */
 			int fd = (int) a[0], cs = cfd_slot(nd, fd);
+			unsigned char plain = cs >= 0 ? 0 : *fd_flags(nd, fd);
+			/* On Linux a non-blocking connect returns EINPROGRESS and
+			 * completes later, read with getsockopt(SO_ERROR); neither is
+			 * modelled, so it ends the check rather than answering 0. */
+			if (plain & FD_NB)
+				die(3, "node %d: connect on non-blocking fd %d; a non-blocking connect (EINPROGRESS) is not modelled", nd->id, fd);
 			if (cs >= 0)
 			{
 				int old = nd->cconn[cs];
@@ -1998,6 +2057,7 @@ serve(Node *nd, Thread *th)
 				int c = conn_new(nd->id, peer);
 				conns[c].closed[1] = conns[c].gone[1] = 1; conns[c].refused = 1;
 				cfd_set(nd, fd, peer, c, 0);
+				if (plain) { nd->ccloexec[nd->nc - 1] = (plain & FD_CX) != 0; *fd_flags(nd, fd) = 0; }
 				g_resp->error = -ECONNREFUSED; break;
 			}
 			if (N[peer].npend >= MAXCONN) die(1, "more than %d connections wait at node %d", MAXCONN, peer);
@@ -2006,12 +2066,13 @@ serve(Node *nd, Thread *th)
 			/* the node sends/recvs on the socket() fd (connect's a[0]);
 			 * connect() itself returns 0 */
 			cfd_set(nd, fd, peer, c, 0);
+			if (plain) { nd->ccloexec[nd->nc - 1] = (plain & FD_CX) != 0; *fd_flags(nd, fd) = 0; }
 			g_resp->val = 0; break;
 		}
 		case SYS_accept: case SYS_accept4:
-			/* accept4's flags: SOCK_CLOEXEC is inert (a node never execs),
-			 * and SOCK_NONBLOCK is not carried onto the new fd, so it is
-			 * refused rather than ignored */
+			/* accept4's flags: SOCK_CLOEXEC sets the new fd's FD_CLOEXEC
+			 * (accept_from), and SOCK_NONBLOCK is not carried onto the new
+			 * fd, so it is refused rather than ignored */
 			if (nr == SYS_accept4 && (a[3] & ~(uint64_t) SOCK_CLOEXEC))
 				die(3, "node %d: accept4 flags %#llx are not modelled (set O_NONBLOCK with fcntl())", nd->id, (unsigned long long) a[3]);
 			/* A non-blocking listener with no connection queued returns
@@ -2195,15 +2256,34 @@ serve(Node *nd, Thread *th)
 			 * complete model, so it is an error, never a silent pass. */
 			int fd = (int) a[0]; int cmd = (int) a[1];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
+			/* each kind of fd keeps its own flags: a connection's in its
+			 * slot, the listener's on the node, an eventfd's O_NONBLOCK with
+			 * its counter, and the rest (FD_CLOEXEC of an eventfd, a plain
+			 * socket's and an epoll instance's flags) in fdflag */
 			int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
-			int *nbp = cs >= 0 ? &nd->cnonblock[cs] : es >= 0 ? &nd->efdnb[es] : &nd->ls_nonblock;
-			int *clp = cs >= 0 ? &nd->ccloexec[cs] : es >= 0 ? NULL : &nd->ls_cloexec;
-			if (cmd == F_GETFL) g_resp->val = *nbp ? O_NONBLOCK : 0;
-			else if (cmd == F_SETFL) { *nbp = (a[2] & O_NONBLOCK) ? 1 : 0; g_resp->val = 0; }
-			else if (cmd == F_GETFD) g_resp->val = (clp && *clp) ? FD_CLOEXEC : 0;
-			else if (cmd == F_SETFD) { if (clp) *clp = (a[2] & FD_CLOEXEC) ? 1 : 0; g_resp->val = 0; }
+			int nb, cx;
+			if (cs >= 0) { nb = nd->cnonblock[cs]; cx = nd->ccloexec[cs]; }
+			else if (fd == nd->listener_fd) { nb = nd->ls_nonblock; cx = nd->ls_cloexec; }
+			else
+			{
+				unsigned char f = *fd_flags(nd, fd);
+				nb = es >= 0 ? nd->efdnb[es] : (f & FD_NB) != 0;
+				cx = (f & FD_CX) != 0;
+			}
+			if (cmd == F_GETFL) { g_resp->val = nb ? O_NONBLOCK : 0; break; }
+			if (cmd == F_GETFD) { g_resp->val = cx ? FD_CLOEXEC : 0; break; }
+			if (cmd == F_SETFL) nb = (a[2] & O_NONBLOCK) != 0;
+			else if (cmd == F_SETFD) cx = (a[2] & FD_CLOEXEC) != 0;
 			else die(1, "node %d: fcntl cmd %d on virtual fd %d has no model", nd->id, cmd, fd);
-			break;
+			if (cs >= 0) { nd->cnonblock[cs] = nb; nd->ccloexec[cs] = cx; }
+			else if (fd == nd->listener_fd) { nd->ls_nonblock = nb; nd->ls_cloexec = cx; }
+			else
+			{
+				unsigned char *f = fd_flags(nd, fd);
+				if (es >= 0) nd->efdnb[es] = nb;
+				*f = (unsigned char) ((*f & FD_PLAIN) | (nb && es < 0 ? FD_NB : 0) | (cx ? FD_CX : 0));
+			}
+			g_resp->val = 0; break;
 		}
 		case SYS_eventfd2:
 		{
@@ -2217,6 +2297,7 @@ serve(Node *nd, Thread *th)
 			if (nd->nefd >= MAXEFD) die(1, "node %d opens more than %d eventfds", nd->id, MAXEFD);
 			int fd = nd->next_fd++;
 			nd->efd[nd->nefd] = fd; nd->efdval[nd->nefd] = a[0]; nd->efdnb[nd->nefd] = (a[1] & EFD_NONBLOCK) ? 1 : 0; nd->nefd++;
+			*fd_flags(nd, fd) = (a[1] & EFD_CLOEXEC) ? FD_CX : 0;
 			g_resp->val = fd; break;
 		}
 		case SYS_epoll_create1: case SYS_epoll_create:
@@ -2229,6 +2310,7 @@ serve(Node *nd, Thread *th)
 			int fd = nd->next_fd++;
 			Epoll *e = &nd->ep[nd->nep++];
 			e->epfd = fd; e->nit = 0;
+			*fd_flags(nd, fd) = (nr == SYS_epoll_create1 && (a[0] & EPOLL_CLOEXEC)) ? FD_CX : 0;
 			g_resp->val = fd; break;
 		}
 		case SYS_epoll_ctl:
@@ -2304,8 +2386,9 @@ serve(Node *nd, Thread *th)
 			for (int i = 0; i < e->nit && ready < maxevents; i++)
 			{
 				int fd = e->fd[i]; int es = efd_slot(nd, fd);
-				if (e->events[i] & EPOLLOUT)
-				{ out[ready].events = EPOLLOUT; out[ready].data = e->data[i]; ready++; continue; }
+				unsigned out_ev = writable(nd, fd);
+				if ((e->events[i] & EPOLLOUT) && out_ev)
+				{ out[ready].events = out_ev; out[ready].data = e->data[i]; ready++; continue; }
 				if (es >= 0 && nd->efdval[es] > 0 && (e->events[i] & EPOLLIN))
 				{ out[ready].events = EPOLLIN; out[ready].data = e->data[i]; ready++; }
 			}
@@ -2363,7 +2446,8 @@ serve(Node *nd, Thread *th)
 				int fd = pfs[i].fd;
 				if (fd < 0) continue;
 				int es = efd_slot(nd, fd);
-				if ((pfs[i].events & POLLOUT)) { pfs[i].revents |= POLLOUT; ready++; continue; }
+				unsigned out_ev = writable(nd, fd);
+				if ((pfs[i].events & POLLOUT) && out_ev) { pfs[i].revents |= (short) out_ev; ready++; continue; }
 				if (es >= 0 && nd->efdval[es] > 0 && (pfs[i].events & POLLIN))
 				{ pfs[i].revents |= POLLIN; ready++; }
 			}
@@ -2725,6 +2809,8 @@ accept_from(Node *nd, Thread *th, int peer)
 	conns[c].accepted = 1;
 	int fd = nd->next_fd++;
 	cfd_set(nd, fd, peer, c, 1);
+	/* accept4's SOCK_CLOEXEC is the new fd's FD_CLOEXEC */
+	if (th->nr == SYS_accept4 && (th->args[3] & SOCK_CLOEXEC)) nd->ccloexec[nd->nc - 1] = 1;
 	answer(nd, th, fd);
 }
 
@@ -3239,8 +3325,13 @@ world_fp(uint64_t fp[2])
 		/* eventfds: a non-zero counter is poll-ready, and the flag decides
 		 * whether an empty read returns EAGAIN */
 		PUT(nd->nefd);
-		for (int k = 0; k < nd->nefd; k++) { PUT8(nd->efdval[k]); PUT(nd->efdnb[k]); }
+		for (int k = 0; k < nd->nefd; k++) { PUT8(nd->efdval[k]); PUT(nd->efdnb[k]); PUT(nd->fdflag[nd->efd[k] - 500]); }
 		PUT(nd->listener_fd >= 0); PUT(nd->ls_nonblock); PUT(nd->ls_cloexec);
+		/* plain sockets (made, not yet dialled or listening), by their
+		 * flags in fd order: an F_GETFL or F_GETFD on one reads them */
+		for (int f = 0; f < nd->next_fd - 500 && f < MAXOWNED; f++)
+			if (nd->fdflag[f] & FD_PLAIN) PUT(nd->fdflag[f]);
+		PUT(0xfd);
 		/* epoll instances: each one's interest list, by requested events,
 		 * the watched fd's class and the user data epoll_wait returns.  The
 		 * data is how the loop routes a ready fd to its handler, so two
@@ -3249,6 +3340,7 @@ world_fp(uint64_t fp[2])
 		for (int e = 0; e < nd->nep; e++)
 		{
 			const Epoll *ep = &nd->ep[e];
+			PUT(nd->fdflag[ep->epfd - 500]);
 			PUT(ep->nit);
 			for (int k = 0; k < ep->nit; k++)
 			{

@@ -59,7 +59,7 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files; do
+for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files syscorner; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
@@ -513,6 +513,50 @@ for c in $codes; do inv="$inv and node[0][$k] == $c"; k=$((k + 1)); done
 filesm sockerr sockerr "" "" "linux = \"node[0][0] == 0 or (node[0][0] == 1$inv)\"
 reached = \"eventually node[0][0] == 1\""
 expect_by 60 "files: an owned socket gets Linux's errnos" 0 "No error has been found" --model-file "$OUT/fs-sockerr.model"
+
+echo "-- the corners of the calls the checker answers itself"
+# syscorner.c records each call's outcome.  Run natively first: its record
+# is then the model's invariant (cmc reaches it, and only it).  On 2.0.0
+# a fcntl on an epoll fd or an unconnected socket changed the listener's
+# flags, an eventfd's FD_CLOEXEC read back 0, and poll called a listening
+# socket writable; each mode below that covers one of these failed.
+SC=$OUT/syscorner
+mkdir -p "$SC"
+for m in badbuf eventfd epoll poll clock futex nbepoll; do
+	(cd "$SC" && timeout 30 "$B/proc/syscorner" 0 "$m" 3>"$SC/$m.state" > /dev/null 2>&1)
+	# shellcheck disable=SC2046
+	set -- $(od -An -tu1 "$SC/$m.state" | tr -s ' \n' ' ')
+	if [ $# -lt 3 ]; then echo "FAIL syscorner $m: the native run left no record"; fail=1; continue; fi
+	shift 2; shift
+	cond="" k=0
+	for v in "$@"; do cond="$cond and node[0][$k] == $v"; k=$((k + 1)); done
+	cond=${cond# and }
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nlinux = "node[0][0] < 1 or (%s)"\nreached = "eventually %s"\n' \
+		"$B/proc/syscorner" "$m" "$cond" "$cond" > "$SC/$m.model"
+	expect_by 60 "syscorner $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$SC/$m.model"
+done
+# a limit or an unmodelled argument ends the check, never a guess
+scm() {	# scm MODE EXIT NEEDLE
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nany = "node[0][0] < 9"\n' "$B/proc/syscorner" "$1" > "$SC/r-$1.model"
+	expect_by 60 "syscorner $1: $3" "$2" "$3" --model-file "$SC/r-$1.model"
+}
+scm nbclient 3 "a non-blocking connect (EINPROGRESS) is not modelled"
+scm efdwrite4 1 "writes 4 bytes to an eventfd"
+scm efdread4 1 "reads 4 bytes from an eventfd"
+scm efdflags 3 "eventfd flags 0x2 are not modelled"
+scm manyefd 1 "opens more than 8 eventfds"
+scm manyepoll 1 "opens more than 4 epoll instances"
+scm epollmax 1 "maxevents is 0"
+scm epolltimeout 3 "epoll_wait with a 5 ms timeout is not modelled"
+scm epollnotep 1 "epoll_ctl on fd 500, which is no epoll instance"
+scm epollwaitnotep 1 "epoll_wait on fd 500, which is no epoll instance"
+scm manypoll 1 "polls 80 fds; the limit is 16"
+scm ppolltimeout 3 "ppoll with a finite timeout is not modelled"
+scm futextimeout 3 "a futex wait with a timeout is not modelled"
+scm bigwrite 1 "writes 4096 bytes in one call"
+scm notconn 1 "writes fd 500, which is no connection"
+scm readnotconn 1 "reads fd 501, which is no connection"
+scm connect 3 "connects to port 20099, which is no node's"
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

@@ -407,6 +407,32 @@ m_efd(void)
 	return 1;
 }
 
+/* an eventfd's FD_CLOEXEC */
+static int
+m_efd_cloexec(void)
+{
+	Node	   *nd = some_node();
+
+	if (nd->nefd == 0)
+		return 0;
+	nd->fdflag[nd->efd[0] - 500] ^= FD_CX;
+	return 1;
+}
+
+/* a plain socket appears, or its O_NONBLOCK changes */
+static int
+m_plain(void)
+{
+	Node	   *nd = some_node();
+	int			fd = nd->next_fd;
+
+	if (fd - 500 >= MAXOWNED)
+		return 0;
+	nd->next_fd++;
+	nd->fdflag[fd - 500] = FD_PLAIN | (pick(2) ? FD_NB : 0);
+	return 1;
+}
+
 static int
 m_budget(void)
 {
@@ -539,13 +565,13 @@ static int (*const mutations[]) (void) = {
 	m_canon, m_durable, m_read_off, m_alive, m_block_kind, m_want,
 	m_recv_conn, m_futex, m_poll_fd, m_poll_events, m_woke, m_msg_byte,
 	m_msg_drop, m_conn_flag, m_nonblock, m_pend, m_efd, m_budget, m_clock,
-	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned,
+	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned, m_efd_cloexec, m_plain,
 };
 static const char *const mutation_names[] = {
 	"canon", "durable", "read_off", "alive", "block_kind", "want",
 	"recv_conn", "futex", "poll_fd", "poll_events", "woke", "msg_byte",
 	"msg_drop", "conn_flag", "nonblock", "pend", "efd", "budget", "clock",
-	"reply", "newborn", "thread_count", "position", "held", "cloned",
+	"reply", "newborn", "thread_count", "position", "held", "cloned", "efd_cloexec", "plain",
 };
 
 /* ---- changes the encoding must hide ------------------------------- */
