@@ -76,6 +76,13 @@ Expressions: integers with `+ - * / mod`; sets `{a, b}` and ranges
 `and or not`; quantifiers `all V in SET : E`, `some V in SET : E`; and
 `count V in SET : E` (cardinality).
 
+Every operand is checked against its operator, as TLC checks it.
+Arithmetic, orders, range bounds, set elements and function keys and
+values are integers; `and`, `or`, `not`, quantifier bodies, guards,
+invariants and liveness goals are booleans; `==` and `!=` compare two
+values of one type.  Anything else, such as `not votes` for a set
+`votes`, or `TRUE == 1`, is a model error (exit 3), never a value.
+
 ## Modules and a shared base
 
 `examples/spec/consensus.cml` is a base for the consensus family -- it

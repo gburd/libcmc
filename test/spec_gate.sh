@@ -141,6 +141,37 @@ expect "a spec with no invariant is an error" 3 "no invariant" --spec "$OUT/noin
 printf 'var x : 0 .. 2\ninit x == 0\ninvariant t: x <= 2\n' > "$OUT/nomod.cml"
 expect "a spec with no module is an error"    3 "no module" --spec "$OUT/nomod.cml"
 
+# an operand of the wrong type is a model error, as TLC reports it, never
+# a value: `not votes` read a set as 0 and held for every state
+echo "-- the evaluator refuses an operand of the wrong type"
+# typed DESC NEEDLE EXPR [GUARD]: a spec whose invariant is EXPR (and
+# whose action is guarded by GUARD) is refused with NEEDLE
+typed() {
+	printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when %s\n  x%s = 1\ninvariant i: %s\n' "${4:-x < 1}" "'" "$3" > "$OUT/typed.cml"
+	expect "$1" 3 "$2" --spec "$OUT/typed.cml"
+}
+typed "not of a set"                      "expected a boolean" "not {1}"
+typed "and of an integer"                 "expected a boolean" "x and TRUE"
+typed "or of a function"                  "expected a boolean" "TRUE or f"
+typed "an invariant that is an integer"   "expected a boolean" "x + 1"
+typed "a guard that is a set"             "expected a boolean" "TRUE" "{x}"
+typed "all over an integer body"          "expected a boolean" "all i in 0 .. 1 : i"
+typed "count over a set body"             "expected a boolean" "(count i in 0 .. 1 : {i}) == 0"
+typed "arithmetic on a set"               "expected an integer" "{0} + 1 == 1"
+typed "arithmetic on a boolean"           "expected an integer" "TRUE * 2 == 2"
+typed "an order on a set"                 "expected an integer" "x < {1}"
+typed "a set of sets"                     "expected an integer" "{{1}} == {{1}}"
+typed "a range bounded by a set"          "expected an integer" "x in 0 .. {1}"
+typed "membership of a function"          "expected an integer" "f in {0}"
+typed "a function of booleans"            "expected an integer" "[i in 0 .. 1 -> TRUE] == f"
+typed "a function applied to a set"       "expected an integer" "f[{0}] == 0"
+typed "== between a function and a set"   "compares a function with a set" "f == {0}"
+typed "== between a boolean and an integer" "compares a boolean with an integer" "TRUE == 1"
+typed "!= between a set and an integer"   "compares a set with an integer" "{x} != 0"
+# the same operators on the right types still evaluate
+printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
+expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml"
+
 # soundness rows from the 1.3.0 audit (docs/plans/soundness-remediation.md,
 # Phase 1).  Each asserts the verdict the semantics require; each was a
 # false pass before its fix.

@@ -45,6 +45,14 @@ Command line, API and the abstract checker:
 - API: a BFS stopped by `stop_on_witness` is `CMC_INCOMPLETE`, not
   `CMC_PASS`: it had not searched the rest of the graph, so toy-bug1's
   Mutex violation passed with it set.  [test_cmc: test_stop_on_witness]
+- `cmc --spec` checks the type of every operand: `not {1}` held, and
+  `x < {1}` compared x with 0, so an invariant with a type slip passed
+  vacuously.  Arithmetic, orders, ranges, set elements and function
+  entries take integers; `and`, `or`, `not`, quantifier bodies, guards,
+  invariants and goals take booleans; `==` and `!=` refuse two types.
+  Each breach is a model error, exit 3.  No shipped spec changed its
+  counts or verdict.  [spec_gate: "the evaluator refuses an operand of
+  the wrong type"]
 - `--define TAG` that gates no action in the spec is an error, so a
   mistyped tag no longer checks the spec without its planted bug.
   [spec_gate: "a --define that gates no action is an error"]
