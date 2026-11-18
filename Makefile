@@ -231,10 +231,11 @@ clean:
 #
 # Two kinds of object stay uninstrumented, because counters would change
 # what a gate checks: the cores the purity gate reads (gcov's counters are
-# writable data, which that gate rejects) and the preload every checked
-# node runs under (its counter dump at exit is file I/O inside a node).
-# cmc_preload.c is measured through in-process drivers that include its
-# source (test/proc/preload_alloc.c).  The gates pass CFLAGS (exported,
+# writable data, which that gate rejects), and the preload and the race
+# runtime that run inside every checked node (a counter dump at exit is
+# file I/O inside a node).  cmc_preload.c and cmc_race.c are measured
+# through in-process drivers that include their source
+# (test/proc/preload_alloc.c).  The gates pass CFLAGS (exported,
 # since it is set on the sub-make's command line) to every in-process
 # program they build against libcmc's objects, so those link with gcov.
 # COV_FLAGS carries $(WARN) because gcov matches counters to code by
@@ -249,7 +250,7 @@ COV_FLAGS = $(WARN) -O0 -g --coverage
 COV_S = $(CMC_SCRATCH)/coverage
 
 ifeq ($(COV_BUILD),1)
-$(PURE) $(PRELOAD): override CFLAGS = $(OPT) -g
+$(PURE) $(PRELOAD) $(B)/cmc_race.o: override CFLAGS = $(OPT) -g
 endif
 
 .PHONY: coverage coverage-report
