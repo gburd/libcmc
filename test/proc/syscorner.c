@@ -478,6 +478,32 @@ main(int argc, char **argv)
 		p.revents = 0;
 		code(poll(&p, 1, -1) == 1 && p.revents == POLLNVAL ? 0 : -1);
 	}
+	else if (!strcmp(mode, "fileops"))
+	{
+		/* the file calls on an owned socket, as Linux answers them, and a
+		 * read-only open through open() and openat2() */
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+		int			c = socket(AF_INET, SOCK_STREAM, 0);
+		struct
+		{
+			uint64_t	flags, mode, resolve;
+		}			how = {O_RDONLY, 0, 0};
+
+		connect(c, (struct sockaddr *) &me, sizeof me);
+		(void) ls;
+		code(lseek(c, 0, SEEK_SET));	/* ESPIPE */
+		code(lseek(c, 0, 99));		/* EINVAL */
+		code(fsync(c));				/* EINVAL */
+		code(ftruncate(c, 0));		/* EINVAL */
+		code(syscall(SYS_sync_file_range, c, 0, 0, 0));	/* ESPIPE */
+		int			r = (int) syscall(SYS_open, "/dev/null", O_RDONLY);
+
+		code(r);
+		code(r >= 0 ? close(r) : -1);
+		r = (int) syscall(SYS_openat2, AT_FDCWD, "/dev/null", &how, sizeof how);
+		code(r);
+	}
 	else if (!strcmp(mode, "durread"))
 	{
 		/* the durable record read a byte at a time: a fresh launch has

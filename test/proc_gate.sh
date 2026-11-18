@@ -634,7 +634,7 @@ echo "-- the corners of the calls the checker answers itself"
 # each mode below that covers one of these failed.
 SC=$OUT/syscorner
 mkdir -p "$SC"
-for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf selfdial; do
+for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf selfdial fileops; do
 	(cd "$SC" && timeout 30 "$B/proc/syscorner" 0 "$m" 3>"$SC/$m.state" > /dev/null 2>&1)
 	# shellcheck disable=SC2046
 	set -- $(od -An -tu1 "$SC/$m.state" | tr -s ' \n' ' ')
