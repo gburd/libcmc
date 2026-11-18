@@ -684,6 +684,18 @@ done
 # the C library's own calls a worker may make: no refusal (INCOMPLETE,
 # since the fixture is not built with the race runtime)
 for m in stdin_tty stdout durable; do edm "worker-$m" 2 "without the race runtime"; done
+# a channel to another process: another program run in the node, SysV
+# shared memory or a message queue (which outlive the process, so their
+# state would survive a crash outside the world), another process's
+# memory, a signal to another process or a process group, a pidfd.  On
+# 2.0.0 each went to the kernel unseen.  A signal to the node itself
+# (signal 0 here) still goes to the kernel.
+edm exec 3 "runs another program (execve)"
+for m in shm vmread mq; do edm "$m" 3 "shares state between processes outside the model"; done
+edm killparent 3 "a signal to another process is not modelled"
+edm killgroup 3 "signals process 0; a signal to another process is not modelled"
+edm pidfd 3 "reaches another process through a pidfd"
+edm killself 0 "No error has been found" 'sent = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 1)"\nreached = "eventually node[0][0] == 1"'
 edm segvhandler 3 "raised signal 11 with a handler installed or the signal ignored"
 edm usr1 3 "stopped with signal 10"
 edm corners 0 "No error has been found" 'linux = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 21 and node[0][4] == 1 and node[0][5] == 1 and node[0][6] == 1 and node[0][7] == 1 and node[0][8] == 1)"\nreached = "eventually node[0][0] == 1"'

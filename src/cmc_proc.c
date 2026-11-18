@@ -690,6 +690,7 @@ typedef struct {
 	int preload_ok;				/* the preload announced itself in this node */
 	int threaded;				/* this process has run more than one thread (world_threaded) */
 	int race_ok;				/* the race runtime announced itself in this process */
+	int execd;					/* the launch's own exec of the binary has run */
 } Node;
 
 static Node N[MAXNODES];
@@ -843,6 +844,15 @@ static Conn conns[MAXCONNS];
  * and an epoll instance are never writable.  fd_flags() and cfd_slot()
  * are defined below. */
 static unsigned writable(Node *nd, int fd);
+
+/* is tid one of node nd's threads? */
+static int
+tid_of_node(const Node *nd, pid_t tid)
+{
+	for (int i = 0; i < nd->nth; i++)
+		if (nd->th[i].inuse && nd->th[i].tid == tid) return 1;
+	return tid == nd->pid;
+}
 
 /* the fdflag entry of owned fd fd, ending the check past MAXOWNED */
 static unsigned char *
@@ -1042,6 +1052,12 @@ install_filter(void)
 		OWN(SYS_setxattr), OWN(SYS_lsetxattr), OWN(SYS_fsetxattr), OWN(SYS_setxattrat),
 		OWN(SYS_removexattr), OWN(SYS_lremovexattr), OWN(SYS_fremovexattr), OWN(SYS_removexattrat),
 		OWN(SYS_file_setattr), OWN(SYS_open_by_handle_at), OWN(SYS_io_uring_setup),
+		/* channels between processes the model does not have (see
+		 * outside_call) */
+		OWN(SYS_process_vm_readv), OWN(SYS_process_vm_writev),
+		OWN(SYS_shmget), OWN(SYS_shmat), OWN(SYS_msgget), OWN(SYS_semget), OWN(SYS_mq_open),
+		OWN(SYS_kill), OWN(SYS_tkill), OWN(SYS_tgkill), OWN(SYS_rt_sigqueueinfo),
+		OWN(SYS_rt_tgsigqueueinfo), OWN(SYS_pidfd_open), OWN(SYS_pidfd_send_signal),
 		OWN(SYS_lseek), OWN(SYS_fsync), OWN(SYS_fdatasync), OWN(SYS_ftruncate),
 		OWN(SYS_fallocate), OWN(SYS_flock), OWN(SYS_sync_file_range),
 #undef OWN
@@ -1071,6 +1087,10 @@ install_trace_filter(void)
 {
 	struct sock_filter f[] = {
 		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, nr)),
+		/* execve and execveat stop too: the launch's own exec of the node
+		 * is let through, and a later one is refused (trace_stop) */
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_execve, 4, 0),	/* to RET_TRACE */
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_execveat, 3, 0),
 		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_sendmsg, 0, 3),
 		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, args[0])),
 		BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K, 500, 1, 0),
@@ -1219,7 +1239,7 @@ launch(Node *nd)
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
-	memset(nd->fdflag, 0, sizeof nd->fdflag);
+	memset(nd->fdflag, 0, sizeof nd->fdflag); nd->execd = 0;
 	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0; nd->race_ok = 0;
 	return 0;
 }
@@ -2566,6 +2586,31 @@ serve(Node *nd, Thread *th)
 			for (int i = 0; i < nfds; i++) { th->pollfds[i] = pfs[i].fd; th->pollevents[i] = pfs[i].events; }
 			return 1;				/* do NOT answer */
 		}
+		case SYS_process_vm_readv: case SYS_process_vm_writev:
+		case SYS_shmget: case SYS_shmat: case SYS_msgget: case SYS_semget: case SYS_mq_open:
+			/* another process's memory, SysV shared memory, message queues
+			 * and semaphores, and POSIX message queues: channels between
+			 * nodes the model does not have, and the SysV objects outlive
+			 * the process, so their state would survive a crash and every
+			 * replay outside the world */
+			die(3, "node %d: system call %ld shares state between processes outside the model (shared memory, a message queue, another process's memory)", nd->id, nr);
+			return 1;
+		case SYS_kill: case SYS_tkill: case SYS_tgkill:
+		case SYS_rt_sigqueueinfo: case SYS_rt_tgsigqueueinfo:
+		{
+			/* a signal to the node itself (raise(), abort()) goes to the
+			 * kernel, and its stop is handled as a fault or refused there;
+			 * to any other process (another node, the checker, a process
+			 * group) it is a channel the model does not have */
+			pid_t tgt = (pid_t) a[0];	/* the pid, the tgid, or for tkill the tid */
+			int self = nr == SYS_tkill ? tid_of_node(nd, tgt) : tgt == nd->pid;
+			if (!self)
+				die(3, "node %d signals process %d; a signal to another process is not modelled", nd->id, (int) tgt);
+			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
+		}
+		case SYS_pidfd_open: case SYS_pidfd_send_signal:
+			die(3, "node %d: system call %ld reaches another process through a pidfd, which is not modelled", nd->id, nr);
+			return 1;
 		case SYS_fork: case SYS_vfork:
 			refuse_fork(nd);
 			break;
@@ -2765,11 +2810,23 @@ static int g_fault_node = -1, g_fault_sig;
 static void
 trace_stop(Node *nd, pid_t tid)
 {
+	struct user_regs_struct regs;
+	long nr = -1;
+	if (ptrace(PTRACE_GETREGS, tid, 0, &regs) == 0) nr = (long) regs.orig_rax;
+	if (nr == SYS_execve || nr == SYS_execveat)
+	{
+		/* the first is the launch's own exec of the node's binary; any
+		 * later one replaces the program under check */
+		if (nd->execd)
+			die(3, "node %d runs another program (execve); a node is one program, checked as it was launched", nd->id);
+		nd->execd = 1;
+		if (ptrace(PTRACE_CONT, tid, 0, 0) != 0)	/* GCOVR_EXCL_LINE: the thread is in the stop just reported */
+			die(1, "node %d: cannot resume thread %d at its exec: %s", nd->id, (int) tid, strerror(errno));
+		return;
+	}
 	if (node_multi(nd))
 	{
-		struct user_regs_struct regs;
-		int fd = -1;
-		if (ptrace(PTRACE_GETREGS, tid, 0, &regs) == 0) fd = (int) regs.rdi;
+		int fd = nr == SYS_sendmsg ? (int) regs.rdi : -1;
 		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %d); only checker-owned fds and the state hook are modelled between threads", nd->id, fd, SYS_sendmsg);
 	}
 	if (ptrace(PTRACE_CONT, tid, 0, 0) != 0)

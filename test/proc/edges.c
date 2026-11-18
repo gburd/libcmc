@@ -291,6 +291,37 @@ main(int argc, char **argv)
 		listen(ls, 8);
 		code(accept4(ls, NULL, NULL, SOCK_NONBLOCK));
 	}
+	/* channels between processes the model does not have: refused */
+	else if (!strcmp(mode, "exec"))
+	{
+		char	   *av[] = {"/bin/true", NULL};
+
+		execv(av[0], av);
+	}
+	else if (!strcmp(mode, "shm"))
+		code(syscall(SYS_shmget, 0x434d43, 4096, 01000 | 0600));
+	else if (!strcmp(mode, "killparent"))
+		code(kill(getppid(), 0));
+	else if (!strcmp(mode, "killgroup"))
+		code(kill(0, 0));
+	else if (!strcmp(mode, "vmread"))
+	{
+		char		c;
+		struct iovec l = {&c, 1}, r = {&c, 1};
+
+		code(syscall(SYS_process_vm_readv, getppid(), &l, 1, &r, 1, 0));
+	}
+	else if (!strcmp(mode, "pidfd"))
+		code(syscall(SYS_pidfd_open, getppid(), 0));
+	else if (!strcmp(mode, "mq"))
+		code(syscall(SYS_mq_open, "cmc", 0, 0, NULL));
+	else if (!strcmp(mode, "killself"))
+	{
+		/* a signal to itself goes to the kernel: signal 0 tests only */
+		code(kill(getpid(), 0));
+		code(syscall(SYS_tgkill, getpid(), (pid_t) syscall(SYS_gettid), 0));
+		code(syscall(SYS_tkill, (pid_t) syscall(SYS_gettid), 0));
+	}
 	/* corners that record */
 	else if (!strcmp(mode, "corners2"))
 	{
