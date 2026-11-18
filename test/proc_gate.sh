@@ -570,6 +570,25 @@ inv holds 0 "No error has been found" \
 	"some i in nodes : i == 1" "count i in nodes : i >= 0 == 2" \
 	"all b in node[1] : b in node[1]" "(count r in replies : r.val == 5) <= 1"
 inv reached 0 "No error has been found" "eventually (some r in replies : r.val == 5) and (count b in node[1] : b == 5) == 1"
+# each comparison's false side, a node index past the nodes, a field past
+# the record, a reply variable used bare and a bound byte variable, a
+# quantifier over node[i] by an index variable, and the fields of a reply
+inv sides 0 "No error has been found" \
+	"not (node[1][0] != node[1][0]) and not (node[1][0] < 0) and not (node[1][0] > 200)" \
+	"not (node[1][0] <= 0 - 1) and not (node[1][0] >= 200) and not (node[1][0] == 200)" \
+	"node[7][0] == 0 - 1 and node[1][40] == 0 - 1" \
+	"all r in replies : r >= 0 and r.val == 5" "all b in node[1] : b == 5 or b == 0" \
+	"all i in nodes : all b in node[i] : b < 200" "count i in nodes : not (i == 0) == 1" \
+	"some i in nodes : node[i].val == node[i][0]"
+inv reached2 0 "No error has been found" "eventually some r in replies : r.src == 0 and r.val > 4 and r.val < 6"
+for bad in "all r in replies : r.x == 0" "node[0].val2 == 0" "count r in replies r.val == 1" "some r in replies r.val == 1" \
+	"all i in nodes : node[j][0] == 0" "node[0][0] in nodes" "1 in" "not" "node[0][0] == (1" "node[0][0] == 1 or" \
+	"node[0][0] == 1 and" "count i in nodes : i == 0 and" "(node[0][0] == 0) junk" "node [ 0 ] . val == 0 ==" \
+	"all i in node[ : 1 == 1" "count i in node[0 : 1 == 1" "count i in node[x] : 1 == 1" "count i in node[0) : 1 == 1" \
+	"some in nodes : 1 == 1" "all  : 1 == 1" "node[0][0] == $(printf '%40s' '' | tr ' ' 'z')"; do
+	mf "bad$k" 3 "cannot parse" "${H}[fields]\nval = 0\n[invariants]\nb = \"$bad\"\n"
+	k=$((k + 1))
+done
 # `and` and `or` mixed at one level are refused: left to right, the
 # invariant below meant (x == 7 or x == 5) and x == 9, which 2.0.0 found
 # violated in a state that `x == 7 or (x == 5 and x == 9)` would let pass
