@@ -59,11 +59,26 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack threadpos syncpoint; do
+for f in fault kernelfd durack threadpos memrace syncpoint; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -DC11 -DBUG -o "$B/proc/syncpoint-c11-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DC11 -DBUG does not build"; fail=1; }
+# A multi-threaded node passes only when built with the race runtime:
+# compiled with -fsanitize=thread, linked with libcmc-race.a in place of
+# the sanitizer's own runtime (cmc(7), THREADS).  tsan NAME SRC [FLAGS]
+# builds $B/proc/NAME that way.
+tsan() {
+	name=$1 src=$2; shift 2
+	if ! $CC -O1 -fno-pie -w -fsanitize=thread "$@" -c -o "$B/proc/$name.o" "$src" ||
+		! $CC -no-pie -o "$B/proc/$name" "$B/proc/$name.o" "$B/libcmc-race.a" -lpthread; then
+		echo "proc_gate: $src does not build with the race runtime"; fail=1
+	fi
+}
+for f in twothread twothread_join racewake raceemit raceborn durack memrace syncpoint kernelfd; do
+	tsan "$f-tsan" "$T/$f.c"
+done
+tsan raceemit-bug-tsan "$T/raceemit.c" -DBUG
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -291,17 +306,18 @@ echo "-- threads: per-thread scheduling, futex handoff"
 # new thread and its parent are both held at the clone's return.  The
 # correct build stores the byte it was handed; the -DBUG build drops it
 # across the handoff, which the invariant catches.
-expect "twothread: the handoff holds in every schedule"  0 "No error has been found" $(run twothread twothread)
+expect "twothread: the handoff holds in every schedule"  0 "No error has been found" $(run twothread twothread-tsan)
+expect "twothread: without the race runtime it is INCOMPLETE" 2 "without the race runtime" $(run twothread twothread)
 expect "twothread: a dropped handoff is caught"         1 "handoff is violated" $(run twothread twothread-bug)
 expect "twothread: the counterexample names the delivery" 1 "deliver n0->n1" $(run twothread twothread-bug)
 expect "twothread: the counterexample names the worker's run" 1 "run n1 t1" $(run twothread twothread-bug)
 # the data crosses the handoff: reaching the stored value is search-driven
 printf '[target]\nnodes = 2\n[fields]\nrecvd = 0\nstored = 1\n[invariants]\nprocessed = "eventually node[1].stored == 120"\n' > "$OUT/tt-reach.model"
-expect "twothread: the worker reaches the stored value"  0 "No error has been found" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread"
+expect "twothread: the worker reaches the stored value"  0 "No error has been found" --model-file "$OUT/tt-reach.model" --binary "$B/proc/twothread-tsan"
 # a worker that exits after one job, joined by the main thread: exercises
 # the thread-exit slot-free and the pthread_join futex on the worker's
 # clear-tid word (woken by the checker's SYS_exit CLONE_CHILD_CLEARTID).
-expect "twothread_join: exit + join holds"              0 "No error has been found" $(run twothread_join twothread_join)
+expect "twothread_join: exit + join holds"              0 "No error has been found" $(run twothread_join twothread_join-tsan)
 # Each race below is missed by an engine that runs one order of a node's
 # threads.  racewake: a worker woken before the data it reads is stored
 # runs before the waker's next call in some schedule.  raceemit: two
@@ -311,16 +327,17 @@ expect "twothread_join: exit + join holds"              0 "No error has been fou
 # parent's next one.  Each correct build holds in every schedule.
 expect "racewake: a wake before the store is caught"      1 "stored_first is violated" $(run racewake racewake-bug)
 expect "racewake: the woken worker runs first"            1 "run n0 t1" $(run racewake racewake-bug)
-expect "racewake: storing first holds"                    0 "No error has been found" $(run racewake racewake)
+expect "racewake: storing first holds"                    0 "No error has been found" $(run racewake racewake-tsan)
 expect "raceemit: an unlocked increment loses an update"  1 "no_lost_update is violated" $(run raceemit raceemit-bug)
-expect "raceemit: the locked increment holds"             0 "No error has been found" $(run raceemit raceemit)
+expect "raceemit: the locked increment holds"             0 "No error has been found" $(run raceemit raceemit-tsan)
+expect "raceemit: the unlocked increment is a data race"   1 "data race on node 0" $(run raceemit raceemit-bug-tsan)
 expect "raceborn: a new thread can send before its parent" 1 "a_first is violated" $(run raceborn raceborn-bug)
-expect "raceborn: sending before the clone holds"         0 "No error has been found" $(run raceborn raceborn)
+expect "raceborn: sending before the clone holds"         0 "No error has been found" $(run raceborn raceborn-tsan)
 # durack: a worker's state-hook write takes effect when the worker
 # reaches it, like a call on a checker-owned fd, so a crash can come
 # between it and the worker's next call (the value durable, its ack not
 # sent).  A hook write held before it ran made the two one step.
-expect "durack: a crash between a durable write and its ack" 0 "No error has been found" $(run durack durack)
+expect "durack: a crash between a durable write and its ack" 0 "No error has been found" $(run durack durack-tsan)
 # threadpos: worlds with a multi-threaded node are never merged, since a
 # thread's record cannot tell apart two iterations of one loop (loop), a
 # thread born on the stack of one already joined (seq), or memory that
@@ -366,16 +383,32 @@ expect_by 60 "kernelfd: a read blocked in the kernel ends the check" 1 "made no 
 expect_by 60 "kernelfd: a worker's blocking pipe read is refused" 3 "uses kernel fd" --model-file "$OUT/kfd-block.model"
 expect_by 60 "kernelfd: two workers writing one pipe are refused" 3 "uses kernel fd" --model-file "$OUT/kfd-order.model"
 expect_by 60 "kernelfd: a pipe beside an eventfd is refused"     3 "uses kernel fd" --model-file "$OUT/kfd-mixed.model"
-expect_by 60 "kernelfd: a worker may print to stdout and stderr" 0 "No error has been found" --model-file "$OUT/kfd-stdio.model"
+printf '[target]\nbinary = %s\nnodes = 1\nargs = stdio\n[invariants]\nany = "node[0][0] <= 1"\n' "$B/proc/kernelfd-tsan" > "$OUT/kfd-stdio-tsan.model"
+expect_by 60 "kernelfd: a worker may print to stdout and stderr" 0 "No error has been found" --model-file "$OUT/kfd-stdio-tsan.model"
 
-# A switch at an uncontended lock (plan 2.1, item 3).  syncpoint: a
-# worker that runs between two critical sections of main sees a
-# half-published value.  No system call is made there, so only the
-# preload's marker before each lock (pthread and C11) makes it a choice
-# point.
+# Memory interleavings (plan 2.1, item 3).  syncpoint: a worker that runs
+# between two uncontended critical sections of main sees a half-published
+# value; no system call is made there, so only the preload's marker
+# before each lock (pthread and C11) makes it a choice point.  memrace:
+# instrumented with the race runtime, an unlocked counter and a relaxed
+# handoff are data races; a locked counter and a seq_cst handoff pass; a
+# relaxed atomic makes a pass INCOMPLETE (weak memory is not explored).
+# Uninstrumented, a multi-threaded node cannot pass.
 expect "syncpoint: a switch at an uncontended lock is explored" 1 "whole is violated" $(run syncpoint syncpoint-bug)
 expect "syncpoint: the same through C11 mtx_lock"             1 "whole is violated" $(run syncpoint syncpoint-c11-bug)
-expect "syncpoint: publishing under the lock holds"           0 "No error has been found" $(run syncpoint syncpoint)
+expect "syncpoint: publishing under the lock holds"           0 "No error has been found" $(run syncpoint syncpoint-tsan)
+for m in unlocked locked seqcst relaxed relaxedadd; do
+	for v in "" -tsan; do
+		printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nwhole = "node[0].phase < 2 or node[0].value == 2 or node[0].value == 7"\ndone = "eventually node[0].phase == 2"\n' \
+			"$B/proc/memrace$v" "$m" > "$OUT/mr-$m$v.model"
+	done
+done
+expect "memrace: an unlocked counter is not a pass uninstrumented" 2 "without the race runtime" --model-file "$OUT/mr-unlocked.model"
+expect "memrace: an unlocked counter is a data race"          1 "data race on node 0" --model-file "$OUT/mr-unlocked-tsan.model"
+expect "memrace: a locked counter holds"                      0 "No error has been found" --model-file "$OUT/mr-locked-tsan.model"
+expect "memrace: a seq_cst handoff holds"                     0 "No error has been found" --model-file "$OUT/mr-seqcst-tsan.model"
+expect "memrace: a relaxed handoff is a data race"            1 "data race on node 0" --model-file "$OUT/mr-relaxed-tsan.model"
+expect "memrace: a relaxed atomic makes a pass INCOMPLETE"    2 "weaker than seq_cst" --model-file "$OUT/mr-relaxedadd-tsan.model"
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops

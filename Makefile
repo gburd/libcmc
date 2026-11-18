@@ -33,7 +33,7 @@ export CMC_SCRATCH
 UNAME_S := $(shell uname -s)
 # the process front end's preload (Linux only): the deterministic heap
 # and the logical clock every checked node runs under
-PRELOAD = $(if $(filter Linux,$(UNAME_S)),$(B)/cmc-preload.so)
+PRELOAD = $(if $(filter Linux,$(UNAME_S)),$(B)/cmc-preload.so $(B)/libcmc-race.a)
 
 LIB    = $(B)/libcmc.a
 TOY    = $(B)/toy0.o $(B)/toy1.o $(B)/toy2.o $(B)/toy3.o \
@@ -69,6 +69,12 @@ $(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o $(B)/cmc_spec.o
 	$(AR) rcs $@ $^
 $(B)/cmc-preload.so: src/cmc_preload.c | $(B)
 	$(CC) $(ALL_CFLAGS) -fPIC -shared -o $@ $<
+# the race runtime a node built with -fsanitize=thread links instead of
+# the sanitizer's own (cmc(7), THREADS)
+$(B)/cmc_race.o: src/cmc_race.c | $(B)
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+$(B)/libcmc-race.a: $(B)/cmc_race.o
+	$(AR) rcs $@ $^
 
 $(B)/cmc_models.o: test/cmc_models.c include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
@@ -101,7 +107,7 @@ check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 
 # man pages lint clean and cover the API and every option; the guide's
 # model builds and behaves as the guide says (test/docs_gate.sh)
-check-docs: $(LIB)
+check-docs: $(LIB) $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/docs_gate.sh $(B)
 
 check: check-unit check-examples check-calibration-fast
