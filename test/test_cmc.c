@@ -1573,6 +1573,9 @@ bad_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
 		case 8:					/* an output count out of range */
 			out->n = -1;
 			break;
+		case 9:					/* past the array, with no overflow counted */
+			out->n = CMC_OUT_MAX + 1;
+			break;
 	}
 }
 
@@ -1589,12 +1592,12 @@ test_output_rules(void)
 	static const char *const want[] = {"output body too long", "SEND to bad node 5",
 		"bad timer id 16", "bad waiter id 8", "persist_cap 2 exceeded",
 		"reply_cap 8 exceeded", "net_cap 8 exceeded", "unknown output kind 99",
-	"core emitted -1 outputs"};
+	"core emitted -1 outputs", "core emitted 17 outputs"};
 	char		path[512];
 
 	snprintf(path, sizeof(path), "%s/bad.replay",
 			 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
-	for (bad_kind = 0; bad_kind < 9; bad_kind++)
+	for (bad_kind = 0; bad_kind < 10; bad_kind++)
 		for (int s = 0; s < 4; s++)
 		{
 			CmcOptions	o;
@@ -1781,11 +1784,15 @@ gate_out_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *o
 		cmc_out_push(out, CMC_OUT_SEND)->dst = 0;
 }
 
-/* a step whose output body differs on a repeat */
+/* a step whose one output differs on a repeat in field gate_field: its
+ * kind, destination, length, argument or body */
+static int	gate_field;
+
 static void
 gate_body_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
 {
 	CmcOutput  *o;
+	int			odd = gate_calls++ & 1;
 
 	(void) cfg;
 	(void) node;
@@ -1793,9 +1800,16 @@ gate_body_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *
 	out->n = 0;
 	if (ev->kind != CMC_EV_CLIENT)
 		return;
-	o = cmc_out_push(out, CMC_OUT_SEND);
+	o = cmc_out_push(out, gate_field == 0 && odd ? CMC_OUT_REPLY : CMC_OUT_SEND);
 	o->len = 1;
-	o->body[0] = (uint8_t) (gate_calls++ & 1);
+	if (gate_field == 1)
+		o->dst = (uint8_t) odd;
+	else if (gate_field == 2)
+		o->len = (uint16_t) (1 + odd);
+	else if (gate_field == 3)
+		o->arg = (uint32_t) odd;
+	else if (gate_field == 4)
+		o->body[0] = (uint8_t) odd;
 }
 
 /* an apply_persist that changes volatile byte 4 */
@@ -1883,6 +1897,15 @@ test_core_rules(void)
 	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
 		  strstr(why, "different outputs on a repeat"));
 	c.step = gate_body_step;
+	c.nnodes = two;
+	for (gate_field = 0; gate_field < 5; gate_field++)
+		CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+			  strstr(why, "different outputs on a repeat"));
+	/* under the gate, a body too long is refused without being compared
+	 * past the end of its buffer */
+	c.step = bad_step;
+	c.nnodes = nd_nnodes;
+	bad_kind = 0;
 	CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
 		  strstr(why, "different outputs on a repeat"));
 	/* apply_persist may write only the durable bytes, and the same each time */
@@ -2152,6 +2175,123 @@ test_replay_refusals(void)
 		cmc_result_free(&res);
 		cmc_run_free(r);
 	}
+}
+
+/* ---- the fair schedule of an eventually property --------------------
+ * fair_core's CLIENT event at node 0 starts what fair_mode asks for; the
+ * goal is that every request has its reply.  Each mode drives check_ev()
+ * down one way it can end. */
+
+static int	fair_mode;
+
+static void
+fair_step_fn(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	uint8_t    *s = (uint8_t *) sv + 4;	/* past the durable byte */
+	CmcOutput  *o;
+
+	(void) cfg;
+	out->n = 0;
+	switch (fair_mode)
+	{
+		case 0:					/* a wake, then a persist, then the reply */
+			if (ev->kind == CMC_EV_CLIENT)
+				cmc_out_push(out, CMC_OUT_WAKE)->arg = 3;
+			else if (ev->kind == CMC_EV_WAKE)
+				cmc_out_push(out, CMC_OUT_PERSIST)->len = 1;
+			else if (ev->kind == CMC_EV_FLUSHED)
+				cmc_out_push(out, CMC_OUT_REPLY);
+			break;
+		case 1:					/* a timer that re-arms itself and never replies */
+			if (ev->kind == CMC_EV_CLIENT || ev->kind == CMC_EV_TIMER)
+			{
+				s[0] = (uint8_t) (s[0] + 1) & 3;
+				cmc_out_push(out, CMC_OUT_SET_TIMER)->arg = 2;
+			}
+			break;
+		case 2:					/* two nodes forever sending each other one byte */
+			if (ev->kind == CMC_EV_CLIENT || ev->kind == CMC_EV_RECV)
+			{
+				o = cmc_out_push(out, CMC_OUT_SEND);
+				o->dst = (uint8_t) (1 - node);
+				o->len = 1;
+				o->body[0] = (uint8_t) (s[0]++ & 7);
+			}
+			break;
+		case 3:					/* the reply only after a long count of wakes */
+			if (ev->kind == CMC_EV_CLIENT || (ev->kind == CMC_EV_WAKE && s[0] < 20))
+			{
+				s[0]++;
+				cmc_out_push(out, CMC_OUT_WAKE)->arg = 0;
+			}
+			else if (ev->kind == CMC_EV_WAKE)
+				cmc_out_push(out, CMC_OUT_REPLY);
+			break;
+		case 4:					/* a wake whose step breaks the durable rule */
+			if (ev->kind == CMC_EV_CLIENT)
+				cmc_out_push(out, CMC_OUT_WAKE)->arg = 0;
+			else if (ev->kind == CMC_EV_WAKE)
+				((uint8_t *) sv)[0] = 1;
+			break;
+		case 5:					/* a timer whose fire breaks the durable rule */
+			if (ev->kind == CMC_EV_CLIENT)
+				cmc_out_push(out, CMC_OUT_SET_TIMER)->arg = 0;
+			else if (ev->kind == CMC_EV_TIMER)
+				((uint8_t *) sv)[0] = 1;
+			break;
+	}
+}
+
+static const CmcProp fair_props[] = {CMC_EVENTUALLY_PROP(Replied, replied_all)};
+static const CmcCore fair_core = {
+	.name = "fair", .state_size = 8, .durable_size = 1, .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = two, .init = zero8,
+	.step = fair_step_fn, .clients = first_only, .apply_persist = dur_apply,
+};
+static const CmcModel fair_model = {"fair", &fair_core, fair_props, 1, 0};
+
+static void
+test_fair_schedule(void)
+{
+	static const char *const want[] = {NULL, "the fair schedule cycles",
+		"the fair schedule cycles", "not reached within 10 fair steps",
+	"durable rule", "durable rule"};
+
+	for (fair_mode = 0; fair_mode < 6; fair_mode++)
+		for (int s = 0; s < (want[fair_mode] ? 4 : 3); s++)
+		{
+			CmcOptions	o;
+			CmcRun	   *r;
+			CmcResult	res;
+			char		path[512];
+
+			snprintf(path, sizeof(path), "%s/fair.replay",
+					 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
+			cmc_options_default(&o);
+			o.live_steps = fair_mode == 3 ? 10 : 1000;
+			o.max_depth = 30;
+			o.walks = 20;
+			o.replay_in = path;
+			r = mkc(&fair_model, s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : s == 2 ? CMC_SIMULATE :
+					CMC_REPLAY, "", NULL, &o);
+			cmc_check(r, &res);
+			if (getenv("CMC_VERBOSE"))
+				fprintf(stderr, "  fair mode %d search %d: verdict %d %s: %s\n", fair_mode, s,
+						res.verdict, res.prop ? res.prop : "", res.why);
+			if (!want[fair_mode])
+				CHECK(res.verdict == CMC_PASS);
+			else
+			{
+				CHECK(res.verdict == CMC_VIOLATION && strstr(res.why, want[fair_mode]) != NULL);
+				/* an engine error in the fair run is the engine's, not Replied's */
+				CHECK(!!strcmp(res.prop, "cmc:engine") == (fair_mode < 4));
+			}
+			if (s == 0 && res.trace_len > 1)
+				CHECK(cmc_write_replay(r, path, res.trace, res.trace_len - 1) == 0);
+			cmc_result_free(&res);
+			cmc_run_free(r);
+		}
+	fair_mode = 0;
 }
 
 /* ---- the command line (cmc_main) ------------------------------------ */
@@ -2567,6 +2707,7 @@ main(void)
 	test_core_rules();
 	test_searches_agree();
 	test_replay_refusals();
+	test_fair_schedule();
 	test_apply_refuses();
 	test_cli_input();
 	test_cli_runs();
