@@ -309,6 +309,35 @@ bad "too many successors"               "too many successors"              "var 
 L=$(printf '%01100d' 0)
 bad "a line longer than the loader holds" "line is too long"               "$V\ninvariant i: x <= $L"
 bad "an init longer than its buffer"    "init is too long"                 "var x : 0 .. 1\ninit x == $(printf '%0400d' 0)\ninit x == $(printf '%0400d' 0)\n$I"
+# a name or text past its buffer is refused, naming which, never cut
+N33=$(printf 'n%032d' 0)
+E600=$(printf '0 + %0596d' 0)
+printf 'module %s\n%b\n%b\n' "$N33" "$V" "$I" > "$OUT/bad.cml"
+expect "a module name too long" 3 "module name is too long" --spec "$OUT/bad.cml"
+bad "a const name too long"         "const name is too long"      "const $N33 = 1\n$V\n$I"
+bad "a var name too long"           "var name is too long"        "var $N33 : 0 .. 1\ninit $N33 == 0\n$I"
+bad "a var domain too long"         "var domain is too long"      "var x : $E600 .. 1\ninit x == 0\n$I"
+bad "a function domain too long"    "function domain is too long" "var f : [$E600 .. 1 -> 0 .. 1]\ninit f == 0\n$I"
+bad "a function range too long"     "function range is too long"  "var f : [0 .. 1 -> $E600 .. 1]\ninit f == 0\n$I"
+bad "a property name too long"      "property name is too long"   "$V\nproperty $N33: eventually TRUE"
+bad "an eventually too long"        "property is too long"        "$V\nproperty p: eventually $E600 == 0"
+bad "a leads-to side too long"      "property is too long"        "$V\nproperty p: $E600 == 0 ~> TRUE"
+bad "a symmetry set too long"       "symmetry set is too long"    "$V\nsymmetry {$E600}\n$I"
+bad "an init too long"              "init is too long"            "var x : 0 .. 1\ninit x == $E600\n$I"
+bad "an action name too long"       "action name is too long"     "$V\naction $N33:\n  x' = 1\n$I"
+bad "a parameterised action name too long" "action name is too long" "$V\naction $N33(i in 0 .. 1):\n  x' = i\n$I"
+bad "an action tag too long"        "action tag is too long"      "$V\naction a [$N33]:\n  x' = 1\n$I"
+bad "a parameter name too long"     "parameter name is too long"  "$V\naction a($N33 in 0 .. 1):\n  x' = 1\n$I"
+bad "a parameter domain too long"   "parameter domain is too long" "$V\naction a(i in $E600 .. 1):\n  x' = 1\n$I"
+bad "a guard too long"              "guard is too long"           "$V\naction a:\n  when $E600 == 0\n  x' = 1\n$I"
+bad "an invariant name too long"    "invariant name is too long"  "$V\ninvariant $N33: TRUE"
+bad "an assignment target too long" "assignment target is too long" "$V\naction a:\n  $N33' = 1\n$I"
+bad "an assignment too long"        "assignment is too long"      "$V\naction a:\n  x' = $E600\n$I"
+# what the loader takes: a module named twice keeps its first name, an
+# action with its colon left off, an assignment written without spaces,
+# and a line that is a comment
+printf 'module first\nmodule second\n# a comment\nvar x : 0 .. 1\ninit x == 0\naction a\n  x%s=1\ninvariant i: x <= 1\n' "'" > "$OUT/loose.cml"
+expect "a second module line keeps the first name"   0 "spec first, 1 variable, 1 action" --spec "$OUT/loose.cml"
 # the limits on declarations: one past each is refused, not dropped
 many() {	# many DESC NEEDLE FMT COUNT: COUNT lines of FMT (%d = index) after $V
 	# shellcheck disable=SC2059
@@ -367,10 +396,41 @@ binding "an index on a scalar is an error"     "x is not a function"  '[map]\nx[
 binding "an unknown variable is an error"      "no variable y"        '[map]\nx = "node[0][0]"\ny = "0"\n'
 binding "a field offset that is no number"     "offset of v"          '[fields]\nv = seven\n[map]\nx = "node[0].v"\n'
 binding "a key before any section is an error" "cannot read"          'x = "node[0][0]"\n[map]\nx = "node[0][0]"\n'
-printf '[map]\nx = "node[0][0]"\n' > "$OUT/b.bind"
-printf 'module f\nvar c : [0 .. 1 -> 0 .. 1]\ninit c == [i in 0 .. 1 -> 0]\ninvariant i: TRUE\n' > "$OUT/fun.cml"
+binding "a header key other than spec or binary" "cannot read model" 'model = x\n[map]\nx = "node[0][0]"\n'
+binding "a field offset past 254"              "from 0 to 254, not '300'" '[fields]\nv = 300\n[map]\nx = "node[0].v"\n'
+binding "a field offset with no value"         "from 0 to 254, not ''" '[fields]\nv =\n[map]\nx = "node[0].v"\n'
+binding "a line past the reader's buffer"      "a line is too long" "[map]\nx = \"$(printf '%01100d' 0)\"\n"
+binding "a binding expression too long"        "binding expression is too long" "[map]\nx = \"$(printf '0 + %0596d' 0)\"\n"
+binding "a field name too long"                "field name is too long" "[fields]\n$(printf 'f%032d' 0) = 0\n[map]\nx = \"0\"\n"
+binding "a binding variable too long"          "binding variable is too long" "[map]\n$(printf 'x%032d' 0) = \"0\"\n"
+binding "a binding index too long"             "binding index is too long" "[map]\nx[$(printf 'i%032d' 0)] = \"0\"\n"
+{ printf '[fields]\n'; i=0; while [ $i -lt 17 ]; do printf 'f%d = %d\n' $i $i; i=$((i + 1)); done; printf '[map]\nx = "0"\n'; } > "$OUT/b.bind"
+expectp "too many fields"   3 "too many fields"   "$RD" "$S/c2init.cml" "$OUT/b.bind" 0
+# a header, comments, and an unquoted expression are read
+printf 'spec = c2init.cml  # the spec\nbinary = x\n\n[map]\nx = node[0][0]\n' > "$OUT/b.bind"
+expectp "a header, comments and an unquoted expression" 0 "accepted 3" "$RD" "$S/c2init.cml" "$OUT/b.bind" 0 1 2
+# a function variable: bound entry by entry, and refused bound whole
+printf 'module f\nvar c : [0 .. 1 -> 0 .. 1]\ninit c == [i in 0 .. 1 -> 0]\naction set(i in 0 .. 1):\n  when c[i] == 0\n  c%s = [c except [i] = 1]\ninvariant i: TRUE\n' "'" > "$OUT/fun.cml"
 printf '[map]\nc = "0"\n' > "$OUT/fun.bind"
 expectp "a function variable bound without an index"  3 "c is a function" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0
+printf '[map]\nc[i] = "node[0][0] - i >= 1"\n' > "$OUT/fun.bind"
+expectp "C2: a function bound entry by entry steps"   0 "accepted 3" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0 1 2
+expectp "C2: two entries set at once match no action" 1 "no matching abstract action" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0 2
+printf '[map]\nc[i] = "{i}"\n' > "$OUT/fun.bind"
+expectp "an entry bound to a set is an error"         3 "binding c\[i\]: expected an integer, not a set" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0
+printf '[map]\nc[i] = "y"\n' > "$OUT/fun.bind"
+expectp "an entry that fails to evaluate"             3 "unknown identifier" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0
+printf 'module fd\nvar c : [0 .. y -> 0 .. 1]\ninit c == 0\ninvariant i: TRUE\n' > "$OUT/fd.cml"
+printf '[map]\nc[i] = "0"\n' > "$OUT/fun.bind"
+expectp "a function domain that fails to evaluate"    3 "" "$RD" "$OUT/fd.cml" "$OUT/fun.bind" 0
+# C2 at the step level: an invariant broken by an observed step, and a
+# guard that fails to evaluate while matching the step
+printf 'module g\nvar x : 0 .. 2\ninit x == 0\naction up:\n  when x < 2 and y\n  x%s = x + 1\ninvariant i: x <= 1\n' "'" > "$OUT/g.cml"
+printf '[map]\nx = "node[0][0]"\n' > "$OUT/b.bind"
+printf 'module h\nvar x : 0 .. 2\ninit x == 0\naction up:\n  when x < 2\n  x%s = x + 1\ninvariant low: x <= 1\n' "'" > "$OUT/h.cml"
+expectp "C2: an observed step breaks the invariant"   1 "rejected at step 2 (value 2): low" "$RD" "$OUT/h.cml" "$OUT/b.bind" 0 1 2
+expectp "C2: a guard that fails while matching a step" 3 "unknown identifier" "$RD" "$OUT/g.cml" "$OUT/b.bind" 0 1
+expectp "C1: an invariant that fails to evaluate"     3 "" "$RD" -1 "$OUT/g.cml" "$OUT/b.bind" 3
 # the observables a binding reads: node[i][k], node[i].field, nodes,
 # replies and a reply's .src and .val (refine_driver.c says what each
 # reports), each mapped onto a spec whose invariant checks the value
