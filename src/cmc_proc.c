@@ -541,9 +541,31 @@ static int eval_unary(const char **p, Ctx *c){ skipws(p);
 		*p=save; (*p)++; r=eval_expr(p,c); if(r<0)return r; skipws(p); if(**p!=')')return -1; (*p)++; return r;
 	}
 	return eval_qc(p,c); }
-static int eval_expr(const char **p, Ctx *c){ int r=eval_unary(p,c); if(r<0)return r;
-	for(;;){ skipws(p); if(word(p,"and")){int b=eval_unary(p,c);if(b<0)return b;r=r&&b;}
-		else if(word(p,"or")){int b=eval_unary(p,c);if(b<0)return b;r=r||b;} else break; } return r; }
+/* A chain of `and`s or of `or`s.  Mixing the two at one level is a parse
+ * error: they would associate left to right with equal precedence, so
+ * `a or b and c` meant (a or b) and c, which a reader who expects `and`
+ * to bind tighter would take for a different invariant. */
+static int
+eval_expr(const char **p, Ctx *c)
+{
+	int			r = eval_unary(p, c), conn = 0;
+
+	if (r < 0) return r;
+	for (;;)
+	{
+		skipws(p);
+		int			is_and = word(p, "and"), is_or = is_and ? 0 : word(p, "or");
+
+		if (!is_and && !is_or) break;
+		if (conn && conn != (is_and ? 1 : 2)) return -1;
+		conn = is_and ? 1 : 2;
+		int			b = eval_unary(p, c);
+
+		if (b < 0) return b;
+		r = is_and ? (r && b) : (r || b);
+	}
+	return r;
+}
 
 /* evaluate a whole invariant: 1 holds, 0 fails, -1 cannot parse.
  * Text after a complete expression is a parse error, never ignored. */

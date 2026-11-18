@@ -230,8 +230,9 @@ agreement = "all i in nodes : all j in nodes :
              or node[i].decided == node[j].decided"
 ```
 
-(all on one line in the file).  `and` and `or` associate left to right
-with equal precedence; use parentheses.  Every invariant is parsed when
+(all on one line in the file).  `and` and `or` may not be mixed at one
+level without parentheses: `a or b and c` is a parse error, and
+`a or (b and c)` says which is meant.  Every invariant is parsed when
 the file is loaded, and a parse error, an unknown field, text after a
 complete expression, or an unclosed parenthesis is an error, even in a
 part no state reaches.
