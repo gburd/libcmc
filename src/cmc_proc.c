@@ -864,6 +864,50 @@ writable(Node *nd, int fd)
 	return (*fd_flags(nd, fd) & FD_PLAIN) ? POLLOUT | POLLHUP : 0;
 }
 
+/* What kind of checker-owned fd fd is, for a socket call that Linux
+ * answers by its kind: a connection, the listener, an eventfd, an epoll
+ * instance, a socket not yet dialled or listening, or nothing open.
+ * fd is 500 or above. */
+enum { K_NONE, K_CONN, K_LISTEN, K_EFD, K_EPOLL, K_PLAIN };
+static int ep_slot(Node *nd, int fd);
+
+static int
+fd_kind(Node *nd, int fd)
+{
+	if (fd >= nd->next_fd) return K_NONE;
+	if (cfd_slot(nd, fd) >= 0) return K_CONN;
+	if (fd == nd->listener_fd) return K_LISTEN;
+	if (efd_slot(nd, fd) >= 0) return K_EFD;
+	if (ep_slot(nd, fd) >= 0) return K_EPOLL;
+	if (fd - 500 < MAXOWNED && (nd->fdflag[fd - 500] & FD_PLAIN)) return K_PLAIN;
+	return K_NONE;
+}
+
+/* Linux's errno for socket call nr on owned fd fd of the wrong kind, or
+ * 0 when the call applies to it: ENOTSOCK on an eventfd or an epoll
+ * instance, EBADF on nothing open, and the state errors of a socket
+ * (connect on a connected or listening socket is EISCONN; listen on a
+ * connection, accept on anything but the listener, and bind on a
+ * connection are EINVAL).  read, write, recvfrom and sendto on a plain
+ * socket are answered by the callers (ENOTCONN, EPIPE). */
+static int
+wrong_kind(Node *nd, long nr, int fd)
+{
+	int k = fd_kind(nd, fd);
+
+	if (k == K_NONE) return EBADF;
+	if (k == K_EFD || k == K_EPOLL)
+		return nr == SYS_read || nr == SYS_write ? 0 : ENOTSOCK;
+	switch (nr)
+	{
+		case SYS_connect: return k == K_LISTEN ? EISCONN : 0;
+		case SYS_listen: return k == K_CONN ? EINVAL : 0;
+		case SYS_bind: return k == K_CONN ? EINVAL : 0;
+		case SYS_accept: case SYS_accept4: return k == K_LISTEN ? 0 : EINVAL;
+		default: return 0;
+	}
+}
+
 static void cfd_set(Node *nd, int fd, int peer, int conn, int end){ if(nd->nc>=MAXCONN) die(1,"node %d has more than %d connections",nd->id,MAXCONN); nd->cfd[nd->nc]=fd; nd->cpeer[nd->nc]=peer; nd->cconn[nd->nc]=conn; nd->cend[nd->nc]=end; nd->cnonblock[nd->nc]=0; nd->ccloexec[nd->nc]=0; nd->nc++; }
 /* forget a node's fd slot k, keeping the rest in open order */
 static void
@@ -2007,12 +2051,20 @@ serve(Node *nd, Thread *th)
 			if (got < n) cr_fail(nd->id, "getrandom fills a buffer");
 			g_resp->val = (long) n; break;
 		}
-		case SYS_setsockopt: case SYS_bind: g_resp->val = 0; break;
+		case SYS_setsockopt: case SYS_bind:
+		{
+			int err = wrong_kind(nd, nr, (int) a[0]);
+			if (err) { g_resp->error = -err; break; }
+			g_resp->val = 0; break;
+		}
 		case SYS_listen:
 		{
 			/* the socket's flags, set while it was plain, are the
 			 * listener's from now on */
 			int fd = (int) a[0];
+			int err = wrong_kind(nd, nr, fd);
+			if (err) { g_resp->error = -err; break; }
+			if (fd == nd->listener_fd) { g_resp->val = 0; break; }	/* a second listen() */
 			unsigned char *f = fd_flags(nd, fd);
 			nd->listener_fd = fd;
 			nd->ls_nonblock = (*f & FD_NB) != 0; nd->ls_cloexec = (*f & FD_CX) != 0;
@@ -2040,6 +2092,10 @@ serve(Node *nd, Thread *th)
 		}
 		case SYS_connect:
 		{
+			{
+				int err = wrong_kind(nd, nr, (int) a[0]);
+				if (err) { g_resp->error = -err; break; }
+			}
 			/* read the dest port to learn the peer id */
 			struct { unsigned short fam; unsigned short port; } sa;
 			if (cr_read(nd->pid, a[1], &sa, sizeof sa) != sizeof sa) { g_resp->error = -EFAULT; break; }
@@ -2095,6 +2151,10 @@ serve(Node *nd, Thread *th)
 			 * fd, so it is refused rather than ignored */
 			if (nr == SYS_accept4 && (a[3] & ~(uint64_t) SOCK_CLOEXEC))
 				die(3, "node %d: accept4 flags %#llx are not modelled (set O_NONBLOCK with fcntl())", nd->id, (unsigned long long) a[3]);
+			{
+				int err = wrong_kind(nd, nr, (int) a[0]);
+				if (err) { g_resp->error = -err; g_resp->val = 0; break; }
+			}
 			/* A non-blocking listener with no connection queued returns
 			 * EAGAIN at once, so an event loop that drains the backlog
 			 * (accept until EAGAIN) makes progress instead of parking on
@@ -2117,8 +2177,21 @@ serve(Node *nd, Thread *th)
 			/* sendto's flags: MSG_NOSIGNAL is honoured; any other would
 			 * change the call (MSG_DONTWAIT, MSG_MORE, MSG_OOB) and is
 			 * refused, as is a destination address on a connected socket */
+			if (nr == SYS_sendto)
+			{
+				int err = wrong_kind(nd, nr, fd);
+				if (err) { g_resp->error = -err; break; }
+			}
 			if (nr == SYS_sendto && ((a[3] & ~(uint64_t) MSG_NOSIGNAL) || a[4]))
 				die(3, "node %d: sendto flags %#llx or a destination address are not modelled", nd->id, (unsigned long long) a[3]);
+			if (fd_kind(nd, fd) == K_PLAIN)
+			{
+				/* a socket never connected: EPIPE, and the SIGPIPE its
+				 * disposition decides unless MSG_NOSIGNAL */
+				int nosig = nr == SYS_sendto && (a[3] & MSG_NOSIGNAL);
+				if (!nosig && sigpipe_kills(nd, th)) return 1;
+				g_resp->error = -EPIPE; break;
+			}
 			int ews = efd_slot(nd, fd);
 			if (ews >= 0)
 			{
@@ -2130,7 +2203,7 @@ serve(Node *nd, Thread *th)
 				nd->efdval[ews] += add; g_resp->val = 8; break;
 			}
 			int cs = cfd_slot(nd, fd);
-			if (cs < 0) die(1, "node %d writes fd %d, which is no connection", nd->id, fd);
+			if (cs < 0) { g_resp->error = fd_kind(nd, fd) == K_EPOLL ? -EINVAL : -EBADF; break; }
 			int peer = nd->cpeer[cs], c = nd->cconn[cs], e = nd->cend[cs];
 			int len = (int) a[2];
 			if (len < 0 || len > M.max_write) die(1, "node %d writes %d bytes in one call; the limit is %d (raise [target] max_write, up to %d)", nd->id, len, M.max_write, MSGLEN);
@@ -2182,6 +2255,12 @@ serve(Node *nd, Thread *th)
 			/* recvfrom's flags change the call (MSG_PEEK keeps the bytes,
 			 * MSG_WAITALL waits for all, MSG_DONTWAIT does not block), so
 			 * any is refused; a source address out-parameter is not filled */
+			if (nr == SYS_recvfrom && fd >= 500)
+			{
+				int err = wrong_kind(nd, nr, fd);
+				if (err) { g_resp->error = -err; break; }
+			}
+			if (fd >= 500 && fd_kind(nd, fd) == K_PLAIN) { g_resp->error = -ENOTCONN; break; }
 			if (nr == SYS_recvfrom && fd >= 500 && (a[3] || a[4]))
 				die(3, "node %d: recvfrom flags %#llx or a source address are not modelled", nd->id, (unsigned long long) a[3]);
 			if (fd == DURABLE_FD)
@@ -2223,7 +2302,9 @@ serve(Node *nd, Thread *th)
 				nd->efdval[ers] = 0; g_resp->val = 8; break;
 			}
 			int rs = cfd_slot(nd, fd);
-			if (rs < 0) die(1, "node %d reads fd %d, which is no connection", nd->id, fd);
+			/* an epoll instance cannot be read (EINVAL), and a closed fd is
+			 * EBADF, as on Linux; a plain socket was answered above */
+			if (rs < 0) { g_resp->error = fd_kind(nd, fd) == K_EPOLL ? -EINVAL : -EBADF; break; }
 			int peer = nd->cpeer[rs], c = nd->cconn[rs], e = nd->cend[rs];
 			if (fd != nd->timer_fd && c >= 0 && conn_head(c, e) < 0)
 			{

@@ -608,21 +608,30 @@ echo "-- the corners of the calls the checker answers itself"
 # syscorner.c records each call's outcome.  Run natively first: its record
 # is then the model's invariant (cmc reaches it, and only it).  On 2.0.0
 # a fcntl on an epoll fd or an unconnected socket changed the listener's
-# flags, an eventfd's FD_CLOEXEC read back 0, and poll called a listening
-# socket writable; each mode below that covers one of these failed.
+# flags, an eventfd's FD_CLOEXEC read back 0, poll called a listening
+# socket writable, and socket calls on an eventfd, an epoll instance or a
+# socket in the wrong state succeeded where Linux refuses them (wrongfd);
+# each mode below that covers one of these failed.
 SC=$OUT/syscorner
 mkdir -p "$SC"
-for m in badbuf eventfd epoll poll clock futex nbepoll; do
+for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn; do
 	(cd "$SC" && timeout 30 "$B/proc/syscorner" 0 "$m" 3>"$SC/$m.state" > /dev/null 2>&1)
 	# shellcheck disable=SC2046
 	set -- $(od -An -tu1 "$SC/$m.state" | tr -s ' \n' ' ')
 	if [ $# -lt 3 ]; then echo "FAIL syscorner $m: the native run left no record"; fail=1; continue; fi
 	shift 2; shift
-	cond="" k=0
-	for v in "$@"; do cond="$cond and node[0][$k] == $v"; k=$((k + 1)); done
-	cond=${cond# and }
-	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nlinux = "node[0][0] < 1 or (%s)"\nreached = "eventually %s"\n' \
-		"$B/proc/syscorner" "$m" "$cond" "$cond" > "$SC/$m.model"
+	# the record as invariants of eight bytes each (an invariant holds at
+	# most 255 characters), all of which must hold once the node is done,
+	# and the whole record must be reached
+	invs="" cond="" k=0
+	for v in "$@"; do
+		cond="$cond and node[0][$k] == $v"; k=$((k + 1))
+		if [ $((k % 8)) = 0 ] || [ $k = $# ]; then
+			invs="${invs}linux$k = \"node[0][0] < 1 or (${cond# and })\"\n"; cond=""
+		fi
+	done
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\n%breached = "eventually node[0][0] == 1 and node[0][%d] >= 0"\n' \
+		"$B/proc/syscorner" "$m" "$invs" "$((k - 1))" > "$SC/$m.model"
 	expect_by 60 "syscorner $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$SC/$m.model"
 done
 # a limit or an unmodelled argument ends the check, never a guess
@@ -644,8 +653,8 @@ scm manypoll 1 "polls 80 fds; the limit is 16"
 scm ppolltimeout 3 "ppoll with a finite timeout is not modelled"
 scm futextimeout 3 "a futex wait with a timeout is not modelled"
 scm bigwrite 1 "writes 4096 bytes in one call"
-scm notconn 1 "writes fd 500, which is no connection"
-scm readnotconn 1 "reads fd 501, which is no connection"
+printf '[target]\nbinary = %s\nnodes = 2\nargs = notconnpipe\n[invariants]\nnever = "node[0][0] < 1"\nkilled = "eventually node[0][0] < 1"\n' "$B/proc/syscorner" > "$SC/r-notconnpipe.model"
+expect_by 60 "syscorner notconnpipe: SIGPIPE ends the writer" 0 "No error has been found" --model-file "$SC/r-notconnpipe.model"
 scm connect 3 "connects to port 20099, which is no node's"
 
 echo "-- edges: limits, partial transfers, refusals and signals"

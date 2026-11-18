@@ -351,21 +351,59 @@ main(int argc, char **argv)
 		code(fcntl(ep, F_GETFD) == FD_CLOEXEC ? 0 : -1);
 		code(fcntl(ls, F_GETFD) == 0 ? 0 : -1);
 	}
+	else if (!strcmp(mode, "wrongfd"))
+	{
+		/* socket calls on the wrong kind of fd: Linux refuses each one
+		 * (ENOTSOCK on an eventfd or an epoll instance, EINVAL or EISCONN
+		 * on a socket in the wrong state, EBADF on a closed fd) */
+		int			ls = listener(BASE);
+		int			e = eventfd(0, 0), ep = epoll_create1(0);
+		int			plain = socket(AF_INET, SOCK_STREAM, 0);
+		int			gone = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in a = addr(BASE + 1);
+		int			one = 1;
+
+		close(gone);
+		code(connect(e, (struct sockaddr *) &a, sizeof a));
+		code(connect(ep, (struct sockaddr *) &a, sizeof a));
+		code(connect(ls, (struct sockaddr *) &a, sizeof a));
+		code(connect(gone, (struct sockaddr *) &a, sizeof a));
+		code(listen(e, 4));
+		code(bind(e, (struct sockaddr *) &a, sizeof a));
+		code(setsockopt(ep, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one));
+		code(accept(e, NULL, NULL));
+		code(accept(plain, NULL, NULL));
+		code(recvfrom(e, &one, 1, 0, NULL, NULL));
+		code(sendto(ep, &one, 1, 0, NULL, 0));
+		code(send(plain, "x", 1, MSG_NOSIGNAL));
+		code(recv(plain, &one, 1, MSG_DONTWAIT));
+	}
 	else if (!strcmp(mode, "notconn"))
 	{
+		/* reads and writes on fds that are no connection: a plain socket
+		 * (ENOTCONN; EPIPE, with SIGPIPE ignored here), an epoll instance
+		 * (EINVAL), a closed socket (EBADF) */
+		int			s = socket(AF_INET, SOCK_STREAM, 0);
+		int			ep = epoll_create1(0);
+		int			gone = socket(AF_INET, SOCK_STREAM, 0);
+		char		c = 'x';
+
+		signal(SIGPIPE, SIG_IGN);
+		close(gone);
+		code(write(s, &c, 1));
+		code(read(s, &c, 1));
+		code(read(ep, &c, 1));
+		code(write(ep, &c, 1));
+		code(read(gone, &c, 1));
+		code(write(gone, &c, 1));
+	}
+	else if (!strcmp(mode, "notconnpipe"))
+	{
+		/* the same write with SIGPIPE at its default: the node dies */
 		int			s = socket(AF_INET, SOCK_STREAM, 0);
 		char		c = 'x';
 
 		code(write(s, &c, 1));
-	}
-	else if (!strcmp(mode, "readnotconn"))
-	{
-		int			e = eventfd(0, 0);
-		int			ep = epoll_create1(0);
-		char		c;
-
-		(void) e;
-		code(read(ep, &c, 1));
 	}
 	emit(1);
 	return 0;
