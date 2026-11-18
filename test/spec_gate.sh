@@ -165,6 +165,19 @@ emitted "an except with two keys"              "EXCEPT !\[i\] = 1, !\[0\] = 1"
 emitted "weak fairness for every action"       "WF_vars(tick) /. WF_vars(both) /. WF_vars(idle)"
 emitted "eventually"                           "<>(x = 0)"
 emitted "leads-to"                             ") ~> (f\[0\] = 1)"
+# words that only begin with an operator's name stay names; count over a
+# set literal, nested in parens, with a nested count, and a gated action
+# that --define leaves out of Next and the fairness list
+printf 'module words\nconst counted = 1\nvar inner : 0 .. 1\nvar orb : 0 .. 1\ninit inner == 0 and orb == 0\naction a:\n  when (count k in {0, 1} : (k == inner) and (count j in 0 .. 1 : j == k) == 1) >= counted\n  orb%s = 1\naction b [OFF]:\n  inner%s = 1\nfairness weak\ninvariant ok: orb + inner * 2 / 1 <= 3 and (orb mod 2) == orb\n' "'" "'" > "$OUT/words.cml"
+expect "emit-tla: count over a set literal, nested"   0 "{0, 1}  :  (k = inner) /. (Cardinality({j .in 0 .. 1  :  j = k})) = 1}))" --emit-tla "$OUT/words.cml"
+expect "emit-tla: a name that starts with an operator" 0 "orb' = 1" --emit-tla "$OUT/words.cml"
+expect "emit-tla: a gated action is left out"         0 "WF_vars(a)\$" --emit-tla "$OUT/words.cml"
+expect "emit-tla: / and mod in an invariant"          0 "orb + inner . 2 .div  1 <= 3 /. (orb % 2) = orb" --emit-tla "$OUT/words.cml"
+# except with a key that is itself an application, and a value with
+# spaces; and fairness over a module whose first action is gated off
+printf 'module ex\nvar f : [0 .. 1 -> 0 .. 1]\nvar g : [0 .. 1 -> 0 .. 1]\ninit f == [i in 0 .. 1 -> 0] and g == [i in 0 .. 1 -> 0]\naction off [OFF]:\n  g%s = g\naction set(i in 0 .. 1):\n  f%s = [f except [g[i]] =  1 - f[i] ]\nfairness weak\ninvariant ok: TRUE\n' "'" "'" > "$OUT/ex.cml"
+expect "emit-tla: an except keyed by an application" 0 "EXCEPT !\[g\[i\]\] =  1 - f\[i\] \]" --emit-tla "$OUT/ex.cml"
+expect "emit-tla: fairness skips a gated action"     0 "Spec == Init /. \[\]\[Next\]_vars /. WF_vars(set)$" --emit-tla "$OUT/ex.cml"
 printf 'module bare\nvar x : 0 .. 1\ninit x == 0\ninvariant ok: x == 0\n' > "$OUT/bare.cml"
 expect "emit-tla: no constants and no actions" 0 "UNCHANGED vars" --emit-tla "$OUT/bare.cml"
 # every operator inside a count body is translated (emit_gate runs TLC on it)
@@ -226,6 +239,18 @@ typed "a broken operand of a range" "unknown identifier"     "x in y .. 1"
 typed "a broken upper bound"    "unknown identifier"         "x in 0 .. y"
 typed "a broken set in a quantifier" "unknown identifier"    "all i in y .. 1 : TRUE"
 typed "or of a set on the right" "expected a boolean in or"  "FALSE or {1}"
+typed "an and of a broken operand"  "unknown identifier"       "TRUE and y"
+typed "an or of a broken operand"   "unknown identifier"       "FALSE or y"
+typed "a set with text after it"  "trailing text"            "x in {0} 1"
+typed "a range with a broken bound" "unknown identifier"       "x in 0 .. (y)"
+typed "a literal with no -> after the set" "expected -> in function literal" "[i in 0 .. 1 0] == f"
+typed "an except value that fails"  "unknown identifier"       "[f except [0] = y] == f"
+typed "an except key that fails"    "unknown identifier"       "[f except [y] = 0] == f"
+typed "a / with a broken divisor"   "unknown identifier"       "x / y == 0"
+typed "a mod with a broken divisor" "unknown identifier"       "x mod y == 0"
+typed "a function applied to a broken key" "unknown identifier" "f[y] == 0"
+typed "a literal body that fails"   "unknown identifier"       "[i in 0 .. 1 -> y] == f"
+typed "a literal body of a set"     "expected an integer in a function value" "[i in 0 .. 1 -> {i}] == f"
 # each malformed form is refused with its reason
 typed "an unclosed (" "expected )" "(x == 0"
 typed "an unclosed [i in" "expected ]" "f == [i in 0 .. 1 -> 0"
@@ -297,6 +322,8 @@ V='var x : 0 .. 1\ninit x == 0'
 I='invariant i: x <= 1'
 bad "a const without ="             "const needs ="            "const N 3\n$V\n$I"
 bad "a const that is not a number"  "const N: bad value"       "const N = {1}\n$V\n$I"
+bad "a const that fails to evaluate" "const N: bad value"      "const N = M\n$V\n$I"
+bad "a const that is a boolean"     "const N: bad value"       "const N = TRUE\n$V\n$I"
 bad "a var without :"               "var needs :"              "var x 0 .. 1\ninit x == 0\n$I"
 bad "a function var without ->"     "function var needs ->"    "var f : [0 .. 1, 0 .. 1]\ninit f == 0\n$I"
 bad "fairness other than weak"      "only 'fairness weak'"     "$V\nfairness strong\n$I"
