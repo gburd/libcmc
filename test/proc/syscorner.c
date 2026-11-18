@@ -405,6 +405,18 @@ main(int argc, char **argv)
 		code(read(gone, &c, 1));
 		code(write(gone, &c, 1));
 	}
+	else if (!strcmp(mode, "pollclosed"))
+	{
+		/* poll of a closed fd: POLLNVAL at once, as on Linux */
+		int			s = socket(AF_INET, SOCK_STREAM, 0);
+		struct pollfd p;
+
+		close(s);
+		p.fd = s;
+		p.events = POLLIN;
+		p.revents = 0;
+		code(poll(&p, 1, -1) == 1 && p.revents == POLLNVAL ? 0 : -1);
+	}
 	else if (!strcmp(mode, "notconnpipe"))
 	{
 		/* the same write with SIGPIPE at its default: the node dies */

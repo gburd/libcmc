@@ -2565,6 +2565,8 @@ serve(Node *nd, Thread *th)
 				pfs[i].revents = 0;
 				int fd = pfs[i].fd;
 				if (fd < 0) continue;
+				/* a closed owned fd is ready at once with POLLNVAL, as on Linux */
+				if (fd >= 500 && fd_kind(nd, fd) == K_NONE) { pfs[i].revents = POLLNVAL; ready++; continue; }
 				int es = efd_slot(nd, fd);
 				unsigned out_ev = writable(nd, fd);
 				if ((pfs[i].events & POLLOUT) && out_ev) { pfs[i].revents |= (short) out_ev; ready++; continue; }
