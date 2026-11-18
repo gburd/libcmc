@@ -168,9 +168,137 @@ typed "a function applied to a set"       "expected an integer" "f[{0}] == 0"
 typed "== between a function and a set"   "compares a function with a set" "f == {0}"
 typed "== between a boolean and an integer" "compares a boolean with an integer" "TRUE == 1"
 typed "!= between a set and an integer"   "compares a set with an integer" "{x} != 0"
+# each malformed form is refused with its reason
+typed "an unclosed (" "expected )" "(x == 0"
+typed "an unclosed [i in" "expected ]" "f == [i in 0 .. 1 -> 0"
+typed "a literal with no ->" "expected -> in function literal" "[i in 0 .. 1 : 0] == f"
+typed "[..] with neither in nor except" "expected 'in' or 'except'" "[f with [0] = 1] == f"
+typed "except on a constant" "except on a non-variable" "[g except [0] = 1] == f"
+typed "except on a scalar" "except on a variable that is not a function" "[x except [0] = 1] == f"
+typed "except with no [" "expected \\[ in except" "[f except 0 = 1] == f"
+typed "except with no ]" "expected ]" "[f except [0 = 1] == f"
+typed "except with no =" "expected = in except" "[f except [0] 1] == f"
+typed "except with no closing ]" "expected ] to close except" "f == [f except [0] = 1"
+typed "an unclosed {" "expected }" "{0} == {0, 1"
+typed "a set past its limit" "set too large" "{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24} == {0}"
+typed "a range past its limit" "range too large" "x in 0 .. 24"
+typed "a literal past its limit" "function too large" "[i in 0 .. 12 -> 0] == f"
+typed "an except past its limit" "function too large" "[f except [2] = 0, [3] = 0, [4] = 0, [5] = 0, [6] = 0, [7] = 0, [8] = 0, [9] = 0, [10] = 0, [11] = 0, [12] = 0] == f"
+typed "an unclosed application" "expected ] in application" "0 == f[0"
+typed "a scalar applied" "applied a non-function" "x[0] == 0"
+typed "an application outside the domain" "outside its domain" "f[2] == 0"
+typed "an empty operand" "expected an expression" "x == "
+typed "an unknown name" "unknown identifier" "y == 0"
+typed "text after the expression" "trailing text" "x == 0 )"
+typed "a quantifier with no in" "expected 'in' in quantifier" "all i : TRUE"
+typed "a quantifier with no :" "expected ':' in quantifier" "all i in 0 .. 1 TRUE"
+typed "a quantifier over no set" "expected a set" "all i in x : TRUE"
+typed "a broken body over the empty set" "unknown identifier" "all i in {} : y"
+typed "a bound name that shadows a var" "redeclares" "some x in 0 .. 1 : TRUE"
+typed "nested bound names past the limit" "too many nested bound names" "all a in 0 .. 1 : all b in 0 .. 1 : all c in 0 .. 1 : all d in 0 .. 1 : all e in 0 .. 1 : TRUE"
+typed "divide by zero" "divide by zero" "x / 0 == 0"
+typed "a negative divisor" "/ of a negative number" "x / (0 - 1) == 0"
+typed "mod by zero" "mod by zero" "x mod 0 == 0"
+typed "a negative mod" "mod of a negative number" "(0 - 1) mod 2 == 1"
+typed "an overflowing product" "integer overflow in \\*" "4611686018427387904 * 2 == 0"
+typed "an overflowing sum" "integer overflow in +" "9223372036854775807 + 1 == 0"
+typed "an overflowing difference" "integer overflow in -" "(0 - 9223372036854775807) - 2 == 0"
+typed "a primed variable read" "primed variable" "x' == 0"
+# the values the evaluator computes, each pinned by the verdict it gives
+value() {	# value DESC WANT EXPR: invariant EXPR holds (0) or is violated (1)
+	printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\nvar g : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> i] and g == [i in 0 .. 1 -> 0]\ninvariant i: %s\n' "$3" > "$OUT/value.cml"
+	if [ "$2" = 0 ]; then expect "$1" 0 "No error has been found" --spec "$OUT/value.cml"
+	else expect "$1" 1 "Invariant i is violated" --spec "$OUT/value.cml"; fi
+}
+value "division truncates"          0 "7 / 2 == 3 and 7 mod 2 == 1 and 2 * 3 - 1 == 5"
+value "sets compare by members"     0 "{1, 0, 1} == {0, 1} and {0} != {1} and {} == {}"
+value "a set and a longer set"      1 "{0} == {0, 1}"
+value "functions compare by entries" 0 "f != g and f == [i in 0 .. 1 -> i] and [g except [1] = 1] == f"
+value "a function and a shorter one" 1 "f == [i in 0 .. 0 -> 0]"
+value "an except that adds a key"   1 "[f except [5] = 0] == f"
+value "booleans compare"            0 "TRUE != FALSE and (x == 0) == TRUE"
+value "quantifiers and count"       0 "(some i in 0 .. 1 : f[i] == 1) and not (all i in 0 .. 1 : f[i] == 1) and (count i in 0 .. 1 : f[i] == 0) == 1"
+value "orders"                      0 "0 < 1 and 1 > 0 and 1 <= 1 and 1 >= 1 and not (1 < 1)"
+value "membership"                  0 "x in {0} and not (x in {}) and 1 in 0 .. 1"
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
 expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml"
+
+# every line the loader cannot use is refused with its reason, never
+# skipped: a skipped `when` or invariant would check a different model
+echo "-- the loader names what it cannot read"
+# bad DESC NEEDLE BODY: a spec of module m with BODY (printf %b escapes)
+# is refused, exit 3, with NEEDLE
+bad() {
+	printf 'module m\n%b\n' "$3" > "$OUT/bad.cml"
+	expect "$1" 3 "$2" --spec "$OUT/bad.cml"
+}
+V='var x : 0 .. 1\ninit x == 0'
+I='invariant i: x <= 1'
+bad "a const without ="             "const needs ="            "const N 3\n$V\n$I"
+bad "a const that is not a number"  "const N: bad value"       "const N = {1}\n$V\n$I"
+bad "a var without :"               "var needs :"              "var x 0 .. 1\ninit x == 0\n$I"
+bad "a function var without ->"     "function var needs ->"    "var f : [0 .. 1, 0 .. 1]\ninit f == 0\n$I"
+bad "fairness other than weak"      "only 'fairness weak'"     "$V\nfairness strong\n$I"
+bad "a property without a name"     "property needs name:"     "$V\nproperty x == 1\n$I"
+bad "a property of no known form"   "property must be"         "$V\nproperty p: always x == 0\n$I"
+bad "an invariant without a name"   "invariant needs name:"    "$V\ninvariant x <= 1"
+bad "a when outside an action"      "when outside action"      "$V\nwhen x == 0\n$I"
+bad "an action parameter without in" "action param needs 'in'" "$V\naction a(i):\n  x' = 1\n$I"
+bad "a line that is nothing"        "cannot parse: x = 1"      "$V\nx = 1\n$I"
+bad "an extends that does not load" "cannot extend nosuch"     "extends nosuch\n$V\n$I"
+bad "a spec with no variables"      "no variables"             "init x == 0\n$I"
+bad "a spec with no init"           "no init"                  "var x : 0 .. 1\n$I"
+bad "a spec with no invariant"      "no invariant or property" "$V"
+bad "an init conjunct that is not =="   "init conjunct is not var == expr" "var x : 0 .. 1\ninit x < 1\n$I"
+bad "an init of an unknown variable"    "init assigns unknown var y"       "var x : 0 .. 1\ninit y == 0\n$I"
+bad "an init that sets a variable twice" "init assigns x twice"            "var x : 0 .. 1\ninit x == 0 and x == 1\n$I"
+bad "an init that leaves a variable unset" "init does not set y"           "$V\nvar y : 0 .. 1\n$I"
+bad "an assignment to an unknown variable" "assign to unknown var y"       "$V\naction a:\n  y' = 1\n$I"
+bad "a function var outside its keys"   "is not a function on"             "var f : [0 .. 1 -> 0 .. 1]\ninit f == [i in 0 .. 2 -> 0]\ninvariant i: TRUE"
+bad "a function var outside its range"  "is outside its range"             "var f : [0 .. 1 -> 0 .. 1]\ninit f == [i in 0 .. 1 -> 2]\ninvariant i: TRUE"
+bad "a scalar var given a set"          "x is a set, not an integer"       "var x : 0 .. 1\ninit x == {0}\ninvariant i: TRUE"
+bad "a function var given an integer"   "is not a function on"             "var f : [0 .. 1 -> 0 .. 1]\ninit f == 0\ninvariant i: TRUE"
+bad "a domain of non-integer bounds"    "bounds of 0 .. TRUE are not integers" "var x : 0 .. TRUE\ninit x == 0\ninvariant i: TRUE"
+bad "a domain that is not a set"        "expected a set"                   "var x : x\ninit x == 0\ninvariant i: TRUE"
+bad "a parameter that redeclares a var" "parameter x redeclares"           "$V\naction a(x in 0 .. 1):\n  x' = 1\n$I"
+bad "a parameter domain that is not a set" "param domain: expected a set" "$V\naction a(i in x):\n  x' = 1\n$I"
+bad "a parameter domain that fails"     "param domain"                     "$V\naction a(i in 0 .. y):\n  x' = 1\n$I"
+bad "too many parameters"               "too many params"                  "$V\naction a(i in 0 .. 1, j in 0 .. 1, k in 0 .. 1, l in 0 .. 1, m in 0 .. 1):\n  x' = 1\n$I"
+bad "a guard that fails to evaluate"    "action a: unknown identifier"     "$V\naction a:\n  when y\n  x' = 1\n$I"
+bad "an invariant that fails to evaluate" "invariant evaluation error"     "$V\ninvariant i: y"
+bad "too many successors"               "too many successors"              "var x : 0 .. 4095\ninit x == 0\naction a(i in 0 .. 23, j in 0 .. 23, k in 0 .. 23):\n  when x == 0\n  x' = i\n$I"
+L=$(printf '%01100d' 0)
+bad "a line longer than the loader holds" "line is too long"               "$V\ninvariant i: x <= $L"
+bad "an init longer than its buffer"    "init is too long"                 "var x : 0 .. 1\ninit x == $(printf '%0400d' 0)\ninit x == $(printf '%0400d' 0)\n$I"
+# the limits on declarations: one past each is refused, not dropped
+many() {	# many DESC NEEDLE FMT COUNT: COUNT lines of FMT (%d = index) after $V
+	# shellcheck disable=SC2059
+	{ printf 'module m\n%b\n' "$V"; i=0; while [ $i -lt "$4" ]; do printf "$3\n" "$i"; i=$((i + 1)); done; printf '%b\n' "$I"; } > "$OUT/bad.cml"
+	expect "$1" 3 "$2" --spec "$OUT/bad.cml"
+}
+many "too many consts"     "too many consts"     "const C%d = 1" 17
+many "too many vars"       "too many vars"       "var v%d : 0 .. 1" 16
+many "too many invariants" "too many invariants" "invariant j%d: TRUE" 16
+many "too many properties" "too many properties" "property p%d: eventually TRUE" 17
+many "too many actions"    "too many actions"    "action a%d:" 33
+{ printf 'module m\n%b\naction a:\n' "$V"; i=0; while [ $i -lt 17 ]; do printf "  v%d' = 1\n" $i; i=$((i + 1)); done; printf '%b\n' "$I"; } > "$OUT/bad.cml"
+expect "too many assignments" 3 "too many assignments" --spec "$OUT/bad.cml"
+# extends: resolved beside the extending file, with or without .cml,
+# and an absolute path
+printf 'module base\nvar x : 0 .. 1\ninit x == 0\n' > "$OUT/base.cml"
+printf 'module top\nextends base\ninvariant i: x == 0\n' > "$OUT/top.cml"
+expect "extends finds the base beside the file" 0 "1 distinct states found" --spec "$OUT/top.cml"
+printf 'module top\nimport %s\ninvariant i: x == 0\n' "$OUT/base.cml" > "$OUT/top.cml"
+expect "import takes an absolute path"         0 "1 distinct states found" --spec "$OUT/top.cml"
+printf 'module top\nextends base.cml\ninvariant i: x == 0\n' > "$OUT/top.cml"
+if (cd "$OUT" && "$CMC" --spec top.cml > "$OUT/rel.txt" 2>&1) && grep -q "1 distinct" "$OUT/rel.txt"; then
+	echo "ok   a spec named without a directory extends from ."
+else
+	echo "FAIL a spec named without a directory extends from ."; fail=1
+fi
+printf 'module top\nextends %s\ninvariant i: x == 0\n' "$(printf '%01000d' 0)" > "$OUT/top.cml"
+expect "an extends path past its buffer"       3 "extends path is too long" --spec "$OUT/top.cml"
 
 # soundness rows from the 1.3.0 audit (docs/plans/soundness-remediation.md,
 # Phase 1).  Each asserts the verdict the semantics require; each was a
