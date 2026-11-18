@@ -95,7 +95,7 @@ cmc --model-file examples/hc/hc.model --binary ./hc
 
 ```
 Model checking completed. No error has been found.
-96893 states generated, 36331 distinct states found, 0 states left on queue.
+97748 states generated, 36331 distinct states found, 0 states left on queue.
 ```
 
 (about six minutes, single-threaded).  cmc runs all three participants
@@ -131,18 +131,19 @@ invisible until the partition heals.
 ```sh
 cc -no-pie -DBUG -o hc-bug examples/hc/hc.c
 cmc --model-file examples/hc/hc.model --binary ./hc-bug \
-    --timeouts 12 --simulate --seed 2 --walks 30000 --depth 600
+    --timeouts 12 --simulate --seed 4 --walks 30000 --depth 600
 ```
 
 ```
-Walk 21949 (seed 2):
+Walk 2529 (seed 4):
 Error: Invariant agreement is violated.
-  node states: node[0]=1,10 node[1]=0,0 node[2]=1,11
+  node states: node[0]=1,10 node[1]=1,11 node[2]=0,0
 ```
 
-The violation needs a long schedule (68 actions, twelve of them
+The violation needs a long schedule (73 actions, twelve of them
 timeouts), so simulation reaches it where the exhaustive search does
-not; a fixed seed makes it reproducible, in about 100 seconds.
+not; a fixed seed makes it reproducible, in about 20 seconds.  Five of
+the first twelve seeds find it within 30,000 walks.
 
 ## What this shows
 

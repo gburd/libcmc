@@ -84,7 +84,8 @@ Model checking completed. No error has been found.
 44205 states generated, 15391 distinct states found, 0 states left on queue.
 ```
 
-(about six seconds, single-threaded).
+(about three minutes on one core of an EC2 host, single-threaded; each
+state is a fresh run of all three processes).
 
 ## The planted bug
 

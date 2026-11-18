@@ -169,7 +169,7 @@ expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(
 expect "hc: a bounded run is not a pass" 2 "INCOMPLETE" $(runx "$HERE/examples/hc/hc.model" hc) --depth 12
 if [ "${CMC_SLOW:-0}" = 1 ]; then
 	expect "hc: agreement holds, and a participant adopts" 0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
-	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 2 --walks 30000 --depth 600
+	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 4 --walks 30000 --depth 600
 fi
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)

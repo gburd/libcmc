@@ -65,11 +65,13 @@ cmc --model-file examples/paxos/paxos.model --binary ./paxos --crashes 1 --drops
 
 ```
 Model checking completed. No error has been found.
-68947 states generated, 30075 distinct states found, 0 states left on queue.
+123053 states generated, 46909 distinct states found, 0 states left on queue.
 ```
 
-(about three and a half minutes, single-threaded; each state is a fresh
-run of all five processes).
+(about twenty minutes on one core of an EC2 host, single-threaded;
+each state is a fresh run of all five processes).  2.0.0 printed 30,075
+here, from runs in which the nodes raced each other; on the EC2 host it
+stops with "replay diverged" instead.
 
 ## The planted bug
 

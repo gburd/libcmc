@@ -20,6 +20,10 @@
  *   spin   a worker makes the same call forever, and the main thread
  *          joins it.  Without merging the search never ends, so only a
  *          bound stops it, and the result is INCOMPLETE.
+ *   spin2  two workers do the same, so every world has two successors
+ *          and the tree is wide rather than deep: a breadth-first search
+ *          reaches a million worlds near depth 20, which keeps each
+ *          replay short (docs/measurements/2026-11-17-tree-cap.md).
  *
  * The calls are state-hook writes of an unchanged record, so they are
  * visible operations that change nothing the world holds.
@@ -101,6 +105,12 @@ main(int argc, char **argv)
 	if (!strcmp(mode, "spin"))
 	{
 		pthread_create(&t, NULL, spin, NULL);
+		pthread_join(t, NULL);
+	}
+	if (!strcmp(mode, "spin2"))
+	{
+		pthread_create(&t, NULL, spin, NULL);
+		pthread_create(&u, NULL, spin, NULL);
 		pthread_join(t, NULL);
 	}
 	if (!strcmp(mode, "seq"))
