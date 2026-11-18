@@ -21,10 +21,23 @@
  * never announces it is refused, rather than checked against the real
  * clock.
  *
+ *   - the pthread synchronisation calls (mutex, rwlock, spinlock,
+ *     condition variable, semaphore, barrier, once) each make a marker
+ *     call first, a sched_yield whose first argument is CMC_SYNC_MAGIC,
+ *     before the real function runs.  The checker answers it without the
+ *     kernel, and in a node with more than one thread it is a choice
+ *     point: the search picks which thread runs next.  So a lock taken
+ *     on its uncontended fast path, which makes no futex call, is still
+ *     an ordering point the search explores.
+ *
  * The functions below replace libc's, so they take libc's prototypes.
  */
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <errno.h>
+#include <pthread.h>
+#include <semaphore.h>
+#include <threads.h>
 #include <malloc.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -263,4 +276,112 @@ ssize_t
 getrandom(void *buf, size_t len, unsigned int flags)
 {
 	return syscall(SYS_getrandom, buf, len, flags);
+}
+
+/*
+ * Synchronisation calls as choice points.
+ *
+ * Only acquisitions are wrapped: a lock, a semaphore wait, a barrier and
+ * a once.  In a program free of data races a release (an unlock, a
+ * signal, a post) moves left, past the accesses before it, and an
+ * acquisition moves right, so every schedule is equivalent to one that
+ * switches threads only before an acquisition (Lipton's reduction).  A
+ * marker on releases too would multiply the schedules searched without
+ * adding one.  A condition wait releases its mutex and reacquires it
+ * when woken; the wake is a futex answer the search already orders, so
+ * it has no marker of its own.  That the program is free of data races
+ * is what the race runtime (cmc_race.c) checks; without it, a
+ * multi-threaded node cannot pass (cmc(7)).
+ *
+ * Each wrapper makes the marker call and then calls the C library's own
+ * function, found with dlsym(RTLD_NEXT) on first use.  The marker
+ * carries the operation and the object's address, so a counterexample
+ * names them.  Outside cmc the preload is not loaded at all, so nothing
+ * here runs.  C11's mtx_lock, mtx_trylock and mtx_timedlock are wrapped
+ * on their own: glibc's call __pthread_mutex_lock directly, not through
+ * the PLT, so a pthread wrapper never sees them.
+ *
+ * A wrapper that runs before its real function is found (dlsym itself
+ * may take a lock) goes straight to the marker and then the lookup;
+ * dlsym does not call back into these wrappers.
+ */
+#define CMC_SYNC_MAGIC 0x434d4353	/* "CMCS"; cmc_proc.c has the same */
+
+enum
+{
+	SYNC_MUTEX_LOCK = 1, SYNC_MUTEX_TRYLOCK, SYNC_MUTEX_TIMEDLOCK,
+	SYNC_RW_RDLOCK, SYNC_RW_TRYRDLOCK, SYNC_RW_TIMEDRDLOCK, SYNC_RW_WRLOCK,
+	SYNC_RW_TRYWRLOCK, SYNC_RW_TIMEDWRLOCK, SYNC_SPIN_LOCK, SYNC_SPIN_TRYLOCK,
+	SYNC_SEM_WAIT, SYNC_SEM_TRYWAIT, SYNC_SEM_TIMEDWAIT, SYNC_BARRIER_WAIT,
+	SYNC_ONCE, SYNC_MTX_LOCK, SYNC_MTX_TRYLOCK, SYNC_MTX_TIMEDLOCK, SYNC_CALL_ONCE
+};
+
+static void
+sync_point(int op, const void *obj)
+{
+	(void) syscall(SYS_sched_yield, CMC_SYNC_MAGIC, op, obj);
+}
+
+/* the C library's function `name`, cached in *slot */
+static void *
+real_fn(void **slot, const char *name)
+{
+	if (*slot == NULL)
+		*slot = dlsym(RTLD_NEXT, name);
+	if (*slot == NULL)
+	{
+		static const char msg[] = "cmc-preload: a pthread function is missing from the C library\n";
+
+		(void) !write(2, msg, sizeof msg - 1);
+		_exit(2);
+	}
+	return *slot;
+}
+
+/* one wrapper: a marker, then the real call with the same arguments */
+#define SYNC_WRAP(ret, name, op, params, args, obj) \
+ret name params \
+{ \
+	static void *real; \
+	ret (*fn) params; \
+	sync_point(op, obj); \
+	*(void **) &fn = real_fn(&real, #name); \
+	return fn args; \
+}
+
+SYNC_WRAP(int, pthread_mutex_lock, SYNC_MUTEX_LOCK, (pthread_mutex_t *m), (m), m)
+SYNC_WRAP(int, pthread_mutex_trylock, SYNC_MUTEX_TRYLOCK, (pthread_mutex_t *m), (m), m)
+SYNC_WRAP(int, pthread_mutex_timedlock, SYNC_MUTEX_TIMEDLOCK,
+		  (pthread_mutex_t *restrict m, const struct timespec *restrict t), (m, t), m)
+SYNC_WRAP(int, pthread_rwlock_rdlock, SYNC_RW_RDLOCK, (pthread_rwlock_t *l), (l), l)
+SYNC_WRAP(int, pthread_rwlock_tryrdlock, SYNC_RW_TRYRDLOCK, (pthread_rwlock_t *l), (l), l)
+SYNC_WRAP(int, pthread_rwlock_timedrdlock, SYNC_RW_TIMEDRDLOCK,
+		  (pthread_rwlock_t *restrict l, const struct timespec *restrict t), (l, t), l)
+SYNC_WRAP(int, pthread_rwlock_wrlock, SYNC_RW_WRLOCK, (pthread_rwlock_t *l), (l), l)
+SYNC_WRAP(int, pthread_rwlock_trywrlock, SYNC_RW_TRYWRLOCK, (pthread_rwlock_t *l), (l), l)
+SYNC_WRAP(int, pthread_rwlock_timedwrlock, SYNC_RW_TIMEDWRLOCK,
+		  (pthread_rwlock_t *restrict l, const struct timespec *restrict t), (l, t), l)
+SYNC_WRAP(int, pthread_spin_lock, SYNC_SPIN_LOCK, (pthread_spinlock_t *l), (l), (const void *) l)
+SYNC_WRAP(int, pthread_spin_trylock, SYNC_SPIN_TRYLOCK, (pthread_spinlock_t *l), (l), (const void *) l)
+SYNC_WRAP(int, sem_wait, SYNC_SEM_WAIT, (sem_t *x), (x), x)
+SYNC_WRAP(int, sem_trywait, SYNC_SEM_TRYWAIT, (sem_t *x), (x), x)
+SYNC_WRAP(int, sem_timedwait, SYNC_SEM_TIMEDWAIT,
+		  (sem_t *restrict x, const struct timespec *restrict t), (x, t), x)
+SYNC_WRAP(int, pthread_barrier_wait, SYNC_BARRIER_WAIT, (pthread_barrier_t *b), (b), b)
+SYNC_WRAP(int, pthread_once, SYNC_ONCE, (pthread_once_t *o, void (*init)(void)), (o, init), o)
+SYNC_WRAP(int, mtx_lock, SYNC_MTX_LOCK, (mtx_t *m), (m), m)
+SYNC_WRAP(int, mtx_trylock, SYNC_MTX_TRYLOCK, (mtx_t *m), (m), m)
+SYNC_WRAP(int, mtx_timedlock, SYNC_MTX_TIMEDLOCK,
+		  (mtx_t *restrict m, const struct timespec *restrict t), (m, t), m)
+
+/* call_once returns nothing, so it does not fit SYNC_WRAP */
+void
+call_once(once_flag *o, void (*init)(void))
+{
+	static void *real;
+	void		(*fn) (once_flag *, void (*)(void));
+
+	sync_point(SYNC_CALL_ONCE, o);
+	*(void **) &fn = real_fn(&real, "call_once");
+	fn(o, init);
 }

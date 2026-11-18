@@ -817,6 +817,10 @@ static struct seccomp_notif_sizes g_sz;
  * CMC_PRELOAD_MAGIC, so a node it did not load into is refused */
 static char preload_path[4096];
 #define CMC_PRELOAD_MAGIC 0x434d43
+/* the first argument of the preload's synchronisation marker, a
+ * sched_yield made before each lock, semaphore wait, barrier and once
+ * (cmc_preload.c has the same) */
+#define CMC_SYNC_MAGIC 0x434d4353
 
 /* Move n bytes to or from a node's memory.  Each returns how many bytes
  * moved: n on success, fewer when the target passed an address it does
@@ -872,6 +876,7 @@ install_filter(void)
 		OWN(SYS_epoll_create1), OWN(SYS_epoll_create), OWN(SYS_epoll_ctl),
 		OWN(SYS_epoll_wait), OWN(SYS_epoll_pwait),
 		OWN(SYS_clone), OWN(SYS_clone3), OWN(SYS_futex), OWN(SYS_exit),
+		OWN(SYS_sched_yield),
 		OWN(SYS_fork), OWN(SYS_vfork),
 		/* calls the model does not answer, intercepted only so that one on
 		 * a checker-owned fd is refused rather than sent to the kernel,
@@ -1346,6 +1351,7 @@ visible(long nr, const __u64 *a)
 		case SYS_epoll_create1: case SYS_epoll_create: case SYS_epoll_ctl:
 		case SYS_epoll_wait: case SYS_epoll_pwait: case SYS_poll: case SYS_ppoll:
 		case SYS_accept: case SYS_accept4:
+		case SYS_sched_yield:
 			return 1;
 		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
 		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
@@ -1631,6 +1637,13 @@ serve(Node *nd, Thread *th)
 			if (a[0] && cr_write(nd->pid, a[0], &tv, sizeof tv) != sizeof tv) { g_resp->error = -EFAULT; break; }
 			g_resp->val = 0; break;
 		}
+		case SYS_sched_yield:
+			/* the preload's synchronisation marker (a[0] is CMC_SYNC_MAGIC)
+			 * or a plain yield: nothing to carry out.  In a node with more
+			 * than one thread it is visible, so its held answer makes it a
+			 * choice point; in a node with one it returns at once.  The
+			 * kernel never sees it. */
+			g_resp->val = 0; break;
 		case SYS_getrandom:
 		{
 			/* engine-chosen randomness: a fixed byte pattern, so the search

@@ -1,0 +1,12 @@
+# A model file for test/proc/syncpoint.c: the worker never accepts a
+# half-published value, and it does read.
+[target]
+nodes = 1
+
+[fields]
+phase = 0
+seen = 1
+
+[invariants]
+whole = "node[0].phase < 2 or node[0].seen < 100"
+reads = "eventually node[0].phase == 2"

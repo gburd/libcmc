@@ -59,9 +59,11 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack threadpos; do
+for f in fault kernelfd durack threadpos syncpoint; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -DC11 -DBUG -o "$B/proc/syncpoint-c11-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DC11 -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -365,6 +367,15 @@ expect_by 60 "kernelfd: a worker's blocking pipe read is refused" 3 "uses kernel
 expect_by 60 "kernelfd: two workers writing one pipe are refused" 3 "uses kernel fd" --model-file "$OUT/kfd-order.model"
 expect_by 60 "kernelfd: a pipe beside an eventfd is refused"     3 "uses kernel fd" --model-file "$OUT/kfd-mixed.model"
 expect_by 60 "kernelfd: a worker may print to stdout and stderr" 0 "No error has been found" --model-file "$OUT/kfd-stdio.model"
+
+# A switch at an uncontended lock (plan 2.1, item 3).  syncpoint: a
+# worker that runs between two critical sections of main sees a
+# half-published value.  No system call is made there, so only the
+# preload's marker before each lock (pthread and C11) makes it a choice
+# point.
+expect "syncpoint: a switch at an uncontended lock is explored" 1 "whole is violated" $(run syncpoint syncpoint-bug)
+expect "syncpoint: the same through C11 mtx_lock"             1 "whole is violated" $(run syncpoint syncpoint-c11-bug)
+expect "syncpoint: publishing under the lock holds"           0 "No error has been found" $(run syncpoint syncpoint)
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
