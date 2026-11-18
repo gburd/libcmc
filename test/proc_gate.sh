@@ -364,7 +364,9 @@ expect_by 300 "threadpos: an endless thread is INCOMPLETE"  2 "max states reache
 # --max-states decides, even past the built-in bound.
 mkdir -p "$B/cap200"
 printf '#include "cmc.h"\nint main(int argc, char **argv) { return cmc_main(argc, argv, NULL, 0); }\n' > "$B/cap200/main.c"
-if $CC -std=c11 -D_POSIX_C_SOURCE=200809L -O1 -w -DCMC_TREE_CAP=200 -I"$HERE/include" -o "$B/cap200/cmc" \
+# it compiles the engine, so it takes the build's CFLAGS (a word list)
+# shellcheck disable=SC2086
+if $CC -std=c11 -D_POSIX_C_SOURCE=200809L -O1 -w ${CFLAGS:-} -DCMC_TREE_CAP=200 -I"$HERE/include" -o "$B/cap200/cmc" \
 	"$B/cap200/main.c" "$HERE/src/cmc_cli.c" "$HERE/src/cmc_proc.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc.c"; then
 	CMC=$B/cap200/cmc
 	export CMC_PRELOAD="$B/cmc-preload.so"

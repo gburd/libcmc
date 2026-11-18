@@ -1,0 +1,62 @@
+# Raw output: the run to the default tree bound (2026-11-18, EC2)
+
+## env.txt (host, load, version, sha256 of cmc and threadpos at start)
+ 05:45:47 up 12:26,  1 user,  load average: 2.31, 2.58, 2.86
+32
+7.3.4-200.fc44.x86_64
+cmc (libcmc) 2.0.0
+2026-11-18T05:45:47Z
+95d3aa368bf9529b475786e8d682b045f50a7256be2b63f20de7b61e1cdbcdd8  cmc
+54b92f7cf5827875227ac649514d491d427ba3a61a0d15caac34890b2fb9635b  threadpos
+
+## spin.model
+[target]
+binary = threadpos
+nodes = 1
+args = spin2
+[invariants]
+any = "node[0][0] == 0"
+
+## meas.sh (the harness)
+#!/bin/sh
+# meas.sh: run the tree-cap measurement; wall time and peak RSS (VmHWM)
+# of cmc, sampled every 10 s, written to run.txt
+set -u
+cd "$(dirname "$0")"
+{
+	echo "start $(date -u +%FT%TZ) $(cut -d' ' -f1-3 /proc/loadavg)"
+	t0=$(date +%s)
+	./cmc --model-file spin.model > cmc-out.txt 2>&1 &
+	pid=$!
+	hwm=0
+	while kill -0 "$pid" 2>/dev/null; do
+		h=$(awk '/^VmHWM:/ {print $2}' "/proc/$pid/status" 2>/dev/null)
+		[ -n "$h" ] && hwm=$h
+		echo "$(($(date +%s) - t0)) s VmHWM ${hwm} kB load $(cut -d' ' -f1-3 /proc/loadavg)" > progress.txt
+		sleep 10
+	done
+	wait "$pid"
+	rc=$?
+	t1=$(date +%s)
+	echo "end $(date -u +%FT%TZ) $(cut -d' ' -f1-3 /proc/loadavg)"
+	echo "exit $rc wall $((t1 - t0)) s peak VmHWM ${hwm} kB (last 10 s sample)"
+} > run.txt 2>&1
+
+## run.txt (wall time, peak VmHWM)
+start 2026-11-18T05:45:47Z 2.31 2.58 2.86
+end 2026-11-18T07:37:21Z 2.25 2.87 3.41
+exit 2 wall 6694 s peak VmHWM 203624 kB (last 10 s sample)
+
+## cmc-out.txt (cmc's output)
+cmc: model file spin.model, binary threadpos, 1 node, breadth-first search
+  environment: client_write -1, timeouts 0, crashes 0, drops 0, restarts 0
+INCOMPLETE (no violation found): 1000000 worlds with a multi-threaded node were searched without merging (set the bound with --max-states); 1000000 distinct states, 1131055 left on queue, 0 cut at depth -1, 6691.8 s
+
+## progress.txt (last 10 s sample)
+6684 s VmHWM 203624 kB load 2.39 2.91 3.43
+
+## the first attempt, threadpos spin (one endless worker), killed
+start 2026-11-18T00:14:48Z 1.20 1.35 1.11
+end 2026-11-18T05:45:53Z 2.21 2.56 2.85
+exit 143 wall 19865 s peak VmHWM 1986996 kB (last 10 s sample)
+--max-states 2000: 6.8 s; 8000: 33.0 s; 30000: 157.0 s (2.0.0 build, same fixture)
