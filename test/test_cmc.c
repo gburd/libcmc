@@ -2294,6 +2294,71 @@ test_fair_schedule(void)
 	fair_mode = 0;
 }
 
+/* ---- limits on a large search -----------------------------------------
+ * A direct core counting four bytes up to 31 each: 2^20 states, more
+ * than the engine's first table and queue chunk hold, and enough that
+ * the time checks come due. */
+
+static int
+wide_actions(const void *cfg, const void *sv, CmcAction *a, int max)
+{
+	const uint8_t *s = sv;
+	int			n = 0;
+
+	(void) cfg;
+	for (int i = 0; i < 4 && n < max; i++)
+		if (s[i] < 31)
+			a[n++] = (CmcAction) i;
+	return n;
+}
+
+static void
+wide_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) node;
+	out->n = 0;
+	((uint8_t *) sv)[ev->action]++;
+}
+
+static const CmcCore wide_core = {
+	.name = "wide", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = wide_step,
+	.direct_actions = wide_actions,
+};
+static const CmcModel wide_model = {"wide", &wide_core, nd_props, 1, 0};
+
+static void
+test_search_limits(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	CmcResult	res;
+
+	/* the whole space, exactly, through a table and queue that grow */
+	cmc_options_default(&o);
+	o.time_limit = 600;
+	r = mk(&wide_model, CMC_BFS, NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_PASS && res.distinct == 1u << 20 && res.depth == 125);
+	cmc_result_free(&res);
+	cmc_run_free(r);
+	/* a time limit that has passed by the first check is INCOMPLETE, in
+	 * each search that has one; so is DFS's state limit */
+	for (int s = 0; s < 3; s++)
+	{
+		cmc_options_default(&o);
+		o.time_limit = 1e-9;
+		o.max_depth = 200;
+		o.walks = 100000;
+		r = mk(&wide_model, s == 0 ? CMC_BFS : s == 1 ? CMC_DFS : CMC_SIMULATE, NULL, &o);
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_INCOMPLETE && strstr(res.why, "time limit") != NULL);
+		cmc_result_free(&res);
+		cmc_run_free(r);
+	}
+}
+
 /* ---- the command line (cmc_main) ------------------------------------ */
 
 /* toy-bug1 with its first property (Mutex) always checked, under a
@@ -2708,6 +2773,7 @@ main(void)
 	test_searches_agree();
 	test_replay_refusals();
 	test_fair_schedule();
+	test_search_limits();
 	test_apply_refuses();
 	test_cli_input();
 	test_cli_runs();
