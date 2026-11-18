@@ -666,6 +666,16 @@ if $CC -O1 -w ${CFLAGS:-} -o "$B/proc/preload_alloc" "$T/preload_alloc.c"; then
 	else echo "FAIL the preload allocator"; sed 's/^/     /' "$OUT/alloc.txt"; fail=1; fi
 else echo "proc_gate: preload_alloc.c does not build"; fail=1; fi
 
+# the race runtime's happens-before logic, in process (race_rt.c): every
+# edge it models orders, a call that fails adds none, unordered
+# conflicting accesses are one report, and its limits are reported
+# shellcheck disable=SC2086
+if $CC -O1 -w ${CFLAGS:-} -o "$B/proc/race_rt" "$T/race_rt.c" -lpthread; then
+	if timeout 120 "$B/proc/race_rt" > "$OUT/race_rt.txt" 2>&1; then
+		echo "ok   the race runtime orders, reports and limits as modelled ($(grep -c '^ok' "$OUT/race_rt.txt") checks)"
+	else echo "FAIL the race runtime"; grep -v '^ok' "$OUT/race_rt.txt" | sed 's/^/     /'; fail=1; fi
+else echo "proc_gate: race_rt.c does not build"; fail=1; fi
+
 # the binary in the model file is found relative to the model file
 printf '[target]\nbinary = repl-bug\nnodes = 2\n[environment]\nclient_write = 5\n[invariants]\nagree_on_ack = "all r in replies : r.val in node[1]"\n' > "$B/proc/rel.model"
 # (from another directory; not a subshell, so a failure counts)

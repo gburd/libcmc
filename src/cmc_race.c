@@ -619,7 +619,7 @@ ACQ_WRAP(pthread_rwlock_wrlock, pthread_rwlock_t, , )
 ACQ_WRAP(pthread_rwlock_trywrlock, pthread_rwlock_t, , )
 ACQ_WRAP(pthread_rwlock_timedwrlock, pthread_rwlock_t, COMMA const struct timespec *t, COMMA t)
 REL_WRAP(pthread_rwlock_unlock, pthread_rwlock_t)
-ACQ_WRAP(pthread_spin_lock, pthread_spinlock_t, , )
+ACQ_WRAP(pthread_spin_lock, pthread_spinlock_t, , )	/* GCOVR_EXCL_LINE: glibc's spin lock always returns 0 */
 ACQ_WRAP(pthread_spin_trylock, pthread_spinlock_t, , )
 REL_WRAP(pthread_spin_unlock, pthread_spinlock_t)
 ACQ_WRAP(sem_wait, sem_t, , )
