@@ -206,6 +206,26 @@ typed "a function applied to a set"       "expected an integer" "f[{0}] == 0"
 typed "== between a function and a set"   "compares a function with a set" "f == {0}"
 typed "== between a boolean and an integer" "compares a boolean with an integer" "TRUE == 1"
 typed "!= between a set and an integer"   "compares a set with an integer" "{x} != 0"
+# each operator checks its second operand too, and a function compares
+# by its entries
+typed "* of a boolean"          "expected an integer in \*" "x * TRUE == 0"
+typed "/ of a boolean"          "expected an integer in /"   "TRUE / 1 == 0"
+typed "/ by a boolean"          "expected an integer in /"   "1 / TRUE == 0"
+typed "mod of a boolean"        "expected an integer in mod" "TRUE mod 2 == 0"
+typed "mod by a boolean"        "expected an integer in mod" "1 mod TRUE == 0"
+typed "+ of a boolean"          "expected an integer in +"   "x + TRUE == 0"
+typed "- of a boolean"          "expected an integer in -"   "TRUE - 1 == 0"
+typed "- by a boolean"          "expected an integer in -"   "1 - TRUE == 0"
+typed "an order on a boolean"   "expected an integer in >="  "TRUE >= 1"
+typed "a range from a boolean"  "expected an integer in .."  "x in TRUE .. 1"
+typed "a function key that is a set" "expected an integer in a function key" "[f except [{0}] = 1] == f"
+typed "a function value that is a set" "expected an integer in a function value" "[f except [0] = {1}] == f"
+typed "a literal over no set"   "expected a set"             "[i in x -> 0] == f"
+typed "a literal whose name shadows a var" "redeclares" "[x in 0 .. 1 -> 0] == f"
+typed "a broken operand of a range" "unknown identifier"     "x in y .. 1"
+typed "a broken upper bound"    "unknown identifier"         "x in 0 .. y"
+typed "a broken set in a quantifier" "unknown identifier"    "all i in y .. 1 : TRUE"
+typed "or of a set on the right" "expected a boolean in or"  "FALSE or {1}"
 # each malformed form is refused with its reason
 typed "an unclosed (" "expected )" "(x == 0"
 typed "an unclosed [i in" "expected ]" "f == [i in 0 .. 1 -> 0"
@@ -258,6 +278,8 @@ value "booleans compare"            0 "TRUE != FALSE and (x == 0) == TRUE"
 value "quantifiers and count"       0 "(some i in 0 .. 1 : f[i] == 1) and not (all i in 0 .. 1 : f[i] == 1) and (count i in 0 .. 1 : f[i] == 0) == 1"
 value "orders"                      0 "0 < 1 and 1 > 0 and 1 <= 1 and 1 >= 1 and not (1 < 1)"
 value "membership"                  0 "x in {0} and not (x in {}) and 1 in 0 .. 1"
+value "functions of one length differ in a value" 1 "f == [i in 0 .. 1 -> 0]"
+value "functions of one length differ in a key"   1 "[i in 0 .. 1 -> i] == [i in 1 .. 2 -> i - 1]"
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
 expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml"
@@ -299,6 +321,14 @@ bad "a scalar var given a set"          "x is a set, not an integer"       "var 
 bad "a function var given an integer"   "is not a function on"             "var f : [0 .. 1 -> 0 .. 1]\ninit f == 0\ninvariant i: TRUE"
 bad "a domain of non-integer bounds"    "bounds of 0 .. TRUE are not integers" "var x : 0 .. TRUE\ninit x == 0\ninvariant i: TRUE"
 bad "a domain that is not a set"        "expected a set"                   "var x : x\ninit x == 0\ninvariant i: TRUE"
+bad "a range domain with a broken bound" "unknown identifier"              "var x : 0 .. y\ninit x == 0\ninvariant i: TRUE"
+bad "a set domain with a broken member" "unknown identifier"               "var x : {0, y}\ninit x == 0\ninvariant i: TRUE"
+bad "a value outside a set domain"      "x = 1 is outside its domain {0, 2}" "var x : {0, 2}\ninit x == 1\ninvariant i: TRUE"
+bad "a function range with a broken bound" "unknown identifier"            "var f : [0 .. 1 -> 0 .. y]\ninit f == [i in 0 .. 1 -> 0]\ninvariant i: TRUE"
+bad "a function domain that fails"      "unknown identifier"               "var f : [0 .. y -> 0 .. 1]\ninit f == [i in 0 .. 1 -> 0]\ninvariant i: TRUE"
+bad "a function on other keys"          "f is not a function on 0 .. 1"    "var f : [0 .. 1 -> 0 .. 1]\ninit f == [i in 1 .. 2 -> 0]\ninvariant i: TRUE"
+printf 'module sd\nvar x : {0, 2}\ninit x == 0\naction a:\n  when x == 0\n  x%s = 2\ninvariant i: x != 1\n' "'" > "$OUT/sd.cml"
+expect "a set domain holds its members"  0 "2 distinct states found" --spec "$OUT/sd.cml"
 bad "a parameter that redeclares a var" "parameter x redeclares"           "$V\naction a(x in 0 .. 1):\n  x' = 1\n$I"
 bad "a parameter domain that is not a set" "param domain: expected a set" "$V\naction a(i in x):\n  x' = 1\n$I"
 bad "a parameter domain that fails"     "param domain"                     "$V\naction a(i in 0 .. y):\n  x' = 1\n$I"
@@ -351,6 +381,16 @@ many "too many properties" "too many properties" "property p%d: eventually TRUE"
 many "too many actions"    "too many actions"    "action a%d:" 33
 { printf 'module m\n%b\naction a:\n' "$V"; i=0; while [ $i -lt 17 ]; do printf "  v%d' = 1\n" $i; i=$((i + 1)); done; printf '%b\n' "$I"; } > "$OUT/bad.cml"
 expect "too many assignments" 3 "too many assignments" --spec "$OUT/bad.cml"
+# a liveness goal or premise that fails to evaluate, or is not boolean
+bad "an eventually goal that fails"     "liveness: unknown identifier"    "$V\naction a:\n  x' = 1\nproperty p: eventually y == 0"
+bad "a leads-to premise that fails"     "liveness: unknown identifier"    "$V\naction a:\n  x' = 1\nproperty p: y == 0 ~> x == 1"
+bad "a liveness goal that is an integer" "expected a boolean in a property" "$V\naction a:\n  x' = 1\nproperty p: eventually x"
+# --define: more tags, or a longer tag, than the checker holds
+printf 'module m\n%b\naction a [T]:\n  x%s = 1\n%b\n' "$V" "'" "$I" > "$OUT/tag.cml"
+expect "a --define tag past its buffer" 3 "at most 16 tags of under 32 bytes" --spec "$OUT/tag.cml" --define "$(printf 'T%032d' 0)"
+set -- --spec "$OUT/tag.cml"; i=0; while [ $i -lt 17 ]; do set -- "$@" --define T; i=$((i + 1)); done
+expectp "more --define tags than it holds" 3 "usage:" "$CMC" "$@"
+set --
 # extends: resolved beside the extending file, with or without .cml,
 # and an absolute path
 printf 'module base\nvar x : 0 .. 1\ninit x == 0\n' > "$OUT/base.cml"
@@ -403,6 +443,10 @@ binding "a line past the reader's buffer"      "a line is too long" "[map]\nx = 
 binding "a binding expression too long"        "binding expression is too long" "[map]\nx = \"$(printf '0 + %0596d' 0)\"\n"
 binding "a field name too long"                "field name is too long" "[fields]\n$(printf 'f%032d' 0) = 0\n[map]\nx = \"0\"\n"
 binding "a binding variable too long"          "binding variable is too long" "[map]\n$(printf 'x%032d' 0) = \"0\"\n"
+{ printf 'module many\n'; i=0; while [ $i -lt 16 ]; do printf 'var v%d : 0 .. 1\n' $i; i=$((i + 1)); done
+  printf 'init v0 == 0'; i=1; while [ $i -lt 16 ]; do printf ' and v%d == 0' $i; i=$((i + 1)); done; printf '\ninvariant i: TRUE\n'; } > "$OUT/many.cml"
+{ printf '[map]\n'; i=0; while [ $i -lt 16 ]; do printf 'v%d = "0"\n' $i; i=$((i + 1)); done; printf 'x = "0"\n'; } > "$OUT/b.bind"
+expectp "too many bindings" 3 "too many bindings" "$RD" "$OUT/many.cml" "$OUT/b.bind" 0
 binding "a binding index too long"             "binding index is too long" "[map]\nx[$(printf 'i%032d' 0)] = \"0\"\n"
 { printf '[fields]\n'; i=0; while [ $i -lt 17 ]; do printf 'f%d = %d\n' $i $i; i=$((i + 1)); done; printf '[map]\nx = "0"\n'; } > "$OUT/b.bind"
 expectp "too many fields"   3 "too many fields"   "$RD" "$S/c2init.cml" "$OUT/b.bind" 0
@@ -431,6 +475,13 @@ printf 'module h\nvar x : 0 .. 2\ninit x == 0\naction up:\n  when x < 2\n  x%s =
 expectp "C2: an observed step breaks the invariant"   1 "rejected at step 2 (value 2): low" "$RD" "$OUT/h.cml" "$OUT/b.bind" 0 1 2
 expectp "C2: a guard that fails while matching a step" 3 "unknown identifier" "$RD" "$OUT/g.cml" "$OUT/b.bind" 0 1
 expectp "C1: an invariant that fails to evaluate"     3 "" "$RD" -1 "$OUT/g.cml" "$OUT/b.bind" 3
+# C2: the first state must be init, an init that fails is an error, and a
+# spec variable left unbound is refused before the first step
+printf 'module ib\nvar x : 0 .. 2\ninit x == y\ninvariant i: TRUE\n' > "$OUT/ib.cml"
+printf 'module ub\nvar x : 0 .. 2\nvar z : 0 .. 1\ninit x == 0 and z == 0\ninvariant i: TRUE\n' > "$OUT/ub.cml"
+expectp "C2: an init that fails to evaluate"   3 "" "$RD" "$OUT/ib.cml" "$OUT/b.bind" 0
+expectp "C2: an unbound spec variable"         3 "'z' has no \[map\] entry" "$RD" "$OUT/ub.cml" "$OUT/b.bind" 0
+expectp "C2: a stutter is accepted"            0 "accepted 3" "$RD" "$S/c2init.cml" "$OUT/b.bind" 0 0 1
 # the observables a binding reads: node[i][k], node[i].field, nodes,
 # replies and a reply's .src and .val (refine_driver.c says what each
 # reports), each mapped onto a spec whose invariant checks the value

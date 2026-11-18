@@ -710,8 +710,7 @@ static int dom_has(const char *dom, long x, char *err, size_t errcap){
 		if(l.tag!=T_INT || h.tag!=T_INT){ snprintf(err,errcap,"the bounds of %s are not integers",dom); return -1; }
 		return x>=l.i && x<=h.i;
 	}
-	Value set; if(!sp_eval_set(dom,&env,&set,err,errcap)) return -1;
-	if(set.tag!=T_SET){ snprintf(err,errcap,"%s is not a set",dom); return -1; }
+	Value set; if(!sp_eval_set(dom,&env,&set,err,errcap)) return -1;	/* a set, or an error */
 	return set_has(&set,x);
 }
 
@@ -780,7 +779,6 @@ static void bind_params(const Action *a, Env *env, int pi, const State *st,
 	Env e2=*env; Pst s={0}; /* evaluate the param domain in the current env */
 	Value dom; char derr[128]; Env denv=*env; denv.var=st->v;
 	if(!sp_eval_set(a->pdom[pi],&denv,&dom,derr,sizeof derr)){ snprintf(err,errcap,"param domain: %s",derr); *rc=-1; return; }
-	if(dom.tag!=T_SET){ snprintf(err,errcap,"action %s: the domain of %s is not a set",a->name,a->pname[pi]); *rc=-1; return; }
 	(void)s;
 	for(int k=0;k<dom.n;k++){
 		Env e3=e2; if(e3.np>=SP_MAXPARAM){ snprintf(err,errcap,"action %s: too many parameters",a->name); *rc=-1; return; }
