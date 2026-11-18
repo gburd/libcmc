@@ -2158,7 +2158,7 @@ run_dfs(CmcRun *r, CmcResult *res)
 			res->trace_len = sp + 1;
 			goto copy_path;
 		}
-		if (f->next == 0 && r->nev && f->na >= 0)
+		if (f->next == 0 && r->nev)
 		{
 			int			rc = check_ev(r, s, &why, &bad);
 
