@@ -661,6 +661,8 @@ scm() {	# scm MODE EXIT NEEDLE
 }
 scm nbclient 3 "a non-blocking connect (EINPROGRESS) is not modelled"
 scm robufefd 3 "an eventfd read at an address it does not own"
+printf '[target]\nbinary = %s\nnodes = 2\nargs = durread\n[invariants]\nfresh = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 1)"\nreached = "eventually node[0][0] == 1"\n' "$B/proc/syscorner" > "$SC/durread.model"
+expect_by 60 "syscorner durread: a fresh durable record reads EOF, fsyncs, cannot seek" 0 "No error has been found" --model-file "$SC/durread.model"
 scm ipv6 3 "is not modelled (only AF_INET, SOCK_STREAM)"
 scm connectlow 3 "connects to port 19999, which is no node's"
 scm sendtoaddr 3 "sendto flags 0 or a destination address are not modelled"

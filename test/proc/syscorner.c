@@ -478,6 +478,16 @@ main(int argc, char **argv)
 		p.revents = 0;
 		code(poll(&p, 1, -1) == 1 && p.revents == POLLNVAL ? 0 : -1);
 	}
+	else if (!strcmp(mode, "durread"))
+	{
+		/* the durable record read a byte at a time: a fresh launch has
+		 * none, so the first read is EOF, as a restart's would not be */
+		unsigned char c;
+
+		code(read(193, &c, 1) == 0 ? 0 : -1);
+		code(fsync(193));
+		code(lseek(193, 0, SEEK_CUR) < 0 ? 0 : -1);
+	}
 	else if (!strcmp(mode, "ipv6"))
 		code(socket(AF_INET6, SOCK_STREAM, 0));
 	else if (!strcmp(mode, "connectlow"))

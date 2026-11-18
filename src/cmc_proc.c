@@ -2712,7 +2712,7 @@ serve(Node *nd, Thread *th)
 			if (th->ctid_addr)
 			{
 				uint32_t zero = 0;
-				if (cr_write(nd->pid, th->ctid_addr, &zero, sizeof zero) != sizeof zero) cr_fail(nd->id, "a thread exit clears its tid word");
+				if (cr_write(nd->pid, th->ctid_addr, &zero, sizeof zero) != sizeof zero) cr_fail(nd->id, "a thread exit clears its tid word");	/* GCOVR_EXCL_LINE: the C library's own tid word, in the thread's descriptor */
 				futex_wake(nd, th->ctid_addr, 1);
 			}
 			th->inuse = 0; th->block_kind = 0;
