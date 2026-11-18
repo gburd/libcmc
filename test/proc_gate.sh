@@ -660,6 +660,21 @@ edm segvhandler 3 "raised signal 11 with a handler installed or the signal ignor
 edm usr1 3 "stopped with signal 10"
 edm corners 0 "No error has been found" 'linux = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 21 and node[0][4] == 1 and node[0][5] == 1 and node[0][6] == 1 and node[0][7] == 1 and node[0][8] == 1)"\nreached = "eventually node[0][0] == 1"'
 
+echo "-- the search's other modes: simulation, bounds and refinement"
+# simulation reports a fault and a data race like the search does, and a
+# simulation or a search that runs out of time is INCOMPLETE; a step that
+# does not refine, an abstract invariant broken on the way, and an
+# evaluation error in a binding are reported in simulation too
+expect_by 60 "simulate: a fault is reported with its walk" 1 "killed by signal 6" --model-file "$OUT/fault-main.model" --simulate --seed 1 --walks 5
+expect_by 60 "simulate: a data race is reported with its walk" 1 "data race on node 0" --model-file "$OUT/mr-unlocked-tsan.model" --simulate --seed 1 --walks 50
+expect_by 60 "simulate: an exhausted walk ends early, INCOMPLETE" 2 "not exhaustive" $(run elect elect) --simulate --seed 3 --walks 5 --depth 2
+expect_by 60 "simulate: the time bound stops it" 2 "not exhaustive" $(run elect elect) --simulate --seed 3 --walks 100000000 --time 1
+expect_by 60 "search: the time bound stops it" 2 "time limit reached" $(runx "$HERE/examples/raft/raft.model" raft) --time 1
+expect_by 60 "simulate: an invariant broken on a walk is reported" 1 "agree_on_ack is violated" $(run repl repl-bug) --simulate --seed 1 --walks 200
+expect_by 120 "simulate: C2 catches the by-two step on a walk" 1 "no matching abstract action" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps --simulate --seed 1 --walks 50
+expect_by 120 "simulate: C2 passes the by-one impl, not exhaustively" 2 "not exhaustive" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps --simulate --seed 1 --walks 20
+expect_by 120 "simulate: C1 catches the paxos bug" 1 "does not refine" $(runx "$HERE/examples/spec/paxos-refine.model" paxos-bug) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --simulate --seed 1 --walks 3000
+
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
 # serving; the client (node 0) acks the synthetic client only once the

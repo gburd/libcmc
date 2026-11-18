@@ -1048,15 +1048,15 @@ static int
 launch(Node *nd)
 {
 	int sp[2];
-	if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, sp) != 0) return -1;
-	if (pipe(nd->fd3) != 0) return -1;
-	if (pipe(nd->fd4) != 0) return -1;
+	if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, sp) != 0) return -1;	/* GCOVR_EXCL_LINE: a socketpair of the checker's own */
+	if (pipe(nd->fd3) != 0) return -1;	/* GCOVR_EXCL_LINE: a pipe of the checker's own */
+	if (pipe(nd->fd4) != 0) return -1;	/* GCOVR_EXCL_LINE: a pipe of the checker's own */
 	pid_t pid = fork();
 	if (pid == 0)
 	{
 		close(sp[0]);
 		char go;
-		if (read(sp[1], &go, 1) != 1) _exit(2);
+		if (read(sp[1], &go, 1) != 1) _exit(2);	/* GCOVR_EXCL_LINE: the parent always sends the go byte */
 		setenv("LD_PRELOAD", preload_path, 1);
 		dup2(nd->fd3[1], 3); close(nd->fd3[0]); close(nd->fd3[1]);
 		dup2(nd->fd4[1], DURABLE_FD); close(nd->fd4[0]); close(nd->fd4[1]);
@@ -1085,7 +1085,7 @@ launch(Node *nd)
 		 * word and every mmap land at the same address on every replay,
 		 * so the world encoding can name a futex word or an epoll token by
 		 * its address and still dedup across replays. */
-		if (personality(ADDR_NO_RANDOMIZE) == -1)
+		if (personality(ADDR_NO_RANDOMIZE) == -1)	/* GCOVR_EXCL_LINE: ADDR_NO_RANDOMIZE is always allowed */
 		{
 			static const char msg[] = "cmc: cannot disable address randomisation for a node\n";
 			(void) !write(2, msg, sizeof msg - 1);
@@ -1128,13 +1128,13 @@ launch(Node *nd)
 	/* TRACECLONE: a thread the node creates starts in a ptrace stop,
 	 * so the search, not the kernel, decides when it first runs.
 	 * TRACESECCOMP: a sendmsg on a kernel fd stops (trace_stop). */
-	if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACECLONE | PTRACE_O_TRACESECCOMP) != 0)
+	if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACECLONE | PTRACE_O_TRACESECCOMP) != 0)	/* GCOVR_EXCL_LINE: the parent may always seize its own child */
 	{
 		fprintf(stderr, "cmc: cannot ptrace node %d: %s\n", nd->id, strerror(errno));
 		kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); close(sp[0]);
 		return -1;
 	}
-	if (write(sp[0], "g", 1) != 1)
+	if (write(sp[0], "g", 1) != 1)	/* GCOVR_EXCL_LINE: a write to the checker's own socketpair */
 	{
 		kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); close(sp[0]);
 		return -1;
@@ -1150,7 +1150,7 @@ launch(Node *nd)
 			close(sp[0]);
 			return -1;
 		}
-		if (ptrace(PTRACE_CONT, pid, 0, 0) != 0)
+		if (ptrace(PTRACE_CONT, pid, 0, 0) != 0)	/* GCOVR_EXCL_LINE: the child is in the stop just waited for */
 		{
 			fprintf(stderr, "cmc: cannot resume node %d: %s\n", nd->id, strerror(errno));
 			kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); close(sp[0]);
@@ -1160,11 +1160,11 @@ launch(Node *nd)
 	char cb[CMSG_SPACE(sizeof(int))] = {0}; char d;
 	struct iovec iov = {&d, 1}; struct msghdr mh = {0};
 	mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cb; mh.msg_controllen = sizeof cb;
-	if (recvmsg(sp[0], &mh, 0) < 0) { close(sp[0]); return -1; }
-	struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); nd->listener = -1;
-	if (cm) memcpy(&nd->listener, CMSG_DATA(cm), sizeof(int));
+	if (recvmsg(sp[0], &mh, 0) < 0) { close(sp[0]); return -1; }	/* GCOVR_EXCL_LINE: the child sent the listener before this */
+	struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); nd->listener = -1;	/* GCOVR_EXCL_LINE: the child always sends one fd */
+	if (cm) memcpy(&nd->listener, CMSG_DATA(cm), sizeof(int));	/* GCOVR_EXCL_LINE: the child always sends one fd */
 	close(sp[0]);
-	if (nd->listener < 0) return -1;
+	if (nd->listener < 0) return -1;	/* GCOVR_EXCL_LINE: the child always sends one fd */
 	/* close-on-exec, so a node launched later does not inherit this one's
 	 * hook.  Not O_NONBLOCK: the status flags are shared with the node's
 	 * own fd 3, and it would see them; serve_hook polls instead. */
@@ -1804,7 +1804,7 @@ stack_pointer(const Node *nd, const Thread *th)
 	for (int tries = 0; tries < 10000; tries++)
 	{
 		FILE	   *f = fopen(path, "r");
-		if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
+		if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));	/* GCOVR_EXCL_LINE: a stopped thread's own /proc entry */
 		int			got = fgets(line, sizeof line, f) != NULL;
 		fclose(f);
 		if (got && strncmp(line, "running", 7) == 0)
@@ -1910,7 +1910,7 @@ birth(Node *nd, Thread *th)
 	if (st >> 8 != (SIGTRAP | (PTRACE_EVENT_CLONE << 8)))
 		die(3, "node %d stopped with signal %d in a clone; a signal is not modelled", nd->id, WSTOPSIG(st));
 	unsigned long nt = 0;
-	if (ptrace(PTRACE_GETEVENTMSG, th->tid, 0, &nt) != 0)
+	if (ptrace(PTRACE_GETEVENTMSG, th->tid, 0, &nt) != 0)	/* GCOVR_EXCL_LINE: the thread is in the clone stop just waited for */
 		die(1, "node %d: cannot read the new thread of a clone: %s", nd->id, strerror(errno));
 	pid_t tid = (pid_t) nt;
 	do r = waitpid(tid, &st, __WALL);
@@ -4065,11 +4065,11 @@ cmc_proc_main(const CmcProcOptions *po)
 	if (pie) { fprintf(stderr, "cmc: %s must be a non-PIE ELF (build with -no-pie)\n", M.binary); return 3; }
 	if (find_preload()) return 3;
 	for (int i = 0; i < MAXNODES; i++) { N[i].binary = M.binary; N[i].listener = N[i].fd3[0] = N[i].fd4[0] = N[i].hook_w[0] = N[i].hook_w[1] = -1; }
-	if (seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &g_sz))
+	if (seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &g_sz))	/* GCOVR_EXCL_LINE: the gates run where seccomp notification exists */
 	{ fprintf(stderr, "cmc: seccomp user notification is not available: %s\n", strerror(errno)); return 3; }
 	g_req = calloc(1, g_sz.seccomp_notif); g_resp = calloc(1, g_sz.seccomp_notif_resp);
 	g_ans = calloc(1, g_sz.seccomp_notif_resp);
-	if (!g_req || !g_resp || !g_ans) die(1, "out of memory");
+	if (!g_req || !g_resp || !g_ans) die(1, "out of memory");	/* GCOVR_EXCL_LINE: a few hundred bytes */
 	double t0 = now_s();
 
 	printf("cmc: model file %s, binary %s, %d node%s, %s\n", po->model_file, M.binary, M.nodes,
@@ -4092,7 +4092,7 @@ cmc_proc_main(const CmcProcOptions *po)
 		 * node, so the sequence grows as it needs */
 		size_t seqcap = (size_t) (depth + 1) * (MAXNODES + 1);
 		int *seq = malloc(seqcap * sizeof *seq);
-		if (!seq) die(1, "out of memory");
+		if (!seq) die(1, "out of memory");	/* GCOVR_EXCL_LINE: a sequence of a few hundred ints */
 		for (w = 0; w < po->walks; w++)
 		{
 			Act a[MAXACT]; int na, len = 0, envlen = 0;
@@ -4107,7 +4107,7 @@ cmc_proc_main(const CmcProcOptions *po)
 					{
 						seqcap *= 2;
 						seq = realloc(seq, seqcap * sizeof *seq);
-						if (!seq) die(1, "out of memory");
+						if (!seq) die(1, "out of memory");	/* GCOVR_EXCL_LINE: a sequence of a few hundred ints */
 					}
 					int pick = (int) (next_rand() % (uint64_t) na);
 					seq[len++] = pick;
@@ -4156,7 +4156,7 @@ cmc_proc_main(const CmcProcOptions *po)
 				{
 					seqcap *= 2;
 					seq = realloc(seq, seqcap * sizeof *seq);
-					if (!seq) die(1, "out of memory");
+					if (!seq) die(1, "out of memory");	/* GCOVR_EXCL_LINE: a sequence of a few hundred ints */
 				}
 				int pick = (int) (next_rand() % (uint64_t) na);
 				seq[len++] = pick; envlen++;
@@ -4192,7 +4192,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	{
 		QEnt e = zn > 0 ? Z[--zn] : Q[qh++];
 		int *seq = malloc(((size_t) e.len + 1) * sizeof *seq);
-		if (!seq) die(1, "out of memory");
+		if (!seq) die(1, "out of memory");	/* GCOVR_EXCL_LINE: a sequence of a few hundred ints */
 		if (e.len) memcpy(seq, qpool + e.off, (size_t) e.len * sizeof *seq);
 		Act a[MAXACT]; int na = 0;
 		if (run_seq(seq, e.len, a, &na)) die(3, "a node would not start");
