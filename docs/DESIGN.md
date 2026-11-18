@@ -100,6 +100,25 @@ second filter is missing never starts), and every later one is a
 with one thread is resumed (`PTRACE_CONT`, the call reaches the kernel),
 and a node with more is refused, as for every other kernel fd.
 
+Nodes run one at a time.  `drive_node()` serves one node's
+notifications until every thread of it is parked or it has exited, or
+until one of its calls wakes a node that was parked (a close whose RST
+answers a peer's recv); every other node meanwhile sits in a
+notification nobody has read.  When exactly one node can run,
+`settle()` drives it with no choice, which is the case after every
+DELIVER, ACCEPT or RUN.  When two or more can (at launch, after a
+RESTART, after such a wake), the search chooses with STEP(node), so a
+call whose answer reads another node's state (a connect to a node that
+may have exited, a write to a peer that may have closed) is answered
+in each order.  2.0.0 served all running nodes at once, and the answer
+depended on the kernel's scheduling: the same action sequence reached
+different worlds on different runs.  Worlds between STEPs are not
+judged by the invariants, not counted, and not part of the depth; they
+are merged in the seen set only while every running node is fresh
+(launched and not yet served a call), and searched as a tree once a
+woken node has run partway, since its record does not hold the answer
+it ran on.
+
 A birth is held the same way.  Nodes are seized with
 `PTRACE_O_TRACECLONE`, so a `clone` stops the parent at
 `PTRACE_EVENT_CLONE` and starts the newborn in a ptrace stop.  Both stay

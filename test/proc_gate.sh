@@ -480,6 +480,24 @@ printf 'refused = "eventually node[0][0] == 2"\n[environment]\ntimeouts = 1\n' >
 printf 'killed = "node[0][0] != 2"\n' >> "$OUT/u-rstwrite.model"
 printf 'epiped = "eventually node[0][0] == 2"\n' >> "$OUT/u-rstignore.model"
 expect "unmodelled: a bad write buffer gets EFAULT"      0 "No error has been found" --model-file "$OUT/u-badptr.model"
+# Which node steps first between two quiescent points is a search
+# choice (STEP), never the kernel's scheduling.  In dialexit node 1 exits
+# at once while node 0 makes 16 calls and dials it: on Linux the dial
+# waits or is refused by which process runs first, and the search must
+# reach both.  On 2.0.0, which drove both nodes at once, one model gave
+# one outcome or the other at random, so each of 300 runs here must
+# give the same verdict and count too, as must badptr (node 0 dials
+# node 1 while it exits; 2.0.0 failed it about once in 100 runs).
+printf '[target]\nbinary = %s\nnodes = 2\nargs = dialexit\n[invariants]\nwaited = "eventually node[0][0] == 1"\nrefused = "eventually node[0][0] == 2"\n' "$B/proc/unmodelled" > "$OUT/u-dialexit.model"
+expect "dialexit: a dial both waits and is refused, by node order" 0 "No error has been found" --model-file "$OUT/u-dialexit.model"
+for m in badptr dialexit; do
+	for _ in $(seq 300); do
+		"$CMC" --model-file "$OUT/u-$m.model" > "$OUT/det.txt" 2>&1
+		echo "exit $? $(grep -o '[0-9]* distinct states found' "$OUT/det.txt")"
+	done | sort | uniq -c > "$OUT/det-$m.txt"
+	if [ "$(wc -l < "$OUT/det-$m.txt")" = 1 ]; then echo "ok   $m: 300 runs give one verdict and one count ($(sed 's/^ *//' "$OUT/det-$m.txt"))"
+	else echo "FAIL $m: 300 runs differ:"; sed 's/^/     /' "$OUT/det-$m.txt"; fail=1; fi
+done
 # 3.9: a root that enables no action explored nothing, so a safety-only
 # model of it is not a pass
 expect "noprogress: a root with no action is not a pass" 2 "no action was ever enabled" --model-file "$OUT/u-none.model"
@@ -518,9 +536,11 @@ $CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpse
 tcpsem_native() {	# MODE FIRST PAUSE: run natively, print node 0's two code bytes
 	d="$OUT/tcpsem-$1"; mkdir -p "$d"
 	other=$((1 - $2))
-	( cd "$d" && exec "$B/proc/tcpsem" "$2" "$1" 3>"$d/n$2.state" ) & pa=$!
+	# a run that hangs (under load the second process can start before
+	# the first listens) fails the row instead of hanging the gate
+	( cd "$d" && exec timeout 30 "$B/proc/tcpsem" "$2" "$1" 3>"$d/n$2.state" ) & pa=$!
 	sleep "$3"
-	( cd "$d" && exec "$B/proc/tcpsem" "$other" "$1" 3>"$d/n$other.state" ) & pb=$!
+	( cd "$d" && exec timeout 30 "$B/proc/tcpsem" "$other" "$1" 3>"$d/n$other.state" ) & pb=$!
 	wait $pa; wait $pb
 	od -An -tu1 "$d/n0.state" | tr -s ' ' '\n' | grep -v '^$' | tail -2 | tr '\n' ' '
 }

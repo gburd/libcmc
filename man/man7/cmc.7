@@ -261,10 +261,29 @@ raw
 leaves accesses it orders looking unordered: a false alarm, reported as
 a race, never a race missed.
 .Pp
+The checker runs one node at a time.
+A node runs until every thread of it is blocked or it has exited, or
+until a call of it wakes a node that was blocked (a
+.Fn close
+whose reset answers a peer's read); another node waits meanwhile in
+its first unanswered call.
+When more than one node can run (at launch, after a RESTART, or after
+such a wake) which goes first is a search choice, STEP
+.Pq Ql step n1 ,
+so a call whose answer depends on another node's progress (a
+.Fn connect
+to a node that may have exited, a write to a peer that may have closed)
+is answered both ways the order allows.
+Within one STEP a node's calls that reach no other node are not
+interleaved with another node's.
+.Pp
 When every thread of every node is blocked or has exited the world is
 .Em quiescent :
 the checker reads each node's state, checks the invariants, and the
-enabled actions are the next steps:
+enabled actions are the next steps.
+Worlds between two STEPs are not checked or counted, and STEPs do not
+count toward the depth; a counterexample lists them unnumbered between
+the numbered actions.
 .Bl -tag -width "TIMEOUT" -compact
 .It ACCEPT
 A node in
@@ -321,6 +340,9 @@ services, so readiness stays a search decision.
 A thread of a node with more than one thread holds an answer: it gets
 it and runs to its next visible operation
 .Pq Ql run n1 t2 .
+.It STEP
+Two or more nodes can run: one of them runs alone, as above
+.Pq Ql step n1 .
 .El
 .Pp
 A node's state is what it reports.

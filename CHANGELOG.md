@@ -34,6 +34,23 @@ Process engine (`cmc --model-file`):
   worker could send on a socket another thread read, unseen.  The
   launch socketpair is now close-on-exec.  [proc_gate: sendmsg worker,
   sendmsg alone]
+- Which node runs first is a search choice.  The engine runs one node
+  at a time, until it parks, exits or wakes a parked node, and when two
+  or more can run (at launch, after a restart, after such a wake) it
+  offers `step nN` for each.  On 2.0.0 every running node was served at
+  once, so a call whose answer depends on another node's progress (a
+  `connect` to a node that may already have exited) got whichever answer
+  the kernel's scheduling gave: a model could give different verdicts
+  on different runs, and one outcome could never be seen.  STEPs are not
+  checked, counted, or part of the depth; a counterexample lists them
+  unnumbered.  Distinct-state counts and depths of every model whose
+  nodes run one thread are unchanged; "states generated" grows by the
+  worlds the STEPs reach (paxos 964 to 983).  Two-node models with a
+  threaded node double (twothread 515 to 1,028, twothread_join 275 to
+  549, raceborn 278 to 556), since the start order of the nodes is now
+  part of each threaded tree.
+  [proc_gate: dialexit, which needs both outcomes; badptr and dialexit
+  each run 300 times and must give one verdict and count]
 - The default bound on a threaded program's tree search (1,000,000
   worlds) can be set at build time with `-DCMC_TREE_CAP=n`, so a gate
   reaches it: the search stops there INCOMPLETE (exit 2) and

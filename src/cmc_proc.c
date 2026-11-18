@@ -682,7 +682,7 @@ th_for(Node *nd, pid_t tid)
 }
 
 /* a thread of nd is running (between syscalls): block_kind 0.  Such a
- * node will produce a notification, so drive_quiescent RECVs it. */
+ * node will produce a notification, so drive_node() RECVs it. */
 static int
 node_has_running(const Node *nd)
 {
@@ -1064,9 +1064,8 @@ launch(Node *nd)
 	 * hook.  Not O_NONBLOCK: the status flags are shared with the node's
 	 * own fd 3, and it would see them; serve_hook polls instead. */
 	for (int k = 0; k < 2; k++) fcntl(nd->hook_w[k], F_SETFD, FD_CLOEXEC);
-	/* make the notify fd non-blocking: with threads, drive_quiescent must
-	 * poll the listeners and RECV only a ready notification, never block
-	 * one node's RECV while another node's running thread needs service */
+	/* make the notify fd non-blocking: drive_node() polls the listener
+	 * and RECVs only a ready notification, so a lull reaches its check */
 	{ int fl = fcntl(nd->listener, F_GETFL); fcntl(nd->listener, F_SETFL, fl | O_NONBLOCK); }
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
@@ -1580,7 +1579,7 @@ try_pending_for(Node *nd)
 	/* SECCOMP_IOCTL_NOTIF_RECV blocks even on an O_NONBLOCK listener
 	 * (measured on Linux 6.18), so ask poll first: a thread busy or
 	 * blocked in a call the checker does not see must leave the wait to
-	 * drive_quiescent, whose lull check reports it */
+	 * drive_node(), whose lull check reports it */
 	struct pollfd pf = {nd->listener, POLLIN, 0};
 	if (poll(&pf, 1, 0) != 1 || !(pf.revents & POLLIN)) return 0;
 	memset(g_req, 0, g_sz.seccomp_notif);
@@ -2332,7 +2331,7 @@ kill_node(Node *nd)
  * a signal or at a sendmsg on a kernel fd (trace_stop).  Only an exit or
  * a fatal signal is a death.  A thread other than the leader stops on
  * its own tid, so each known thread is asked too; an abort() in a
- * worker stops the worker, not the leader.  drive_quiescent() calls this
+ * worker stops the worker, not the leader.  drive_node() calls this
  * between its waits, so a stopped thread is never waited on forever.
  * Returns 1 if it resumed a thread from a sendmsg stop, which is
  * progress the listener does not show, and 0 otherwise. */
@@ -2618,73 +2617,132 @@ relaunch(Node *nd)
 	return 0;
 }
 
-/* run all nodes to quiescence: every live node has every thread parked
- * in a deferred slot (recv/accept/poll/futex) and no thread still being
- * born, or the node exited.  A node with a thread neither parked nor
- * exited is still running between syscalls -- we must wait for its next
- * notification, not treat the lull as quiescence. */
+/* Drive node nd, alone, until no thread of it is running (each running
+ * thread makes calls until it parks in one the search answers, or the
+ * node exits), or until a call of it woke another node that was not
+ * running (a close whose RST answered a peer's parked recv).  Then that
+ * node may act before nd's next call, as on Linux, which is a search
+ * choice (settle()), so nd stops at a call boundary: its next call waits
+ * unread.  A node with a thread neither parked nor exited is still
+ * running between syscalls, so a lull is waited out, not taken for
+ * quiescence. */
 static void
-drive_quiescent(void)
+drive_node(Node *nd)
 {
+	int idle[MAXNODES];
+	for (int i = 0; i < M.nodes; i++) idle[i] = !node_has_running(&N[i]);
 	for (;;)
 	{
-		for (int i = 0; i < M.nodes; i++) reap(&N[i]);
-		/* service a notification from each node with a running thread (or a
-		 * birth in flight).  The RECV ioctl waits for the running thread's
-		 * next owned syscall, which drives the node forward.  A fully parked
-		 * node is skipped: a thread holding an answer runs only when the
-		 * search picks it (A_RUN). */
-		int did = 0;
+		reap(nd);
+		if (!node_has_running(nd)) return;
 		for (int i = 0; i < M.nodes; i++)
-			if (node_has_running(&N[i]))
-				did |= try_pending_for(&N[i]);
-		if (did) continue;
-		/* wait for a node that still has a running thread to make a syscall */
-		struct pollfd pf[MAXNODES]; int np = 0;
-		for (int i = 0; i < M.nodes; i++)
-			if (node_has_running(&N[i])) { pf[np].fd = N[i].listener; pf[np].events = POLLIN; np++; }
-		if (np == 0) break;			/* every node quiescent or dead */
-		/* wait in slices: a thread stopped by a signal or at a sendmsg
-		 * makes no call and wakes no poll, so look for one (reap) between
-		 * slices.  shortcut: a sendmsg on a kernel fd waits up to one slice
-		 * to be resumed; wait on SIGCHLD too if a target sends many. */
-		int r = 0, died = 0;
-		for (int waited = 0; !died && waited < LULL_MS; waited += LULL_SLICE_MS)
+			if (idle[i] && &N[i] != nd && node_has_running(&N[i])) return;
+		if (try_pending_for(nd)) continue;
+		/* wait for the running thread's next call, in slices: a thread
+		 * stopped by a signal or at a sendmsg makes no call and wakes no
+		 * poll, so look for one (reap) between slices.  shortcut: a
+		 * sendmsg on a kernel fd waits up to one slice to be resumed;
+		 * wait on SIGCHLD too if a target sends many. */
+		struct pollfd pf = {nd->listener, POLLIN, 0};
+		int r = 0, moved = 0;
+		for (int waited = 0; !moved && waited < LULL_MS; waited += LULL_SLICE_MS)
 		{
-			r = poll(pf, np, LULL_SLICE_MS);
+			r = poll(&pf, 1, LULL_SLICE_MS);
 			if (r != 0) break;
-			for (int i = 0; i < M.nodes; i++)
-				if (N[i].alive) { died |= reap(&N[i]); died |= !N[i].alive; }
+			moved |= reap(nd); moved |= !nd->alive;
 		}
-		if (died) continue;
+		if (moved) continue;
 		if (r < 0 && errno == EINTR) continue;
 		/* a notify fd that reports POLLHUP has lost its owning process: the
 		 * node exited (its last thread ran off the end or called
 		 * exit_group).  waitpid(WNOHANG) can momentarily still see a
 		 * ptrace-seized tracee as not-yet-reapable, so reap it directly
 		 * here rather than spin until WNOHANG catches up. */
-		int hup = 0;
-		for (int i = 0; i < np; i++)
-			if (pf[i].revents & (POLLHUP | POLLERR))
-				for (int j = 0; j < M.nodes; j++)
-					if (N[j].alive && N[j].listener == pf[i].fd)
-					{ reap_node(&N[j]); N[j].alive = 0; drain_canon(&N[j]); node_gone(&N[j]); hup = 1; }
-		if (hup) continue;
+		if (r > 0 && (pf.revents & (POLLHUP | POLLERR)))
+		{ reap_node(nd); nd->alive = 0; drain_canon(nd); node_gone(nd); continue; }
 		if (r == 0)
 		{
 			/* a running thread made no syscall the checker owns for
 			 * LULL_MS: it is busy, or blocked in a call the checker does
 			 * not model.  Treating that as quiescence would snapshot a
 			 * node mid-step, so it is an error. */
-			for (int i = 0; i < M.nodes; i++)
-			{
-				reap(&N[i]);
-				if (node_has_running(&N[i]))
-					die(1, "node %d made no checked syscall for %d ms (a thread is busy, or blocked in a call the checker does not model)", i, LULL_MS);
-			}
+			reap(nd);
+			if (node_has_running(nd))
+				die(1, "node %d made no checked syscall for %d ms (a thread is busy, or blocked in a call the checker does not model)", nd->id, LULL_MS);
 		}
 	}
+}
+
+/* Is the world quiescent: no node with a running thread?  Only such a
+ * world is a state the invariants judge.  Between two nodes' STEPs a
+ * node not yet stepped has run only up to a call nobody has answered,
+ * so its state record is not one it reports between steps: the
+ * invariants, the refinement checks and the seen set wait for the world
+ * to settle, and the STEPs to it are part of the action that led there. */
+static int
+world_settled(void)
+{
+	for (int i = 0; i < M.nodes; i++)
+		if (node_has_running(&N[i])) return 0;
+	return 1;
+}
+
+/* Bring the world to a point where the search chooses.  Nodes are
+ * driven one at a time, each until it is quiescent (drive_node), never
+ * two at once, so what the checker answers a node cannot depend on how
+ * far another has got.  When exactly one node has a running thread it is
+ * driven with no choice, as a DELIVER or a RUN, which wake one node,
+ * always leaves.  When two or more do (at launch, a RESTART, or a call
+ * of one node that answered a parked call of another) the order of
+ * their steps is a search choice: settle() stops, and enum_actions
+ * offers STEP for each.
+ *
+ * A STEP also ends when the node wakes another (drive_node), so a node
+ * an RST woke may act before the closer's next call.
+ *
+ * Driving two nodes at once, as 2.0.0 did, made the answer to a call
+ * that reads another node's state (a connect to a peer that may have
+ * exited, a write to a peer that may have closed) depend on the
+ * kernel's scheduling: one action sequence reached two worlds, and the
+ * search saw one of them at random.  A fixed order would see one always.
+ * Each STEP drives one node to its own quiescent point, the same unit a
+ * DELIVER drives, or to the call that woke another, so the orders the
+ * search explores are the orders of those steps, and the seen set
+ * merges orders that reach the same world.  Calls inside one step that
+ * reach no other node are not interleaved with another node's. */
+static void
+settle(void)
+{
+	for (;;)
+	{
+		int n = 0, last = -1;
+		for (int i = 0; i < M.nodes; i++)
+			if (node_has_running(&N[i])) { n++; last = i; }
+		if (n != 1) break;
+		drive_node(&N[last]);
+	}
 	for (int i = 0; i < M.nodes; i++) if (N[i].alive) drain_canon(&N[i]);
+	/* without the preload a node reads the real clock and the real heap,
+	 * and replay is no longer deterministic: refuse rather than guess.
+	 * Once no node runs, each has run since its launch. */
+	for (int i = 0; world_settled() && i < M.nodes; i++)
+		if (!N[i].preload_ok)
+			die(3, "node %d did not load the preload %s (set CMC_PRELOAD to its path)", i, preload_path);
+}
+
+/* Is every running node fresh: launched (or restarted) and never served
+ * a call?  Such a node's future is a function of its launch alone, and
+ * its record (no thread yet) says so, so a world between STEPs whose
+ * running nodes are all fresh may be merged with an equal one.  A node
+ * woken partway (another node's close answered its parked recv) has run
+ * on from an answer its record does not hold, so a world with one is
+ * searched as a tree. */
+static int
+running_fresh(void)
+{
+	for (int i = 0; i < M.nodes; i++)
+		if (node_has_running(&N[i]) && N[i].nth > 0) return 0;
+	return 1;
 }
 
 /* =================================================================== */
@@ -2925,10 +2983,12 @@ world_fp(uint64_t fp[2])
 	for (int i = 0; i < M.nodes; i++)
 	{
 		const Node *nd = &N[i];
-		/* node liveness: a running node (fully alive), a crashed one, or an
-		 * exited one; then its volatile and its durable records, and how
-		 * much of the durable record a startup read has consumed */
-		PUT(nd->alive ? 3 : (nd->crashed ? 0xfe : 0xff));
+		/* node liveness: a running node (fully alive), one launched that
+		 * has not yet made a call (only between STEPs, see settle()), a
+		 * crashed one, or an exited one; then its volatile and its durable
+		 * records, and how much of the durable record a startup read has
+		 * consumed */
+		PUT(nd->alive ? (nd->nth ? 3 : 4) : (nd->crashed ? 0xfe : 0xff));
 		PUT(nd->canon_len);
 		for (int k = 0; k < nd->canon_len; k++) PUT(nd->canon[k]);
 		PUT(nd->durable_len);
@@ -3017,7 +3077,7 @@ reset_world(void)
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -3040,6 +3100,12 @@ typedef struct { int kind, node, peer, thr, arg; } Act;
  *   - RUN: a thread holding an answer (BK_DONE) gets it and runs to its
  *     next visible operation.  Only threads of a node with more than one
  *     thread hold answers, so which of them runs next is a search choice.
+ *   - STEP: a node with a running thread is driven, alone, until it is
+ *     quiescent or wakes another (drive_node).  Offered only when two or
+ *     more nodes have one (see settle()), which node steps first is a
+ *     search choice; while a node
+ *     waits for its STEP, its other actions wait too, since the world is
+ *     not quiescent.
  * A futex wait (BK_FUTEX) has no environment action: it is woken only by
  * another thread's FUTEX_WAKE, which then holds the waiter's answer for a
  * RUN.  Each per-thread action carries the thread's slot index (thr),
@@ -3053,6 +3119,10 @@ enum_actions(Act *out)
 #define ADD2(k, nd, pr, tr, x) do { if (c >= MAXACT) die(1, "more than %d actions enabled at one point", MAXACT); \
 	out[c].kind = (k); out[c].node = (nd); out[c].peer = (pr); out[c].thr = (tr); out[c].arg = (x); c++; } while (0)
 #define ADD(k, nd, pr, tr) ADD2(k, nd, pr, tr, -1)
+	/* nodes still running: the only choice is which steps first */
+	for (int d = 0; d < M.nodes; d++)
+		if (node_has_running(&N[d])) ADD(A_STEP, d, -1, -1);
+	if (c > 0) return c;
 	for (int d = 0; d < M.nodes; d++)
 	{
 		Node *nd = &N[d];
@@ -3307,8 +3377,9 @@ apply(const Act *a)
 			break_peer_links(a->node);	/* the old process's connections are gone */
 			if (relaunch(nd)) die(3, "node %d would not restart", a->node);
 			break;
+		case A_STEP: drive_node(nd); break;
 	}
-	drive_quiescent();
+	settle();
 }
 
 /* C2 (--refine-steps): when g_step_refine is set, run_seq performs the
@@ -3328,6 +3399,7 @@ static int
 run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 {
 	reset_world();
+	g_step_rc = -1;
 	for (int i = 0; i < M.nodes; i++) { N[i].id = i; if (launch(&N[i])) return -1; }
 	if (M.client_write >= 0)
 	{
@@ -3337,20 +3409,18 @@ run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 		N[0].pend[N[0].npend++] = c;
 		bag_add(c, 1, w, 2, 0);
 	}
-	drive_quiescent();
-	/* without the preload a node reads the real clock and the real heap,
-	 * and replay is no longer deterministic: refuse rather than guess */
-	for (int i = 0; i < M.nodes; i++)
-		if (!N[i].preload_ok)
-			die(3, "node %d did not load the preload %s (set CMC_PRELOAD to its path)", i, preload_path);
-	if (g_step_refine) { cmc_refine_reset(); g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
+	settle();
+	/* the refinement steps are checked at quiescent worlds only; the
+	 * nodes' STEPs between them are part of one step of the spec */
+	if (g_step_refine) cmc_refine_reset();
+	if (g_step_refine && world_settled()) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	for (int s = 0; s < seqlen; s++)
 	{
 		Act a[MAXACT]; int na = enum_actions(a);
 		if (seq[s] < 0 || seq[s] >= na)
 			die(1, "replay diverged at step %d: action %d of %d (is the target deterministic?)", s, seq[s], na);
 		apply(&a[seq[s]]);
-		if (g_step_refine) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
+		if (g_step_refine && world_settled()) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	}
 	*nact = enum_actions(acts);
 	return 0;
@@ -3429,8 +3499,9 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);
 	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
@@ -3442,22 +3513,39 @@ act_name(const Act *a, char *b, size_t n)
 	return b;
 }
 
+/* Replay seq from a fresh launch, printing each action by name.  The
+ * environment's actions are numbered; a STEP (which of the nodes that
+ * were running together went first) is listed between them unnumbered.
+ * Two replays: the first counts, so the heading can say how many. */
+static void
+print_trace(const int *seq, int len)
+{
+	char nm[48];
+	Act a[MAXACT]; int na, n = 0, k = 0;
+	for (int pass = 0; pass < 2; pass++)
+	{
+		run_seq(NULL, 0, a, &na);
+		if (pass == 1) printf("Error: The behavior up to this point is (%d actions):\n", n);
+		for (int i = 0; i < len; i++)
+		{
+			if (seq[i] >= na) die(1, "replay of the counterexample diverged at step %d", i);
+			int step = a[seq[i]].kind == A_STEP;
+			if (pass == 0) n += !step;
+			else if (step) printf("       %s\n", act_name(&a[seq[i]], nm, sizeof nm));
+			else printf("    %d. %s\n", ++k, act_name(&a[seq[i]], nm, sizeof nm));
+			apply(&a[seq[i]]);
+			na = enum_actions(a);
+		}
+		if (pass == 0) kill_all();
+	}
+}
+
 /* report a violation: the action sequence, by name, and the world there */
 static void
 report(int which, const int *seq, int len)
 {
-	char nm[48];
 	printf("Error: Invariant %s is violated.\n", M.inv[which].name);
-	printf("Error: The behavior up to this point is (%d actions):\n", len);
-	Act a[MAXACT]; int na;
-	run_seq(NULL, 0, a, &na);
-	for (int i = 0; i < len; i++)
-	{
-		if (seq[i] >= na) die(1, "replay of the counterexample diverged at step %d", i);
-		printf("    %d. %s\n", i + 1, act_name(&a[seq[i]], nm, sizeof nm));
-		apply(&a[seq[i]]);
-		na = enum_actions(a);
-	}
+	print_trace(seq, len);
 	printf("  node states:");
 	for (int i = 0; i < M.nodes; i++)
 	{
@@ -3475,17 +3563,7 @@ report(int which, const int *seq, int len)
 static void
 report_refine(const int *seq, int len)
 {
-	char nm[48];
-	printf("Error: The behavior up to this point is (%d actions):\n", len);
-	Act a[MAXACT]; int na;
-	run_seq(NULL, 0, a, &na);
-	for (int i = 0; i < len; i++)
-	{
-		if (seq[i] >= na) die(1, "replay of the counterexample diverged at step %d", i);
-		printf("    %d. %s\n", i + 1, act_name(&a[seq[i]], nm, sizeof nm));
-		apply(&a[seq[i]]);
-		na = enum_actions(a);
-	}
+	print_trace(seq, len);
 	printf("  node states:");
 	for (int i = 0; i < M.nodes; i++)
 	{
@@ -3547,19 +3625,30 @@ world_threaded(void)
 
 /* the BFS frontier: action sequences, appended in one growing pool */
 static int *qpool; static size_t qcap, qused;
-typedef struct { size_t off; int len; uint64_t pfp0, pfp1; } QEnt;
+/* an entry: its sequence in qpool, the environment actions in it (its
+ * depth: STEPs are not counted), and the fingerprint of the last
+ * quiescent world on its path */
+typedef struct { size_t off; int len, depth; uint64_t pfp0, pfp1; } QEnt;
 static QEnt *Q; static size_t Qcap, qh, qt;
+/* Entries one STEP from a world being expanded: same depth, so they are
+ * taken before anything left in Q (a 0-1 breadth-first search).  Taking
+ * them in order of sequence length instead would reach a world first by
+ * a path with more environment actions and fewer STEPs, and record it
+ * deeper than it is. */
+static QEnt *Z; static size_t Zcap, zn;
 
 static void
-q_push(const int *seq, int len, int next, uint64_t pfp0, uint64_t pfp1)
+q_push(const int *seq, int len, int next, int depth, uint64_t pfp0, uint64_t pfp1, int step)
 {
-	if (qt == Qcap) { Qcap = Qcap ? 2 * Qcap : 4096; Q = realloc(Q, Qcap * sizeof *Q); if (!Q) die(1, "out of memory for the frontier"); }
+	if (step && zn == Zcap) { Zcap = Zcap ? 2 * Zcap : 256; Z = realloc(Z, Zcap * sizeof *Z); if (!Z) die(1, "out of memory for the frontier"); }
+	if (!step && qt == Qcap) { Qcap = Qcap ? 2 * Qcap : 4096; Q = realloc(Q, Qcap * sizeof *Q); if (!Q) die(1, "out of memory for the frontier"); }
 	if (qused + (size_t) len + 1 > qcap)
 	{
 		while (qused + (size_t) len + 1 > qcap) qcap = qcap ? 2 * qcap : 65536;
 		qpool = realloc(qpool, qcap * sizeof *qpool); if (!qpool) die(1, "out of memory for the frontier");
 	}
-	Q[qt].off = qused; Q[qt].len = len + 1; Q[qt].pfp0 = pfp0; Q[qt].pfp1 = pfp1; qt++;
+	QEnt *q = step ? &Z[zn++] : &Q[qt++];
+	q->off = qused; q->len = len + 1; q->depth = depth; q->pfp0 = pfp0; q->pfp1 = pfp1;
 	if (len) memcpy(qpool + qused, seq, (size_t) len * sizeof *seq);
 	qpool[qused + (size_t) len] = next;
 	qused += (size_t) len + 1;
@@ -3607,7 +3696,7 @@ q_root(void)
 {
 	Q = malloc(4096 * sizeof *Q); Qcap = 4096;
 	if (!Q) die(1, "out of memory for the frontier");
-	Q[0].off = 0; Q[0].len = 0; Q[0].pfp0 = 0; Q[0].pfp1 = 0; qt = 1;
+	Q[0].off = 0; Q[0].len = 0; Q[0].depth = 0; Q[0].pfp0 = 0; Q[0].pfp1 = 0; qt = 1;
 }
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double) t.tv_sec + t.tv_nsec / 1e9; }
@@ -3656,15 +3745,34 @@ cmc_proc_main(const CmcProcOptions *po)
 		if (depth < 0) depth = 100;
 		rng = po->seed;
 		uint64_t states = 0, w;
-		int *seq = malloc((size_t) (depth + 1) * sizeof *seq);
+		/* a walk takes up to depth environment actions and the STEPs
+		 * between them, which a crossing wake can make more than one per
+		 * node, so the sequence grows as it needs */
+		size_t seqcap = (size_t) (depth + 1) * (MAXNODES + 1);
+		int *seq = malloc(seqcap * sizeof *seq);
 		if (!seq) die(1, "out of memory");
 		for (w = 0; w < po->walks; w++)
 		{
-			Act a[MAXACT]; int na, len = 0;
+			Act a[MAXACT]; int na, len = 0, envlen = 0;
 			if (run_seq(NULL, 0, a, &na)) die(3, "a node would not start");
 			if (po->refine_steps) cmc_refine_reset();
 			for (;;)
 			{
+				if (g_fault_node < 0 && g_race_node < 0 && !world_settled())
+				{
+					/* between STEPs: no state to judge yet (world_settled) */
+					if ((size_t) len >= seqcap)
+					{
+						seqcap *= 2;
+						seq = realloc(seq, seqcap * sizeof *seq);
+						if (!seq) die(1, "out of memory");
+					}
+					int pick = (int) (next_rand() % (uint64_t) na);
+					seq[len++] = pick;
+					apply(&a[pick]);
+					na = enum_actions(a);
+					continue;
+				}
 				int which = -1; states++;
 				if (g_fault_node >= 0 || g_race_node >= 0)
 				{
@@ -3701,9 +3809,15 @@ cmc_proc_main(const CmcProcOptions *po)
 						free(seq); return 1;
 					}
 				}
-				if (na == 0 || len >= depth) break;
+				if (na == 0 || envlen >= depth) break;
+				if ((size_t) len >= seqcap)
+				{
+					seqcap *= 2;
+					seq = realloc(seq, seqcap * sizeof *seq);
+					if (!seq) die(1, "out of memory");
+				}
 				int pick = (int) (next_rand() % (uint64_t) na);
-				seq[len++] = pick;
+				seq[len++] = pick; envlen++;
 				apply(&a[pick]);
 				na = enum_actions(a);
 			}
@@ -3732,15 +3846,14 @@ cmc_proc_main(const CmcProcOptions *po)
 	const char *why = NULL;
 	g_step_refine = po->refine_steps;	/* C2 checks run inside run_seq's replay */
 	q_root();
-	while (qh < qt)
+	while (zn > 0 || qh < qt)
 	{
-		QEnt e = Q[qh++];
+		QEnt e = zn > 0 ? Z[--zn] : Q[qh++];
 		int *seq = malloc(((size_t) e.len + 1) * sizeof *seq);
 		if (!seq) die(1, "out of memory");
 		if (e.len) memcpy(seq, qpool + e.off, (size_t) e.len * sizeof *seq);
 		Act a[MAXACT]; int na = 0;
 		if (run_seq(seq, e.len, a, &na)) die(3, "a node would not start");
-		replays++;
 
 		if (g_step_refine && g_step_rc != -1)
 		{
@@ -3758,6 +3871,19 @@ cmc_proc_main(const CmcProcOptions *po)
 
 		if (g_fault_node >= 0) { kill_all(); report_fault(seq, e.len); free(seq); return 1; }
 		if (g_race_node >= 0) { kill_all(); report_race(seq, e.len); free(seq); return 1; }
+		if (!world_settled())
+		{
+			/* between two nodes' STEPs: not a state the invariants judge
+			 * (world_settled), and not counted; expanded by its STEPs */
+			uint64_t fp[2]; world_fp(fp);
+			int isnew = !running_fresh() || world_threaded() || mark(fp, g_world, g_world_len);
+			kill_all();
+			if (isnew) for (int i = 0; i < na; i++) q_push(seq, e.len, i, e.depth, e.pfp0, e.pfp1, 1);
+			free(seq);
+			if (po->time_limit > 0 && now_s() - t0 > po->time_limit) { why = "time limit reached"; break; }
+			continue;
+		}
+		replays++;
 		int which = -1; int ok = check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
 		if (ok && po->refine && !po->refine_steps)
@@ -3776,14 +3902,14 @@ cmc_proc_main(const CmcProcOptions *po)
 		uint64_t fp[2]; world_fp(fp);
 		int tree = world_threaded();
 		int isnew = tree || mark(fp, g_world, g_world_len);
-		if (isnew) { distinct++; ntree += tree; if (e.len > maxlen) maxlen = e.len; }
+		if (isnew) { distinct++; ntree += tree; if (e.depth > maxlen) maxlen = e.depth; }
 		/* did this action make progress?  A non-root entry whose reached
 		 * world equals its parent's is a stutter: the action was enabled
 		 * but changed nothing the fingerprint sees, a self-loop the
 		 * program cannot leave by that step.  If every reachable path is a
 		 * stutter, the program never advanced past its initial state and a
 		 * safety-only pass is vacuous (reported below). */
-		if (e.len > 0)
+		if (e.depth > 0)
 		{
 			if (fp[0] == e.pfp0 && fp[1] == e.pfp1) stutter_leaves++;
 			else progressed++;
@@ -3792,8 +3918,8 @@ cmc_proc_main(const CmcProcOptions *po)
 		if (!ok) { report(which, seq, e.len); free(seq); return 1; }
 		if (isnew && na > 0)
 		{
-			if (depth >= 0 && e.len >= depth) cut++;
-			else for (int i = 0; i < na; i++) q_push(seq, e.len, i, fp[0], fp[1]);
+			if (depth >= 0 && e.depth >= depth) cut++;
+			else for (int i = 0; i < na; i++) q_push(seq, e.len, i, e.depth + 1, fp[0], fp[1], 0);
 		}
 		free(seq);
 		if (po->max_states && distinct >= po->max_states) { why = "max states reached"; break; }
@@ -3810,7 +3936,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	if (why)
 	{
 		printf("INCOMPLETE (no violation found): %s; %zu distinct states, %zu left on queue, %zu cut at depth %ld, %.1f s\n",
-			   why, distinct, qt - qh, cut, depth, dt);
+			   why, distinct, qt - qh + zn, cut, depth, dt);
 		return 2;
 	}
 	/* The search covered every order of the visible operations, but that

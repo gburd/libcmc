@@ -73,7 +73,7 @@ build/cmc --model-file kvserver.model
 cmc: model file kvserver.model, binary kvserver, 2 nodes, breadth-first search
   environment: client_write 7, timeouts 0, crashes 1, drops 0
 Model checking completed. No error has been found.
-21 states generated, 15 distinct states found, 0 states left on queue.
+22 states generated, 15 distinct states found, 0 states left on queue.
 The depth of the complete state graph search is 6.
 ```
 
@@ -106,6 +106,7 @@ build/cmc --model-file kvserver.model --binary ./kvserver-bug
 ```
 Error: Invariant no_lost_ack is violated.
 Error: The behavior up to this point is (3 actions):
+       step n0
     1. accept client->n0
     2. deliver client->n0
     3. crash n0
@@ -115,7 +116,8 @@ Error: The behavior up to this point is (3 actions):
 
 Three events: the primary accepts the client's connection, reads the
 write and acknowledges it, then crashes before the value is durable
-anywhere.  The client holds an acknowledgement for 7, and no node has
+anywhere.  The unnumbered `step n0` says the primary ran first when both
+nodes started; which node goes first is a choice the search makes too.  The client holds an acknowledgement for 7, and no node has
 it.  Breadth-first search finds the shortest such sequence; the exit
 status is 1.
 

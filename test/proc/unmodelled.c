@@ -26,6 +26,11 @@
  *   peek       a recv() with MSG_PEEK (refused)
  *   nbaccept   an accept4() with SOCK_NONBLOCK (refused)
  *   udp        a UDP socket (refused)
+ *   dialexit   node 1 exits at once; node 0 makes 16 checked calls, then
+ *              dials it and records 1 if the dial waited (node 1 had not
+ *              yet run), 2 if it was refused (node 1 had exited).  Linux
+ *              gives either, by which process runs first.  2.0.0 drove
+ *              both nodes at once and took one of the two at random.
  *
  *   cc -O1 -no-pie -o unmodelled test/proc/unmodelled.c
  */
@@ -39,6 +44,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -202,6 +208,20 @@ main(int argc, char **argv)
 		}
 		else
 			(void) !write(s, "x", 1);
+		return 0;
+	}
+	if (!strcmp(mode, "dialexit"))
+	{
+		int id = atoi(argv[1]), s;
+		struct sockaddr_in a = addr(BASE + 1);
+		unsigned char b;
+
+		if (id == 1)
+			return 0;
+		for (int i = 0; i < 16; i++)
+			(void) !getrandom(&b, 1, 0);
+		s = socket(AF_INET, SOCK_STREAM, 0);
+		emit(connect(s, (struct sockaddr *) &a, sizeof a) == 0 ? 1 : 2);
 		return 0;
 	}
 	if (!strcmp(mode, "fork"))

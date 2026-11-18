@@ -49,7 +49,7 @@ cmc --model-file examples/paxos/paxos.model --binary ./paxos
 
 ```
 Model checking completed. No error has been found.
-964 states generated, 561 distinct states found, 0 states left on queue.
+983 states generated, 561 distinct states found, 0 states left on queue.
 The depth of the complete state graph search is 28.
 ```
 
@@ -120,7 +120,7 @@ cmc --model-file examples/spec/paxos2-refine.model --binary ./paxos2 \
 
 ```
 Model checking completed. No error has been found.
-597 states generated, 432 distinct states found, 0 states left on queue.
+614 states generated, 429 distinct states found, 0 states left on queue.
 ```
 
 The model file requires that some node decides, so the pass is not

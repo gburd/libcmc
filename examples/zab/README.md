@@ -43,7 +43,7 @@ cmc --model-file examples/zab/zab.model --binary ./zab --crashes 1
 
 ```
 Model checking completed. No error has been found.
-62 states generated, 45 distinct states found, 0 states left on queue.
+67 states generated, 45 distinct states found, 0 states left on queue.
 ```
 
 ## The planted bug

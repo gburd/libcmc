@@ -100,6 +100,7 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
+| the order of nodes' steps between quiescent points | exact | at launch, after a RESTART, and after a call that wakes a parked node, which node runs first is a search choice (STEP); within one step a node's calls that reach no other node are not interleaved with another's | proc_gate dialexit (both outcomes of a dial to a node that exits), badptr and dialexit 300 runs each |
 | the state hook (fd 3, fd 193) | exact | a record of up to 64 bytes; a longer or unfinished record is exit 3 | proc_gate longrec, partrec |
 | deduplication | exact | the full world encoding is compared on a fingerprint match; a connection is named by its slot, not its peer | proc_gate fingerprint, fpfuzz, twoconn |
 | crash and restart | approximate | a crash keeps the fd-193 record; a restart hands it back on the first read of fd 193 | proc_gate durlog, restart |
