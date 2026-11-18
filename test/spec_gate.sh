@@ -333,6 +333,25 @@ printf '[map]\nx = "node[0][0]"\n' > "$OUT/b.bind"
 printf 'module f\nvar c : [0 .. 1 -> 0 .. 1]\ninit c == [i in 0 .. 1 -> 0]\ninvariant i: TRUE\n' > "$OUT/fun.cml"
 printf '[map]\nc = "0"\n' > "$OUT/fun.bind"
 expectp "a function variable bound without an index"  3 "c is a function" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0
+# the observables a binding reads: node[i][k], node[i].field, nodes,
+# replies and a reply's .src and .val (refine_driver.c says what each
+# reports), each mapped onto a spec whose invariant checks the value
+obs() {	# obs DESC WANT NEEDLE EXPR [VALUES...]: x = EXPR, C1 check
+	desc=$1 want=$2 needle=$3 expr=$4; shift 4
+	printf '[fields]\nlo = 0\n[map]\nx = "%s"\n' "$expr" > "$OUT/o.bind"
+	printf 'module o\nvar x : 0 .. 9\ninit x == 0\ninvariant i: x <= 3\n' > "$OUT/o.cml"
+	expectp "$desc" "$want" "$needle" "$RD" -1 "$OUT/o.cml" "$OUT/o.bind" "$@"
+}
+obs "node[0][0] is the observed value"        0 "accepted 3" "node[0][0]" 0 1 3
+obs "node[1].lo is one more"                  1 "rejected at step 1" "node[1].lo" 0 3
+obs "count over nodes sees both"              1 "rejected at step 0" "4 * (count i in nodes : node[i][0] >= 0)" 0
+obs "count over replies sees the one reply"   0 "accepted 2" "count r in replies : r.src == 1 and r.val == 2" 0 2
+obs "a reply's value is observed"             1 "rejected at step 1" "4 * (count r in replies : r.val == 2)" 0 2
+obs "an unknown field is an error"            3 "unknown field" "node[0].hi" 0
+obs "node with no [ is an error"              3 "expected \[ after node" "node 0" 0
+obs "node[i] with no index or field"          3 "needs \[k\] or .field" "node[0] + 1" 0
+obs "a reply field other than src or val"     3 "reply has .src and .val" "count r in replies : r.dst == 0" 1
+obs "a set where an integer belongs"          3 "binding x: expected an integer, not a set" "{node[0][0]}" 0
 # 1.4: a truncated expression is an error, never a shorter invariant
 expect "an over-long expression is a model error"  3 "too long" --spec "$S/truncate.cml"
 # 1.5: types, declared domains and integer overflow

@@ -1234,7 +1234,8 @@ static int build_abstract(const CmcObs *obs, State *out, char *err, size_t errca
 		} else {
 			Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=0;
 			Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -1;
-			if(r.tag==T_BOOL) r.tag=T_INT;	/* a flag, as in a function entry */
+			if(r.tag!=T_INT && r.tag!=T_BOOL){ snprintf(err,errcap,"binding %s: expected an integer, not %s",B_map[m].var,tag_name(r.tag)); return -1; }
+			r.tag=T_INT;	/* a flag, as in a function entry */
 			st.v[vi]=r;
 		}
 	}
