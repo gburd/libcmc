@@ -132,6 +132,9 @@ expect "ticker: eventually-max holds under fairness" 0 "1 property held" --spec 
 expect "ticker: a fair reset cycle breaks it"        1 "reaches_max is violated" --spec "$HERE/examples/spec/ticker.cml" --define RESET
 
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
+# every operator inside a count body is translated (emit_gate runs TLC on it)
+expect "countops: the operators in a count body"   0 "5 distinct states found" --spec "$HERE/test/spec/countops.cml"
+expect "emit-tla: not, in, some and all in a count body" 0 "~ (j .in {})" --emit-tla "$HERE/test/spec/countops.cml"
 expect "emit-tla: a well-formed module header" 0 "MODULE paxos" --emit-tla "$HERE/examples/spec/paxos.cml"
 expect "emit-tla: translates operators to TLA+" 0 "Cardinality" --emit-tla "$HERE/examples/spec/paxos.cml"
 

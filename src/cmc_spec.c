@@ -1346,28 +1346,28 @@ static int tla_word(const char **p, const char *w, FILE *o, const char *repl){
 	if(!strncmp(*p,w,n) && !isalnum((unsigned char)(*p)[n]) && (*p)[n]!='_'){ fputs(repl,o); *p+=n; return 1; }
 	return 0;
 }
-static void tla_expr(const char *e, FILE *o){
-	const char *p=e;
-	while(*p){
+/* Translate the .cml expression e[0 .. n) (n < 0: to its end) to TLA+
+ * on o: a token-level rewrite, recursing into a count body so that every
+ * operator there is translated as it is outside. */
+static void tla_expr_n(const char *e, long n, FILE *o){
+	const char *p=e, *end=n<0?e+strlen(e):e+n;
+	while(p<end){
 		if(isspace((unsigned char)*p)){ fputc(*p++,o); continue; }
 		if(tla_word(&p,"all",o,"\\A")) continue;
 		if(tla_word(&p,"some",o,"\\E")) continue;
 		if(!strncmp(p,"count",5) && !isalnum((unsigned char)p[5]) && p[5]!='_'){ fputs("Cardinality({",o); p+=5;
-			while(*p&&isspace((unsigned char)*p))p++;
-			while(*p&&(isalnum((unsigned char)*p)||*p=='_')) fputc(*p++,o);
-			fputs(" \\in ",o); while(*p&&isspace((unsigned char)*p))p++;
+			while(p<end&&isspace((unsigned char)*p))p++;
+			while(p<end&&(isalnum((unsigned char)*p)||*p=='_')) fputc(*p++,o);
+			fputs(" \\in ",o); while(p<end&&isspace((unsigned char)*p))p++;
 			if(!strncmp(p,"in",2)) p+=2;
-			while(*p&&isspace((unsigned char)*p))p++;
-			while(*p && *p!=':'){ fputc(*p++,o); }
-			if(*p==':'){ p++; fputs(" : ",o); }
-			int depth=0; while(*p){ if(*p=='(')depth++; if(*p==')'){ if(depth==0) break; depth--; }
-				if(tla_word(&p,"and",o,"/\\")) continue;
-				if(tla_word(&p,"or",o,"\\/")) continue;
-				if(!strncmp(p,"==",2)){ fputc('=',o); p+=2; continue; }
-				if(!strncmp(p,"!=",2)){ fputs("#",o); p+=2; continue; }
-				if(tla_word(&p,"mod",o,"%")) continue;
-				if(*p=='/' && p[1]!='\\'){ fputs("\\div ",o); p++; continue; }
-				fputc(*p++,o); }
+			while(p<end&&isspace((unsigned char)*p))p++;
+			const char *set=p; while(p<end && *p!=':') p++;
+			tla_expr_n(set,p-set,o);
+			if(p<end && *p==':'){ p++; fputs(" : ",o); }
+			/* the body runs to the paren that closes the count */
+			const char *body=p; int depth=0;
+			while(p<end){ if(*p=='(') depth++; if(*p==')'){ if(depth==0) break; depth--; } p++; }
+			tla_expr_n(body,p-body,o);
 			fputs("})",o); continue; }
 		if(tla_word(&p,"not",o,"~")) continue;
 		if(tla_word(&p,"and",o,"/\\")) continue;
@@ -1382,6 +1382,7 @@ static void tla_expr(const char *e, FILE *o){
 		fputc(*p++,o);
 	}
 }
+static void tla_expr(const char *e, FILE *o){ tla_expr_n(e,-1,o); }
 
 /* some .cml forms need structural, not token, rewriting:
  *   [i in S -> E]         -> [i \in S |-> E]   (handled: in-> \in, -> |->)

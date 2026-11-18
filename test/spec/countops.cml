@@ -1,0 +1,20 @@
+# test/spec/countops.cml: every operator inside a count body, which the
+# TLA+ bridge must translate there as everywhere (emit_gate.sh checks the
+# emitted module with TLC; spec_gate.sh pins cmc --spec's counts).
+# Three flags, set one at a time; a flag may be set while fewer than two
+# are set, its index is not 1 unless flag 0 is set, and some flag is
+# still clear.  The invariant counts set flags whose index is in range,
+# not above the mod bound, and different from the cleared one.
+module countops
+
+const N = 3
+
+var f : [0 .. N-1 -> 0 .. 1]
+
+init f == [i in 0 .. N-1 -> 0]
+
+action set(i in 0 .. N-1):
+  when f[i] == 0 and (count j in 0 .. N-1 : not (f[j] == 0) and j in 0 .. N-1 and (some k in 0 .. N-1 : k == j) and (all k in {j} : k != i)) < 2 and (i != 1 or f[0] == 1)
+  f' = [f except [i] = 1]
+
+invariant bounded: (count j in 0 .. N-1 : f[j] == 1 and (j / 1) mod N == j and not (j in {})) <= 2
