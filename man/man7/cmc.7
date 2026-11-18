@@ -126,7 +126,10 @@ a
 .Fn futex
 call; a call that makes, uses or closes a socket, eventfd or epoll
 instance the checker owns; a write to the state hook (fd 3 or fd 193)
-or a read of fd 193; a
+or a read of fd 193; a lock acquisition (see below); an atomic
+operation in a node built with the race runtime; a
+.Fn sched_yield ;
+a
 .Fn clone ;
 and a thread's exit.
 The checker carries the operation out when the thread reaches it, so
@@ -173,10 +176,87 @@ incomplete, after
 .Fl -max-states
 worlds, or 1000000 without it.
 .Pp
-The boundary is the system call.
-Interleavings of plain memory accesses between two visible operations
-of different threads are not explored: a data race on a shared variable
-with no system call between the racing accesses is not found.
+Threads that share memory interleave between system calls too.
+Two mechanisms cover that, and a rule says when a pass may be reported.
+.Pp
+Every lock acquisition is a choice point.
+The preload wraps the calls that acquire: the pthread mutex, rwlock and
+spinlock locks (with their try and timed forms), semaphore waits,
+.Fn pthread_barrier_wait ,
+.Fn pthread_once ,
+and C11
+.Fn mtx_lock ,
+.Fn mtx_trylock ,
+.Fn mtx_timedlock
+and
+.Fn call_once .
+Each makes a marker call the checker answers itself, a
+.Fn sched_yield
+with a magic first argument, before the real function runs, so a lock
+taken on its uncontended fast path, which makes no system call, is
+still a point where another thread may run first.
+Releases (an unlock, a signal, a post) are not choice points: in a
+program free of data races a release can move earlier, past the
+accesses before it, and an acquisition later, so every schedule is
+equivalent to one that switches threads only before acquisitions.
+.Pp
+Data races are found by the race runtime.
+Build the program with ThreadSanitizer's instrumentation and link it
+with
+.Pa libcmc-race.a
+(installed beside the preload) in place of the sanitizer's own runtime:
+.Bd -literal -offset indent
+cc -O1 -fno-pie -fsanitize=thread -c prog.c
+cc -no-pie -o prog prog.o libcmc-race.a -lpthread
+.Ed
+.Pp
+gcc and clang emit the same calls.
+The runtime keeps a vector clock per thread and per synchronisation
+object, with happens-before edges from thread creation and join, the
+lock, condition variable, semaphore, barrier and once calls (pthread
+and C11), and atomics by their memory order.
+It reports two accesses to a byte from different threads, at least one
+a write and not both atomic, that no edge orders: a
+.Em data race ,
+a violation printed with both code addresses (nodes run without address
+randomisation, so
+.Ic addr2line -e prog
+names them) and the schedule that reached it.
+Each atomic operation is also a choice point.
+Outside cmc the runtime does nothing, so the same binary runs as an
+ordinary program.
+.Pp
+The rule: a search in which a node ran more than one thread without the
+race runtime cannot pass.
+It ends INCOMPLETE, and an unmet
+.Ic eventually
+is INCOMPLETE too, since a state that satisfies it may lie in an
+interleaving of memory accesses the search did not take.
+A violation found is still a violation.
+An atomic weaker than
+.Dv seq_cst
+makes the same result INCOMPLETE: the search runs a sequentially
+consistent machine and does not explore weaker orders.
+With the runtime, a program free of data races on every path searched
+is covered: the search explores every order of its synchronisation
+operations and system calls, and every interleaving of its accesses is
+equivalent to one of those.
+.Pp
+What the runtime does not see: code not compiled with the
+instrumentation (other libraries, the C library itself); with gcc,
+.Fn memcpy ,
+.Fn memset
+and
+.Fn memmove
+calls, which stay plain library calls (clang reports them); and
+.Fn pthread_exit ,
+so a thread must return from its start function for its join to carry
+its writes.
+A synchronisation edge the runtime does not model (a pipe, a signal, a
+raw
+.Fn futex )
+leaves accesses it orders looking unordered: a false alarm, reported as
+a race, never a race missed.
 .Pp
 When every thread of every node is blocked or has exited the world is
 .Em quiescent :

@@ -61,8 +61,9 @@ pre-thread behaviour.
 In a node with more than one thread, the order of the threads' visible
 operations is a search choice.  A visible operation is a `futex` call,
 any call on a checker-owned fd (or one that makes one), a write to fd 3
-or fd 193 or a read of fd 193, a `clone`, or a thread's exit, and
-nothing else is a choice point.  When a thread reaches one, the checker
+or fd 193 or a read of fd 193, a lock acquisition or an atomic (both
+through a marker, below), a `clone`, or a thread's exit, and nothing
+else is a choice point.  When a thread reaches one, the checker
 carries it out (bytes are queued, a futex waiter is woken, a state
 record is written) but holds its answer, and the thread parks
 (`BK_DONE`).  The checker writes
@@ -112,8 +113,32 @@ bounded by `--max-states`, or 1,000,000 such worlds by default, and a
 search that reaches the bound is INCOMPLETE.  Worlds whose nodes have
 each run one thread are still deduplicated.
 
-The boundary is the system call: interleavings of plain memory accesses
-between two visible operations of different threads are not explored.
+Memory interleavings are covered by reduction, not enumeration.  The
+preload wraps every acquiring synchronisation call (a lock, a semaphore
+wait, a barrier, a once; pthread and C11) and makes a marker call, a
+`sched_yield` with a magic first argument, before the real one; the
+checker answers it and, in a multi-threaded node, treats it as a visible
+operation.  Releases get no marker.  In a program free of data races
+every schedule is equivalent to one that switches threads only before
+acquisitions (a release moves left past race-free accesses, an
+acquisition right), so these points and the system calls are enough.
+
+Freedom from data races is what the race runtime (`src/cmc_race.c`,
+`libcmc-race.a`) checks.  A node built with `-fsanitize=thread` and
+linked against it instead of the sanitizer's runtime calls into it on
+every instrumented access and atomic.  It keeps vector clocks (per
+thread, per synchronisation object, edges from create and join, the
+wrapped calls and atomics by memory order) and a per-byte record of the
+last write and the reads since, in tables mapped at fixed addresses so
+the node's own layout does not move.  An unordered conflicting pair is
+reported through a marker and is a violation.  Atomics are markers too,
+so their order is searched.  The checker turns a would-be pass into
+INCOMPLETE when a node ran threads without the runtime (it announces
+itself at `__tsan_init`) or an atomic weaker than `seq_cst` ran, since
+the search is sequentially consistent.  The runtime's wrappers come
+first in symbol lookup (they are in the executable); each calls the
+next definition with `dlsym(RTLD_NEXT)`, which is the preload's, which
+makes the marker and calls the C library.
 
 The seccomp *filter* is classic BPF -- the bytecode `seccomp(2)` has
 always taken -- but there is no eBPF program, no `bpf(2)`, no kernel

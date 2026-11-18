@@ -86,7 +86,10 @@ in the kernel, untouched.
 | a call on a kernel fd (a pipe, a file) in a node with more than one thread | refused | exit 3 before it runs; writes to stdout and stderr are allowed | proc_gate racepipe, kernelfd |
 | worlds with a node that has run more than one thread | exact (never merged) | searched as a tree over orders of visible operations; INCOMPLETE after `--max-states` such worlds, 1000000 by default | proc_gate threadpos |
 | `clone`, `clone3` (threads), `futex` wait and wake, `exit`, `pthread_join` | exact | a newborn and its parent are both held at the clone's return until the search runs each | proc_gate twothread_join, raceborn |
-| memory accesses between two visible operations | not explored | a data race with no system call between the racing accesses is not found | (boundary; no fixture) |
+| a lock acquisition on its uncontended path (pthread mutex, rwlock, spinlock, semaphore, barrier, once; C11 `mtx_*`, `call_once`) | exact (a choice point) | the preload's marker before the real call; releases are not choice points (an acquisition-only reduction, sound for programs free of data races) | proc_gate syncpoint |
+| memory accesses between two choice points, with the race runtime (`-fsanitize=thread`, `libcmc-race.a`) | checked | a happens-before race is a violation with both code addresses; atomics are choice points; code outside the instrumentation (other libraries, gcc's `memcpy`) is not checked; an unmodelled edge gives a false alarm, never a missed race | proc_gate memrace, raceemit |
+| memory accesses between two choice points, without the race runtime | INCOMPLETE | a multi-threaded node cannot pass, and an unmet `eventually` is INCOMPLETE | proc_gate memrace, twothread |
+| an atomic weaker than `seq_cst` | INCOMPLETE | the search runs a sequentially consistent machine; a pass that used one is INCOMPLETE | proc_gate memrace relaxedadd |
 | calls the filter does not intercept (`lseek`, `openat`, `fsync`, `flock`) | not modelled | they reach the kernel unseen and are not choice points, like memory accesses | (boundary; no fixture) |
 | a timed futex wait | refused | exit 3 | (code; no fixture yet) |
 | `fork`, `vfork`, `clone` without `CLONE_THREAD` | refused | exit 3, before the child exists | proc_gate "a fork is refused" |

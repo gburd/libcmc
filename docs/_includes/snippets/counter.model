@@ -1,0 +1,11 @@
+[target]
+binary = counter
+nodes = 1
+
+[fields]
+phase = 0
+served = 1
+
+[invariants]
+both_counted = "node[0].phase < 2 or node[0].served == 2"
+finishes = "eventually node[0].phase == 2"

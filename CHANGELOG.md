@@ -5,6 +5,28 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+Process engine (`cmc --model-file`):
+
+- Every lock acquisition is a choice point between threads, including
+  one taken on its uncontended path with no system call: the preload
+  wraps the pthread mutex, rwlock, spinlock, semaphore, barrier and once
+  calls and C11 `mtx_lock`, `mtx_trylock`, `mtx_timedlock` and
+  `call_once`.  On 2.0.0 a thread switch there was never explored.
+  [proc_gate: syncpoint, pthread and C11]
+- A race runtime, `libcmc-race.a`: a node compiled with
+  `-fsanitize=thread` (gcc or clang) and linked against it in place of
+  the sanitizer's runtime has every instrumented access and atomic
+  checked against happens-before.  A data race is a violation, printed
+  with both code addresses and the schedule.  Atomics are choice points.
+  [proc_gate: memrace unlocked and relaxed, raceemit]
+- A search in which a node ran more than one thread without the race
+  runtime cannot pass: it ends INCOMPLETE, and so does an unmet
+  `eventually`, since memory interleavings between choice points were
+  not checked.  An atomic weaker than `seq_cst` does the same, since the
+  search runs a sequentially consistent machine.  On 2.0.0 such a node
+  could pass with a lost update reachable.  [proc_gate: memrace
+  unlocked, relaxedadd; twothread]
+
 ## 2.0.0 (2026-11-17)
 
 A soundness release, from an audit of 1.3.0

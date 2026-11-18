@@ -10,6 +10,9 @@
 #      the correct server passes, an acknowledgement is reachable, the
 #      planted bug is caught by search and by simulation, and the bug is
 #      invisible without a crash (Linux x86-64 only);
+#      the guide's threaded node (counter.c) passes with the race
+#      runtime, reports its race without the lock, and is INCOMPLETE
+#      uninstrumented;
 #   5. the in-process example (quickstart.c, libcmc(3)) builds against
 #      libcmc.a and behaves as its comments say.
 set -u
@@ -79,6 +82,29 @@ if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
 			{ echo "docs: guide: no acknowledgement is reachable, so no_lost_ack would pass vacuously"; fail=1; }
 	else
 		echo "docs: kvserver.c does not build"; fail=1
+	fi
+	# the guide's threaded node: passes with the lock and the race
+	# runtime, a reported race without the lock, INCOMPLETE uninstrumented
+	cp "$K/counter.model" "$KB/"
+	tsan_counter() {	# tsan_counter OUT [-DCOUNTER_LOCKED=0]
+		o=$1; shift
+		$CC $W -O1 -fno-pie -fsanitize=thread "$@" -c -o "$KB/$o.o" "$K/counter.c" &&
+			$CC -no-pie -o "$KB/$o" "$KB/$o.o" "$B/libcmc-race.a" -lpthread
+	}
+	if tsan_counter counter && tsan_counter counter-bug -DCOUNTER_LOCKED=0 &&
+		$CC $W -O1 -no-pie -o "$KB/counter-plain" "$K/counter.c" -lpthread; then
+		ct() {		# ct DESC EXIT NEEDLE args...
+			d=$1 want=$2 needle=$3; shift 3
+			"$B/cmc" --model-file "$KB/counter.model" "$@" > "$OUT/ct.txt" 2>&1
+			rc=$?
+			[ "$rc" = "$want" ] && grep -q -- "$needle" "$OUT/ct.txt" ||
+				{ echo "docs: guide: $d (exit $rc, wanted $want and \"$needle\")"; cat "$OUT/ct.txt"; fail=1; }
+		}
+		ct "the locked counter does not pass" 0 "No error has been found"
+		ct "the unlocked counter's race is not reported" 1 "Error: data race on node 0" --binary "$KB/counter-bug"
+		ct "the uninstrumented counter is not INCOMPLETE" 2 "without the race runtime" --binary "$KB/counter-plain"
+	else
+		echo "docs: counter.c does not build with the race runtime"; fail=1
 	fi
 else
 	echo "docs: SKIP the guide's server: cmc --model-file needs Linux x86-64"

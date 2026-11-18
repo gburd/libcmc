@@ -118,6 +118,46 @@ processes and one crash and one drop is 30,075 states in about four
 minutes ([measurement]({{ '/background/process-mode-m7/' | relative_url }})).
 When the full search is too big, run `--simulate` with many walks.
 
+## Threads
+
+A node may run threads.  The search chooses which thread runs next at
+every system call and every lock acquisition, so an ordering bug
+between threads shows up as a counterexample.  What happens between
+those points, plain loads and stores of shared memory, is checked by
+the race runtime, not searched.  Build the node with ThreadSanitizer's
+instrumentation and link it with `libcmc-race.a` (beside the preload,
+in `build/` or `lib/libcmc/`) instead of the sanitizer's runtime:
+
+```sh
+cc -g -O1 -fno-pie -fsanitize=thread -c counter.c
+cc -no-pie -o counter counter.o build/libcmc-race.a -lpthread
+```
+
+gcc and clang both work.  Here two threads count requests:
+
+{% include snippet.html file="counter.c" region="count" %}
+
+With the lock, the check passes.  Built with `-DCOUNTER_LOCKED=0`,
+without the lock, the two increments race, and cmc reports it with both code
+addresses and the schedule:
+
+```text
+Error: data race on node 0 at address 0x40a044: an access at 0x4004fb and one at 0x4005b7 that no synchronisation orders.
+Error: The behavior up to this point is (2 actions):
+    1. run n0 t0
+    2. run n0 t1
+```
+
+Nodes run without address randomisation, so `addr2line -e counter
+0x4004fb 0x4005b7` names the two lines; here both are the increment.
+The addresses depend on the compiler and its version.
+
+Without the race runtime, a multi-threaded node never passes: the
+result is INCOMPLETE, since nothing checked the accesses between the
+search's choice points.  An atomic weaker than `seq_cst` also makes a
+pass INCOMPLETE; the search explores only sequentially consistent
+orders.  cmc(7) has the details.
+
 ## In CI
 
 ```yaml
