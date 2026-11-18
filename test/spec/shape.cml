@@ -1,0 +1,32 @@
+# test/spec/shape.cml: one of each form the TLA+ bridge emits, so its
+# output can be checked whole: constants (CInit), a function variable,
+# an action with no guard, UNCHANGED, an action that assigns every
+# variable, an except of two keys, weak fairness, and both property
+# forms.  spec_gate.sh checks the emitted text, emit_gate.sh runs it
+# through TLC against cmc --spec.
+module shape
+
+const N = 2
+const M = 1
+
+var x : 0 .. N
+var f : [0 .. M -> 0 .. 1]
+
+init x == 0 and f == [i in 0 .. M -> 0]
+
+action tick:
+  when x < N
+  x' = x + 1
+
+action both(i in 0 .. M):
+  x' = 0
+  f' = [f except [i] = 1, [0] = 1]
+
+action idle:
+  f' = f
+
+fairness weak
+
+invariant ok: x <= N
+property back: eventually x == 0
+property fill: x == N ~> f[0] == 1

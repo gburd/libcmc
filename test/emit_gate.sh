@@ -87,6 +87,9 @@ checkprop test/spec/sound unfair unfair "" progress VIOLATION ""
 checkprop test/spec/sound once once "" achieved PASS ""
 checkprop test/spec/sound leads leads "" response VIOLATION ""
 checkprop test/spec/sound leadscross leadscross "" response PASS ""
+# one of each form the bridge emits (test/spec/shape.cml), both properties
+check test/spec shape shape "CONSTANTS N = 2  M = 1" ok PASS ""
+checkprop test/spec shape shape "CONSTANTS N = 2  M = 1" "back fill" PASS ""
 
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "emit_gate: ok (generated TLA+ parses and agrees with cmc --spec)" || echo "emit_gate: FAILED"

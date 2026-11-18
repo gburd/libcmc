@@ -132,6 +132,22 @@ expect "ticker: eventually-max holds under fairness" 0 "1 property held" --spec 
 expect "ticker: a fair reset cycle breaks it"        1 "reaches_max is violated" --spec "$HERE/examples/spec/ticker.cml" --define RESET
 
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
+# the emitted module's shape (test/spec/shape.cml; emit_gate runs TLC on it)
+expect "shape: holds, with both properties" 0 "9 distinct states found" --spec "$HERE/test/spec/shape.cml"
+emitted() {	# emitted DESC NEEDLE: the emitted module of shape.cml contains NEEDLE
+	expect "emit-tla: $1" 0 "$2" --emit-tla "$HERE/test/spec/shape.cml"
+}
+emitted "constants are Int and bound by CInit" "/. M = 1"
+emitted "a function variable is Int -> Int"    "@type: Int -> Int;"
+emitted "the vars tuple"                       "vars == <<x, f>>"
+emitted "an action with no guard is TRUE"      "/. TRUE"
+emitted "an unassigned variable is UNCHANGED"  "UNCHANGED <<f>>"
+emitted "an except with two keys"              "EXCEPT !\[i\] = 1, !\[0\] = 1"
+emitted "weak fairness for every action"       "WF_vars(tick) /. WF_vars(both) /. WF_vars(idle)"
+emitted "eventually"                           "<>(x = 0)"
+emitted "leads-to"                             ") ~> (f\[0\] = 1)"
+printf 'module bare\nvar x : 0 .. 1\ninit x == 0\ninvariant ok: x == 0\n' > "$OUT/bare.cml"
+expect "emit-tla: no constants and no actions" 0 "UNCHANGED vars" --emit-tla "$OUT/bare.cml"
 # every operator inside a count body is translated (emit_gate runs TLC on it)
 expect "countops: the operators in a count body"   0 "5 distinct states found" --spec "$HERE/test/spec/countops.cml"
 expect "emit-tla: not, in, some and all in a count body" 0 "~ (j .in {})" --emit-tla "$HERE/test/spec/countops.cml"
