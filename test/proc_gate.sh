@@ -627,7 +627,7 @@ echo "-- the corners of the calls the checker answers itself"
 # each mode below that covers one of these failed.
 SC=$OUT/syscorner
 mkdir -p "$SC"
-for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed; do
+for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf; do
 	(cd "$SC" && timeout 30 "$B/proc/syscorner" 0 "$m" 3>"$SC/$m.state" > /dev/null 2>&1)
 	# shellcheck disable=SC2046
 	set -- $(od -An -tu1 "$SC/$m.state" | tr -s ' \n' ' ')
@@ -653,6 +653,7 @@ scm() {	# scm MODE EXIT NEEDLE
 	expect_by 60 "syscorner $1: $3" "$2" "$3" --model-file "$SC/r-$1.model"
 }
 scm nbclient 3 "a non-blocking connect (EINPROGRESS) is not modelled"
+scm robufefd 3 "an eventfd read at an address it does not own"
 scm efdwrite4 1 "writes 4 bytes to an eventfd"
 scm efdread4 1 "reads 4 bytes from an eventfd"
 scm efdflags 3 "eventfd flags 0x2 are not modelled"

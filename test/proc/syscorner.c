@@ -28,6 +28,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
@@ -404,6 +405,38 @@ main(int argc, char **argv)
 		code(write(ep, &c, 1));
 		code(read(gone, &c, 1));
 		code(write(gone, &c, 1));
+	}
+	else if (!strcmp(mode, "robuf"))
+	{
+		/* answers written into read-only memory: Linux gives EFAULT for
+		 * each, after the call is made (the poll array and epoll's
+		 * events array are read, or the eventfd is ready, first) */
+		long		pg = sysconf(_SC_PAGESIZE);
+		unsigned char *ro = mmap(NULL, (size_t) pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		int			e = eventfd(1, 0);
+		int			ep = epoll_create1(0);
+		struct epoll_event ev = {.events = EPOLLIN};
+		struct pollfd *p = (struct pollfd *) ro;
+
+		epoll_ctl(ep, EPOLL_CTL_ADD, e, &ev);
+		p->fd = e;
+		p->events = POLLIN;
+		p->revents = 0;
+		mprotect(ro, (size_t) pg, PROT_READ);
+		code(syscall(SYS_poll, p, 1, 0));
+		code(syscall(SYS_epoll_wait, ep, ro + 64, 1, 0));
+		code(syscall(SYS_clock_gettime, CLOCK_REALTIME, ro + 128));
+		code(syscall(SYS_getrandom, ro + 256, 8, 0));
+	}
+	else if (!strcmp(mode, "robufefd"))
+	{
+		/* an eventfd read into read-only memory: Linux consumes the
+		 * counter and returns EFAULT; the model refuses it */
+		long		pg = sysconf(_SC_PAGESIZE);
+		unsigned char *ro = mmap(NULL, (size_t) pg, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		int			e = eventfd(1, 0);
+
+		code(syscall(SYS_read, e, ro, 8));
 	}
 	else if (!strcmp(mode, "pollclosed"))
 	{

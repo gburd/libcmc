@@ -1677,12 +1677,12 @@ sigmask_of(const Node *nd, pid_t tid, const char *key)
 	char path[64], line[128]; size_t kl = strlen(key);
 	snprintf(path, sizeof path, "/proc/%d/task/%d/status", (int) nd->pid, (int) tid);
 	FILE *f = fopen(path, "r");
-	if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));
+	if (!f) die(1, "node %d: cannot read %s: %s", nd->id, path, strerror(errno));	/* GCOVR_EXCL_LINE: a live node's own /proc status */
 	uint64_t m = 0; int found = 0;
 	while (fgets(line, sizeof line, f))
 		if (!strncmp(line, key, kl)) { m = strtoull(line + kl, NULL, 16); found = 1; break; }
 	fclose(f);
-	if (!found) die(1, "node %d: no %s in %s", nd->id, key, path);
+	if (!found) die(1, "node %d: no %s in %s", nd->id, key, path);	/* GCOVR_EXCL_LINE: every /proc status has the signal masks */
 	return m;
 }
 
@@ -2515,8 +2515,11 @@ serve(Node *nd, Thread *th)
 			if (ready > 0 || zero_timeout)
 			{
 				size_t want = (size_t) ready * sizeof out[0];
-				if (ready > 0 && cr_write(nd->pid, arr, out, want) != want)
-					cr_fail(nd->id, "epoll_wait returns events");
+				size_t got = ready > 0 ? cr_write(nd->pid, arr, out, want) : 0;
+				/* nothing written: EFAULT, as on Linux (level-triggered, so
+				 * nothing is consumed); written in part is not modelled */
+				if (ready > 0 && got == 0) { g_resp->error = -EFAULT; break; }
+				if (got < want) cr_fail(nd->id, "epoll_wait returns events");
 				g_resp->val = ready; break;
 			}
 			/* nothing locally ready and the call blocks: a quiescence point,
@@ -3243,7 +3246,7 @@ mark(const uint64_t fp[2], const unsigned char *w, size_t n)
 		FP *old = seen; size_t oc = seen_cap;
 		seen_cap = oc ? 2 * oc : 4096;
 		seen = calloc(seen_cap, sizeof *seen);
-		if (!seen) die(1, "out of memory for the seen set at %zu states", nseen);
+		if (!seen) die(1, "out of memory for the seen set at %zu states", nseen);	/* GCOVR_EXCL_LINE: realloc of the seen set */
 		for (size_t i = 0; i < oc; i++) if (old[i].a | old[i].b) seen_put(old[i]);
 		free(old);
 	}
@@ -3257,7 +3260,7 @@ mark(const uint64_t fp[2], const unsigned char *w, size_t n)
 	{
 		while (spool_used + n > spool_cap) spool_cap = spool_cap ? 2 * spool_cap : (size_t) 1 << 20;
 		spool = realloc(spool, spool_cap);
-		if (!spool) die(1, "out of memory for the seen set at %zu states", nseen);
+		if (!spool) die(1, "out of memory for the seen set at %zu states", nseen);	/* GCOVR_EXCL_LINE: realloc of the seen set */
 	}
 	memcpy(spool + spool_used, w, n);
 	seen[i].a = a; seen[i].b = b; seen[i].off = spool_used; seen[i].len = n;
@@ -3338,7 +3341,7 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 					for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->polldata[k] >> (8 * b));
 			}
 		}
-		if (p > THREC) die(1, "thread record overflow on node %d", nd->id);
+		if (p > THREC) die(1, "thread record overflow on node %d", nd->id);	/* GCOVR_EXCL_LINE: a record's fields are bounded by THREC */
 		p = THREC;
 		/* In a node with more than one thread, a thread's position is part
 		 * of the world: two threads may be parked with the same kind of
@@ -3382,12 +3385,12 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 			if (c < 0) { ord[i] = b; ord[j] = a; }
 		}
 	int n = 0;
-	if (1 + nrec * 2 > cap) return -1;
+	if (1 + nrec * 2 > cap) return -1;	/* GCOVR_EXCL_LINE: cap is sized for MAXTHREAD full records */
 	out[n++] = (unsigned char) nrec;
 	for (int i = 0; i < nrec; i++)
 	{
 		int k = ord[i];
-		if (n + 2 + len[k] > cap) return -1;
+		if (n + 2 + len[k] > cap) return -1;	/* GCOVR_EXCL_LINE: cap is sized for MAXTHREAD full records */
 		out[n++] = (unsigned char) len[k]; out[n++] = (unsigned char) (len[k] >> 8);
 		memcpy(out + n, rec[k], (size_t) len[k]); n += len[k];
 	}
@@ -4126,7 +4129,7 @@ q_push(const int *seq, int len, int next, int depth, uint64_t pfp0, uint64_t pfp
 	if (qused + (size_t) len + 1 > qcap)
 	{
 		while (qused + (size_t) len + 1 > qcap) qcap = qcap ? 2 * qcap : 65536;
-		qpool = realloc(qpool, qcap * sizeof *qpool); if (!qpool) die(1, "out of memory for the frontier");
+		qpool = realloc(qpool, qcap * sizeof *qpool); if (!qpool) die(1, "out of memory for the frontier");	/* GCOVR_EXCL_LINE: realloc of the frontier */
 	}
 	QEnt *q = step ? &Z[zn++] : &Q[qt++];
 	q->off = qused; q->len = len + 1; q->depth = depth; q->pfp0 = pfp0; q->pfp1 = pfp1;
@@ -4176,7 +4179,7 @@ static void
 q_root(void)
 {
 	Q = malloc(4096 * sizeof *Q); Qcap = 4096;
-	if (!Q) die(1, "out of memory for the frontier");
+	if (!Q) die(1, "out of memory for the frontier");	/* GCOVR_EXCL_LINE: the frontier's first block */
 	Q[0].off = 0; Q[0].len = 0; Q[0].depth = 0; Q[0].pfp0 = 0; Q[0].pfp1 = 0; qt = 1;
 }
 
