@@ -241,7 +241,95 @@ main(int argc, char **argv)
 	}
 	else if (!strcmp(mode, "usr1"))
 		raise(SIGUSR1);
+	else if (!strcmp(mode, "threads"))
+	{
+		/* more threads than the checker tracks */
+		pthread_t	t[10];
+
+		wmode = "none";
+		for (int i = 0; i < 10; i++)
+			pthread_create(&t[i], NULL, worker, NULL);
+		for (int i = 0; i < 10; i++)
+			pthread_join(t[i], NULL);
+	}
+	else if (!strcmp(mode, "replies"))
+	{
+		/* more client replies than the reply log holds */
+		struct sockaddr_in a = addr(BASE);
+		int			ls = socket(AF_INET, SOCK_STREAM, 0);
+
+		bind(ls, (struct sockaddr *) &a, sizeof a);
+		listen(ls, 8);
+		int			c = accept(ls, NULL, NULL);
+
+		for (int i = 0; i < 70; i++)
+			(void) !write(c, "A1", 2);
+	}
+	else if (!strcmp(mode, "badsocket"))
+		code(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0));
+	else if (!strcmp(mode, "badsendto"))
+	{
+		int			s = dial(1);
+
+		code(sendto(s, "x", 1, MSG_DONTWAIT, NULL, 0));
+	}
+	else if (!strcmp(mode, "badrecvfrom"))
+	{
+		int			s = dial(1);
+		char		c;
+		struct sockaddr_in from;
+		socklen_t	fl = sizeof from;
+
+		code(recvfrom(s, &c, 1, 0, (struct sockaddr *) &from, &fl));
+	}
+	else if (!strcmp(mode, "badaccept4"))
+	{
+		int			ls = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in a = addr(BASE);
+
+		bind(ls, (struct sockaddr *) &a, sizeof a);
+		listen(ls, 8);
+		code(accept4(ls, NULL, NULL, SOCK_NONBLOCK));
+	}
 	/* corners that record */
+	else if (!strcmp(mode, "corners2"))
+	{
+		/* a non-blocking listener with nothing waiting; epoll DEL of the
+		 * first of two entries; a dial twice (EISCONN); sendto with
+		 * MSG_NOSIGNAL; accept4 with SOCK_CLOEXEC is flagged on the fd;
+		 * a read of the durable record */
+		int			ls = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+		struct sockaddr_in me = addr(BASE);
+
+		bind(ls, (struct sockaddr *) &me, sizeof me);
+		listen(ls, 8);
+		code(fcntl(ls, F_GETFD) == FD_CLOEXEC ? 0 : -1);
+		code(fcntl(ls, F_SETFL, O_NONBLOCK));
+		errno = 0;
+		code(accept(ls, NULL, NULL));	/* EAGAIN */
+		code(fcntl(ls, F_SETFL, 0));
+		int			ep = epoll_create1(EPOLL_CLOEXEC);
+		int			e1 = eventfd(1, 0), e2 = eventfd(0, 0);
+		struct epoll_event ev = {.events = EPOLLIN}, out[2];
+
+		code(fcntl(ep, F_GETFD) == FD_CLOEXEC ? 0 : -1);
+		code(epoll_ctl(ep, EPOLL_CTL_ADD, e1, &ev));
+		code(epoll_ctl(ep, EPOLL_CTL_ADD, e2, &ev));
+		code(epoll_ctl(ep, EPOLL_CTL_DEL, e1, NULL));
+		code(epoll_wait(ep, out, 2, 0) == 0 ? 0 : -1);
+		int			s = dial(1);
+		struct sockaddr_in a = addr(BASE + 1);
+
+		errno = 0;
+		code(connect(s, (struct sockaddr *) &a, sizeof a));	/* EISCONN */
+		code(sendto(s, "q", 1, MSG_NOSIGNAL, NULL, 0));
+		char		d[4];
+
+		code(read(193, d, sizeof d) == 0 ? 0 : -1);
+		struct pollfd pp[2] = {{-1, POLLIN, 0}, {e2, POLLIN, 0}};
+
+		code(poll(pp, 2, 0) == 0 ? 0 : -1);
+	}
 	else if (!strcmp(mode, "corners"))
 	{
 		int			s = dial(1);

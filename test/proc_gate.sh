@@ -659,6 +659,14 @@ for m in stdin_tty stdout durable; do edm "worker-$m" 2 "without the race runtim
 edm segvhandler 3 "raised signal 11 with a handler installed or the signal ignored"
 edm usr1 3 "stopped with signal 10"
 edm corners 0 "No error has been found" 'linux = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 21 and node[0][4] == 1 and node[0][5] == 1 and node[0][6] == 1 and node[0][7] == 1 and node[0][8] == 1)"\nreached = "eventually node[0][0] == 1"'
+edm threads 1 "creates more than 8 threads"
+edm badsocket 3 "is not modelled (only AF_INET, SOCK_STREAM)"
+edm badsendto 3 "sendto flags 0x40 or a destination address are not modelled"
+edm badrecvfrom 3 "recvfrom flags 0 or a source address are not modelled"
+edm badaccept4 3 "accept4 flags 0x800 are not modelled"
+printf '[target]\nbinary = %s\nnodes = 1\nargs = replies\n[environment]\nclient_write = 1\n[invariants]\nany = "node[0][0] < 9"\n' "$B/proc/edges" > "$ED/replies.model"
+expect_by 60 "edges replies: more than 64 client replies" 1 "more than 64 client replies" --model-file "$ED/replies.model"
+edm corners2 0 "No error has been found" 'first = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 21 and node[0][4] == 1 and node[0][5] == 1 and node[0][6] == 1)"\nrest = "node[0][0] < 1 or (node[0][7] == 1 and node[0][8] == 1 and node[0][9] == 1 and node[0][10] == 116 and node[0][11] == 1 and node[0][12] == 1 and node[0][13] == 1)"\nreached = "eventually node[0][0] == 1"'
 
 echo "-- the search's other modes: simulation, bounds and refinement"
 # simulation reports a fault and a data race like the search does, and a
