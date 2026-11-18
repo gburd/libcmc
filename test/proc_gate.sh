@@ -741,6 +741,22 @@ expect_by 120 "simulate: C2 catches the by-two step on a walk" 1 "no matching ab
 expect_by 120 "simulate: C2 passes the by-one impl, not exhaustively" 2 "not exhaustive" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps --simulate --seed 1 --walks 20
 expect_by 120 "simulate: C1 catches the paxos bug" 1 "does not refine" $(runx "$HERE/examples/spec/paxos-refine.model" paxos-bug) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --simulate --seed 1 --walks 3000
 
+# faults the fixtures' own models leave out: their invariants still hold
+# with a drop, a crash and a timeout added from the command line
+for f in crossrpc lease fifo quorum guarded; do
+	expect_by 120 "$f: holds with a drop, a crash and a timeout added" 0 "No error has been found" $(run "$f" "$f") --drops 1 --crashes 1 --timeouts 1 --max-states 3000
+done
+# what is not a node binary is refused before anything starts
+cp /etc/hostname "$OUT/notelf" 2> /dev/null || printf 'x' > "$OUT/notelf"
+expect "a file that is no ELF is refused" 3 "is not an ELF executable" $(run repl repl) --binary "$OUT/notelf"
+cp "$B/proc/repl" "$OUT/noexec" && chmod -x "$OUT/noexec"
+expect_by 60 "a binary that cannot be run is refused" 3 "did not load the preload" $(run repl repl) --binary "$OUT/noexec"
+# an invariant that cannot be evaluated in a reached state (a mod by a
+# zero byte) ends the search and the simulation
+printf '[target]\nnodes = 2\n[environment]\nclient_write = 5\n[invariants]\nz = "node[1][0] mod node[0][0] == 0"\n' > "$OUT/modzero.model"
+expect_by 60 "an invariant that divides by zero in a state is an error" 3 "invariant z parse error" --model-file "$OUT/modzero.model" --binary "$B/proc/repl"
+expect_by 60 "the same in a simulation" 3 "invariant z parse error" --model-file "$OUT/modzero.model" --binary "$B/proc/repl" --simulate --seed 1 --walks 5
+
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
 # serving; the client (node 0) acks the synthetic client only once the

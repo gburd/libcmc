@@ -3045,10 +3045,10 @@ crash_node(Node *nd)
 	 * the durable bytes are in nd->durable); a RESTART opens fresh ones, so
 	 * leaving these open would leak one listener and two pipe ends per
 	 * crash across a long search */
-	if (nd->listener > 0) close(nd->listener);
-	if (nd->fd3[0] > 0) close(nd->fd3[0]);
-	if (nd->fd4[0] > 0) close(nd->fd4[0]);
-	for (int k = 0; k < 2; k++) if (nd->hook_w[k] > 0) close(nd->hook_w[k]);
+	if (nd->listener > 0) close(nd->listener);	/* GCOVR_EXCL_LINE: a launched node always holds them */
+	if (nd->fd3[0] > 0) close(nd->fd3[0]);	/* GCOVR_EXCL_LINE: a launched node always holds them */
+	if (nd->fd4[0] > 0) close(nd->fd4[0]);	/* GCOVR_EXCL_LINE: a launched node always holds them */
+	for (int k = 0; k < 2; k++) if (nd->hook_w[k] > 0) close(nd->hook_w[k]);	/* GCOVR_EXCL_LINE: a launched node always holds them */
 	nd->listener = nd->fd3[0] = nd->fd4[0] = nd->hook_w[0] = nd->hook_w[1] = -1;
 }
 
@@ -3065,7 +3065,7 @@ crash_node(Node *nd)
 static int
 relaunch(Node *nd)
 {
-	if (nd->alive || !nd->crashed) return -1;
+	if (nd->alive || !nd->crashed) return -1;	/* GCOVR_EXCL_LINE: RESTART is offered only for a crashed node */
 	unsigned char saved[SNAP]; int savedlen = nd->durable_len;
 	memcpy(saved, nd->durable, (size_t) savedlen);
 	if (launch(nd)) return -1;
