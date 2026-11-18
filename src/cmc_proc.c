@@ -3152,6 +3152,15 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
  * value; record next_fd and the raw numbers if a target ever does. */
 static unsigned char g_world[65536]; static size_t g_world_len;
 
+/* Append byte b to the encoding w (cap bytes) at *n.  A world too big
+ * for the buffer is an error, never a truncated encoding. */
+static void
+put_byte(unsigned char *w, size_t *n, size_t cap, unsigned b)
+{
+	if (*n >= cap) die(1, "world encoding exceeds %zu bytes", cap);
+	w[(*n)++] = (unsigned char) b;
+}
+
 /* Encode end e of connection c as its holder sees it: the connection's
  * flags, then every message queued toward this end, in order.  A
  * connection is named by where it is held, never by its slot number,
@@ -3159,7 +3168,7 @@ static unsigned char g_world[65536]; static size_t g_world_len;
 static size_t
 put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 {
-#define PUTC(b) do { if (n >= cap) die(1, "world encoding exceeds %zu bytes", cap); w[n++] = (unsigned char) (b); } while (0)
+#define PUTC(b) put_byte(w, &n, cap, (unsigned) (b))
 	const Conn *cn = &conns[c];
 	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5));
 	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : 0);
@@ -3180,7 +3189,7 @@ static void
 world_fp(uint64_t fp[2])
 {
 	unsigned char *w = g_world; size_t n = 0;
-#define PUT(b) do { if (n >= sizeof g_world) die(1, "world encoding exceeds %zu bytes", sizeof g_world); w[n++] = (unsigned char) (b); } while (0)
+#define PUT(b) put_byte(w, &n, sizeof g_world, (unsigned) (b))
 #define PUT8(x) do { uint64_t _x = (uint64_t) (x); for (int _b = 0; _b < 8; _b++) PUT(_x >> (8 * _b)); } while (0)
 	for (int i = 0; i < M.nodes; i++)
 	{
@@ -3314,12 +3323,21 @@ typedef struct { int kind, node, peer, thr, arg; } Act;
  * stable across replay because threads are allocated in notification
  * order.  Every environment action is bounded
  * so the search stays finite. */
+/* Append an action to out (c holds MAXACT entries) at *c.  More enabled
+ * at one point than MAXACT is an error, never a silently dropped action. */
+static void
+add_act(Act *out, int *c, int kind, int node, int peer, int thr, int arg)
+{
+	if (*c >= MAXACT) die(1, "more than %d actions enabled at one point", MAXACT);
+	out[*c].kind = kind; out[*c].node = node; out[*c].peer = peer; out[*c].thr = thr; out[*c].arg = arg;
+	(*c)++;
+}
+
 static int
 enum_actions(Act *out)
 {
 	int c = 0;
-#define ADD2(k, nd, pr, tr, x) do { if (c >= MAXACT) die(1, "more than %d actions enabled at one point", MAXACT); \
-	out[c].kind = (k); out[c].node = (nd); out[c].peer = (pr); out[c].thr = (tr); out[c].arg = (x); c++; } while (0)
+#define ADD2(k, nd, pr, tr, x) add_act(out, &c, (k), (nd), (pr), (tr), (x))
 #define ADD(k, nd, pr, tr) ADD2(k, nd, pr, tr, -1)
 	/* nodes still running: the only choice is which steps first */
 	for (int d = 0; d < M.nodes; d++)
