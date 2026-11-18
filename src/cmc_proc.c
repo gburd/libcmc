@@ -1031,7 +1031,25 @@ launch(Node *nd)
 			(void) !write(2, msg, sizeof msg - 1);
 			_exit(2);
 		}
-		int lf = install_filter(); if (lf < 0) _exit(2);
+		char idbuf[8]; snprintf(idbuf, sizeof idbuf, "%d", nd->id);
+		/* argv = binary, id, then the space-separated [target] args (so a
+		 * target that takes flags needs no wrapper) */
+		char *av[64]; int ac = 0;
+		av[ac++] = (char *) nd->binary; av[ac++] = idbuf;
+		char argbuf[512]; snprintf(argbuf, sizeof argbuf, "%s", M.args);
+		for (char *p = strtok(argbuf, " \t"); p && ac < 63; p = strtok(NULL, " \t")) av[ac++] = p;
+		av[ac] = NULL;
+#ifdef CMC_COVERAGE
+		/* a coverage build: write this child's counts now, while it may
+		 * still write files; past the filter an open for writing is refused,
+		 * and exec discards the counters */
+		{
+			extern void __gcov_dump(void);
+
+			__gcov_dump();
+		}
+#endif
+		int lf = install_filter(); if (lf < 0) _exit(2);	/* GCOVR_EXCL_START: the node's side of the filter, past the last count */
 		/* From here until the listener is sent no call may reach the first
 		 * filter's USER_NOTIF: nobody holds the listener to answer it. */
 		if (install_trace_filter() != 0) _exit(2);
@@ -1041,16 +1059,8 @@ launch(Node *nd)
 		struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm->cmsg_level = SOL_SOCKET; cm->cmsg_type = SCM_RIGHTS; cm->cmsg_len = CMSG_LEN(sizeof(int));
 		memcpy(CMSG_DATA(cm), &lf, sizeof(int));
 		if (sendmsg(sp[1], &mh, 0) != 1) _exit(2);
-		char idbuf[8]; snprintf(idbuf, sizeof idbuf, "%d", nd->id);
-		/* argv = binary, id, then the space-separated [target] args (so a
-		 * target that takes flags needs no wrapper) */
-		char *av[64]; int ac = 0;
-		av[ac++] = (char *) nd->binary; av[ac++] = idbuf;
-		char argbuf[512]; snprintf(argbuf, sizeof argbuf, "%s", M.args);
-		for (char *p = strtok(argbuf, " \t"); p && ac < 63; p = strtok(NULL, " \t")) av[ac++] = p;
-		av[ac] = NULL;
 		execv(nd->binary, av);
-		_exit(2);
+		_exit(2);	/* GCOVR_EXCL_STOP */
 	}
 	/* the checker keeps the write ends: it writes a node's state-hook
 	 * records into them itself (serve_hook) */

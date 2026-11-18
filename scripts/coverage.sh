@@ -13,7 +13,9 @@
 # with no code, which the compiler made) and --exclude-throw-branches
 # (exception edges, none in C), and GCOVR_EXCL markers in the source,
 # which are allowed only on a defensive check of a libc call that cannot
-# fail in a test, each with its reason.  The report lists every marker.
+# fail in a test, or on code that runs where no count can be written (a
+# forked node's child past its seccomp filter), each with its reason.
+# The report lists every marker.
 #
 # Writes BUILDDIR/coverage.csv, BUILDDIR/coverage-branches.txt (the
 # uncovered branches by line) and BUILDDIR/coverage/index.html.

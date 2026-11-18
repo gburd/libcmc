@@ -246,7 +246,9 @@ COV_B ?= build-cov
 COV_CC ?= gcc
 COV_MIN ?= 90
 COV_PENDING ?=
-COV_FLAGS = $(WARN) -O0 -g --coverage
+# CMC_COVERAGE: the node launcher in cmc_proc.c writes its forked child's
+# counts before the child's seccomp filter goes in (exec would lose them)
+COV_FLAGS = $(WARN) -O0 -g --coverage -DCMC_COVERAGE
 COV_S = $(CMC_SCRATCH)/coverage
 
 ifeq ($(COV_BUILD),1)
