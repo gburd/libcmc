@@ -240,6 +240,16 @@ main(int argc, char **argv)
 		emit1(fsync(193) == 0 && fdatasync(193) == 0 ? 1 : 9, 0);
 		return 0;
 	}
+	if (!strcmp(mode, "xattrprobe"))
+	{
+		/* run natively by proc_gate: the errno of an xattr write, 0 if it
+		 * succeeded, so the gate can tell a sandbox that answers the call
+		 * before any filter of the checker's */
+		long		r = syscall(SYS_setxattr, path, "user.cmc", "1", 1, 0);
+
+		emit1(1, r == 0 ? 0 : errno);
+		return 0;
+	}
 	if (*mode)
 	{
 		long		r = change(mode, path);

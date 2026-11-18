@@ -471,14 +471,31 @@ reached = "eventually node[0][0] == 1"'
 expect_by 60 "files: fsync of fd 193 succeeds"                   0 "No error has been found" --model-file "$OUT/fs-durfsync.model"
 # each call that changes the file system ends the check, and none of
 # them touches $FD/none (a refused call never runs)
+# A seccomp filter the gate itself runs under outranks the checker's
+# when it answers with an errno: the nix build sandbox answers the xattr
+# calls ENOTSUP, so they never reach cmc (and change nothing).  Those
+# rows are skipped, by name, only when this process is under a seccomp
+# filter and a native xattr write gets ENOTSUP (95).
+xattr_blocked=0
+: > "$FD/xa"
+if grep -q '^Seccomp:[[:space:]]*2' /proc/self/status; then
+	(cd "$FD" && timeout 30 "$B/proc/files" 0 xattrprobe "$FD/xa" 3>"$FD/xa.state" > /dev/null 2>&1)
+	[ "$(od -An -tu1 "$FD/xa.state" | tr -s ' \n' ' ' | cut -d' ' -f7)" = 95 ] && xattr_blocked=1
+fi
+echo "files: xattr probe: seccomp $(grep '^Seccomp:' /proc/self/status | tr -s ' \t' ' '), state '$(od -An -tu1 "$FD/xa.state" 2>/dev/null | tr -s ' \n' ' ')', blocked $xattr_blocked"
+xattr_skip() {	# xattr_skip MODE: true if this host's sandbox answers MODE itself
+	case $1 in *xattr*) [ "$xattr_blocked" = 1 ] ;; *) false ;; esac
+}
 for m in open_wronly openat_rdwr openat_creat openat_trunc openat_append openat_tmpfile openat2 creat \
 	unlink unlinkat rename renameat renameat2 mkdir mkdirat rmdir link linkat symlink symlinkat \
 	truncate mknod mknodat chmod fchmodat fchmodat2 chown lchown fchownat utime utimes futimesat \
 	utimensat setxattr lsetxattr setxattrat removexattr lremovexattr removexattrat file_setattr; do
+	if xattr_skip "$m"; then echo "skip files: $m (the sandbox answers it before the checker)"; continue; fi
 	filesm "$m" "$m" "$FD/none" "" 'any = "node[0][0] <= 1"'
 	expect_by 60 "files: $m is refused" 3 "read-only to a node" --model-file "$OUT/fs-$m.model"
 done
 for m in fchmod fchown futimens fsetxattr fremovexattr ftruncate fallocate flock io_uring_setup; do
+	if xattr_skip "$m"; then echo "skip files: $m (the sandbox answers it before the checker)"; continue; fi
 	filesm "$m" "$m" "$FD/config" "" 'any = "node[0][0] <= 1"'
 	expect_by 60 "files: $m is refused" 3 "read-only to a node\|not modelled" --model-file "$OUT/fs-$m.model"
 done
