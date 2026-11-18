@@ -71,6 +71,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/user.h>				/* user_regs_struct, for trace_stop() */
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -897,7 +898,8 @@ install_filter(void)
 		 * which has no such socket (see refuse_on_owned).  sendmsg is
 		 * matched below on its fd as well: the child itself sends the
 		 * notify fd to the parent with sendmsg on a low fd once this
-		 * filter is in, which must reach the kernel. */
+		 * filter is in, which nobody could answer, so below fd 500 the
+		 * second filter (install_trace_filter) stops it for the tracer. */
 		OWN(SYS_readv), OWN(SYS_writev), OWN(SYS_preadv), OWN(SYS_pwritev),
 		OWN(SYS_pread64), OWN(SYS_pwrite64), OWN(SYS_recvmsg),
 		OWN(SYS_sendmmsg), OWN(SYS_recvmmsg), OWN(SYS_shutdown), OWN(SYS_dup),
@@ -905,7 +907,8 @@ install_filter(void)
 		OWN(SYS_getpeername), OWN(SYS_ioctl), OWN(SYS_splice), OWN(SYS_sendfile),
 #undef OWN
 		/* sendmsg: notify only when its fd (the low word of args[0]) is a
-		 * checker-owned one, 500 or above */
+		 * checker-owned one, 500 or above; install_trace_filter() catches
+		 * the rest once the listener has been sent */
 		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_sendmsg, 0, 3),
 		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, args[0])),
 		BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K, 500, 0, 1),
@@ -917,16 +920,48 @@ install_filter(void)
 	return seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, &p);
 }
 
+/* The second filter, installed by the launch child after it has sent the
+ * listener: a sendmsg on an fd below 500, which the first filter lets
+ * through, stops the thread for its tracer (PTRACE_EVENT_SECCOMP), so
+ * the checker sees it (trace_stop()).  Filters stack and the kernel
+ * takes the most severe answer, and USER_NOTIF ranks above TRACE, so a
+ * sendmsg the first filter notifies is still notified.  The arch check
+ * is the first filter's: its KILL_PROCESS outranks anything here. */
+static int
+install_trace_filter(void)
+{
+	struct sock_filter f[] = {
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, nr)),
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_sendmsg, 0, 3),
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, args[0])),
+		BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K, 500, 1, 0),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_TRACE),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+	};
+	struct sock_fprog p = {sizeof f/sizeof*f, f};
+	return seccomp(SECCOMP_SET_MODE_FILTER, 0, &p);
+}
+
+/* Start node nd's process.  The parent seizes the child with ptrace
+ * before the child installs any filter, and the child waits for a byte
+ * on the socketpair until it has.  The child installs both filters and
+ * then sends the listener with a sendmsg below fd 500, which the second
+ * filter stops: that stop shows the trace filter is in and reaches the
+ * checker, and the checker resumes the call.  The socketpair is
+ * close-on-exec, so neither end leaks into the node. */
 static int
 launch(Node *nd)
 {
-	int sp[2]; socketpair(AF_UNIX, SOCK_DGRAM, 0, sp);
+	int sp[2];
+	if (socketpair(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0, sp) != 0) return -1;
 	if (pipe(nd->fd3) != 0) return -1;
 	if (pipe(nd->fd4) != 0) return -1;
 	pid_t pid = fork();
 	if (pid == 0)
 	{
 		close(sp[0]);
+		char go;
+		if (read(sp[1], &go, 1) != 1) _exit(2);
 		setenv("LD_PRELOAD", preload_path, 1);
 		dup2(nd->fd3[1], 3); close(nd->fd3[0]); close(nd->fd3[1]);
 		dup2(nd->fd4[1], DURABLE_FD); close(nd->fd4[0]); close(nd->fd4[1]);
@@ -962,11 +997,15 @@ launch(Node *nd)
 			_exit(2);
 		}
 		int lf = install_filter(); if (lf < 0) _exit(2);
+		/* From here until the listener is sent no call may reach the first
+		 * filter's USER_NOTIF: nobody holds the listener to answer it. */
+		if (install_trace_filter() != 0) _exit(2);
 		char cb[CMSG_SPACE(sizeof(int))] = {0}; char d = 'L';
 		struct iovec iov = {&d, 1}; struct msghdr mh = {0};
 		mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cb; mh.msg_controllen = sizeof cb;
 		struct cmsghdr *cm = CMSG_FIRSTHDR(&mh); cm->cmsg_level = SOL_SOCKET; cm->cmsg_type = SCM_RIGHTS; cm->cmsg_len = CMSG_LEN(sizeof(int));
-		memcpy(CMSG_DATA(cm), &lf, sizeof(int)); sendmsg(sp[1], &mh, 0);
+		memcpy(CMSG_DATA(cm), &lf, sizeof(int));
+		if (sendmsg(sp[1], &mh, 0) != 1) _exit(2);
 		char idbuf[8]; snprintf(idbuf, sizeof idbuf, "%d", nd->id);
 		/* argv = binary, id, then the space-separated [target] args (so a
 		 * target that takes flags needs no wrapper) */
@@ -981,6 +1020,38 @@ launch(Node *nd)
 	/* the checker keeps the write ends: it writes a node's state-hook
 	 * records into them itself (serve_hook) */
 	close(sp[1]); nd->hook_w[0] = nd->fd3[1]; nd->hook_w[1] = nd->fd4[1];
+	/* TRACECLONE: a thread the node creates starts in a ptrace stop,
+	 * so the search, not the kernel, decides when it first runs.
+	 * TRACESECCOMP: a sendmsg on a kernel fd stops (trace_stop). */
+	if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACECLONE | PTRACE_O_TRACESECCOMP) != 0)
+	{
+		fprintf(stderr, "cmc: cannot ptrace node %d: %s\n", nd->id, strerror(errno));
+		kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); close(sp[0]);
+		return -1;
+	}
+	if (write(sp[0], "g", 1) != 1)
+	{
+		kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); close(sp[0]);
+		return -1;
+	}
+	{
+		int st; pid_t r;
+		do r = waitpid(pid, &st, __WALL);
+		while (r < 0 && errno == EINTR);
+		if (r != pid || !WIFSTOPPED(st) || st >> 8 != (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8)))
+		{
+			fprintf(stderr, "cmc: node %d did not stop at its sendmsg trace filter (status %#x)\n", nd->id, st);
+			if (r != pid || WIFSTOPPED(st)) { kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); }
+			close(sp[0]);
+			return -1;
+		}
+		if (ptrace(PTRACE_CONT, pid, 0, 0) != 0)
+		{
+			fprintf(stderr, "cmc: cannot resume node %d: %s\n", nd->id, strerror(errno));
+			kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); close(sp[0]);
+			return -1;
+		}
+	}
 	char cb[CMSG_SPACE(sizeof(int))] = {0}; char d;
 	struct iovec iov = {&d, 1}; struct msghdr mh = {0};
 	mh.msg_iov = &iov; mh.msg_iovlen = 1; mh.msg_control = cb; mh.msg_controllen = sizeof cb;
@@ -1001,14 +1072,6 @@ launch(Node *nd)
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
 	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0; nd->race_ok = 0;
-	/* TRACECLONE: a thread the node creates starts in a ptrace stop,
-	 * so the search, not the kernel, decides when it first runs */
-	if (ptrace(PTRACE_SEIZE, pid, 0, PTRACE_O_TRACECLONE) != 0)
-	{
-		fprintf(stderr, "cmc: cannot ptrace node %d: %s\n", nd->id, strerror(errno));
-		kill(pid, SIGKILL); waitpid(pid, NULL, __WALL);
-		return -1;
-	}
 	return 0;
 }
 
@@ -1388,10 +1451,11 @@ visible(long nr, const __u64 *a)
  * checker's 500 counts, except the ones the checker answers itself (a
  * write to the state hook, a read of the durable record) and a write to
  * stdout or stderr, which no thread reads back.  A negative fd is the
- * kernel's EBADF, which shares nothing.  Calls the filter does not
- * intercept (lseek, openat, fsync, flock, sendmsg below fd 500) reach the
- * kernel unseen, like memory accesses, and are outside the model
- * (cmc(7)).
+ * kernel's EBADF, which shares nothing.  A sendmsg below fd 500 is not
+ * notified but stopped by the second filter, and trace_stop() refuses it
+ * the same way.  Calls the filter does not intercept (lseek, openat,
+ * fsync, flock) reach the kernel unseen, like memory accesses, and are
+ * outside the model (cmc(7)).
  *
  * The C library itself makes two such calls from a worker: the first
  * output on a stdio stream asks whether it is a terminal (ioctl TCGETS or
@@ -2265,31 +2329,56 @@ kill_node(Node *nd)
 }
 
 /* Detect that a node has exited, or that one of its threads stopped for
- * a signal.  Only an exit or a fatal signal is a death.  A thread other
- * than the leader stops on its own tid, so each known thread is asked
- * too; an abort() in a worker stops the worker, not the leader. */
+ * a signal or at a sendmsg on a kernel fd (trace_stop).  Only an exit or
+ * a fatal signal is a death.  A thread other than the leader stops on
+ * its own tid, so each known thread is asked too; an abort() in a
+ * worker stops the worker, not the leader.  drive_quiescent() calls this
+ * between its waits, so a stopped thread is never waited on forever.
+ * Returns 1 if it resumed a thread from a sendmsg stop, which is
+ * progress the listener does not show, and 0 otherwise. */
 static void signal_stop(Node *nd, pid_t tid, int st);
-static void
+static int
 reap(Node *nd)
 {
-	if (!nd->alive) return;
+	if (!nd->alive) return 0;
 	int st;
 	for (int i = 0; i < nd->nth; i++)
 	{
 		const Thread *th = &nd->th[i];
 		if (!th->inuse || th->tid == nd->pid) continue;
 		if (waitpid(th->tid, &st, WNOHANG | __WALL) == th->tid && WIFSTOPPED(st))
-		{ signal_stop(nd, th->tid, st); return; }
+		{ signal_stop(nd, th->tid, st); return nd->alive; }
 	}
 	pid_t r = waitpid(nd->pid, &st, WNOHANG | __WALL);
-	if (r != nd->pid) return;
-	if (WIFSTOPPED(st)) { signal_stop(nd, nd->pid, st); return; }
+	if (r != nd->pid) return 0;
+	if (WIFSTOPPED(st)) { signal_stop(nd, nd->pid, st); return nd->alive; }
 	nd->pid = 0; nd->alive = 0; drain_canon(nd); node_gone(nd);
+	return 0;
 }
 
 /* The first node a fault signal killed in this replay, and the signal:
  * the search reports it as a violation (see signal_stop).  -1: none. */
 static int g_fault_node = -1, g_fault_sig;
+
+/* Thread tid of node nd stopped at the second filter's SECCOMP_RET_TRACE
+ * (PTRACE_EVENT_SECCOMP): a sendmsg on a kernel fd, below 500.  In a
+ * node with one thread the call goes on to the kernel, as every other
+ * call on a kernel fd does.  In a node with more than one it is refused,
+ * as kernel_fd_call() refuses the others: another thread may read what
+ * it sends, and the socket's contents are not in the world. */
+static void
+trace_stop(Node *nd, pid_t tid)
+{
+	if (node_multi(nd))
+	{
+		struct user_regs_struct regs;
+		int fd = -1;
+		if (ptrace(PTRACE_GETREGS, tid, 0, &regs) == 0) fd = (int) regs.rdi;
+		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %d); only checker-owned fds and the state hook are modelled between threads", nd->id, fd, SYS_sendmsg);
+	}
+	if (ptrace(PTRACE_CONT, tid, 0, 0) != 0)
+		die(1, "node %d: cannot resume thread %d at a sendmsg: %s", nd->id, (int) tid, strerror(errno));
+}
 
 /* Thread tid of node nd is in a signal-delivery stop (waitpid status
  * st): the node is ptrace-seized, so a signal parks the thread instead
@@ -2306,6 +2395,7 @@ static int g_fault_node = -1, g_fault_sig;
 static void
 signal_stop(Node *nd, pid_t tid, int st)
 {
+	if (st >> 8 == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) { trace_stop(nd, tid); return; }
 	int sig = WSTOPSIG(st);
 	int fault = sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE || sig == SIGILL;
 	if (!fault || st >> 16 != 0)
@@ -2554,15 +2644,17 @@ drive_quiescent(void)
 		for (int i = 0; i < M.nodes; i++)
 			if (node_has_running(&N[i])) { pf[np].fd = N[i].listener; pf[np].events = POLLIN; np++; }
 		if (np == 0) break;			/* every node quiescent or dead */
-		/* wait in slices: a thread stopped by a signal makes no call and
-		 * wakes no poll, so look for one (reap) between slices */
+		/* wait in slices: a thread stopped by a signal or at a sendmsg
+		 * makes no call and wakes no poll, so look for one (reap) between
+		 * slices.  shortcut: a sendmsg on a kernel fd waits up to one slice
+		 * to be resumed; wait on SIGCHLD too if a target sends many. */
 		int r = 0, died = 0;
 		for (int waited = 0; !died && waited < LULL_MS; waited += LULL_SLICE_MS)
 		{
 			r = poll(pf, np, LULL_SLICE_MS);
 			if (r != 0) break;
 			for (int i = 0; i < M.nodes; i++)
-				if (N[i].alive) { reap(&N[i]); died |= !N[i].alive; }
+				if (N[i].alive) { died |= reap(&N[i]); died |= !N[i].alive; }
 		}
 		if (died) continue;
 		if (r < 0 && errno == EINTR) continue;

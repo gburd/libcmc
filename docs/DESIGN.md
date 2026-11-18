@@ -84,6 +84,22 @@ thread is parked.  Calls the seccomp filter does not intercept (`lseek`,
 `openat`, `fsync`, `flock`) reach the kernel unseen, like memory
 accesses.
 
+`sendmsg` on a kernel fd needs a second filter.  The launch child itself
+sends the listener to the checker with `sendmsg` on a socketpair, after
+the first filter is in and before anyone holds the listener to answer
+a notification, so the first filter notifies `sendmsg` only at fd 500
+and above.  The checker seizes the child with `PTRACE_O_TRACESECCOMP`
+before it installs any filter, and the child waits for a byte until it
+has.  It then installs the first filter and a second one that returns
+`SECCOMP_RET_TRACE` for `sendmsg` below fd 500.  The kernel takes the
+most severe answer of all the filters, and `USER_NOTIF` ranks above
+`TRACE`, so an owned fd is still notified.  The handoff `sendmsg` is the
+first trace stop, which the checker waits for at launch (so a node whose
+second filter is missing never starts), and every later one is a
+`PTRACE_EVENT_SECCOMP` stop that `reap()` finds between waits: a node
+with one thread is resumed (`PTRACE_CONT`, the call reaches the kernel),
+and a node with more is refused, as for every other kernel fd.
+
 A birth is held the same way.  Nodes are seized with
 `PTRACE_O_TRACECLONE`, so a `clone` stops the parent at
 `PTRACE_EVENT_CLONE` and starts the newborn in a ptrace stop.  Both stay

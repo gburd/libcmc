@@ -84,6 +84,7 @@ in the kernel, untouched.
 |---|---|---|---|
 | the order of threads' visible operations (`futex`, a call on a checker-owned fd, a state-hook write, `clone`, a thread's exit) | exact | every order is a search choice (RUN); one thread of a node runs at a time | proc_gate twothread, racewake, raceemit, raceborn, durack |
 | a call on a kernel fd (a pipe, a file) in a node with more than one thread | refused | exit 3 before it runs; writes to stdout and stderr are allowed | proc_gate racepipe, kernelfd |
+| `sendmsg` on a kernel fd (below 500) | exact in a node with one thread; refused in a node with more | a second seccomp filter stops it for the checker (`SECCOMP_RET_TRACE`), which sends it on to the kernel or ends the check with exit 3 | proc_gate sendmsg worker, alone |
 | worlds with a node that has run more than one thread | exact (never merged) | searched as a tree over orders of visible operations; INCOMPLETE after `--max-states` such worlds, 1000000 by default | proc_gate threadpos |
 | `clone`, `clone3` (threads), `futex` wait and wake, `exit`, `pthread_join` | exact | a newborn and its parent are both held at the clone's return until the search runs each | proc_gate twothread_join, raceborn |
 | a lock acquisition on its uncontended path (pthread mutex, rwlock, spinlock, semaphore, barrier, once; C11 `mtx_*`, `call_once`) | exact (a choice point) | the preload's marker before the real call; releases are not choice points (an acquisition-only reduction, sound for programs free of data races) | proc_gate syncpoint |

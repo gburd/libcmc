@@ -26,6 +26,14 @@ Process engine (`cmc --model-file`):
   search runs a sequentially consistent machine.  On 2.0.0 such a node
   could pass with a lost update reachable.  [proc_gate: memrace
   unlocked, relaxedadd; twothread]
+- `sendmsg` on a kernel fd (below 500) is seen.  A second seccomp
+  filter stops it for the checker, which sends it to the kernel in a
+  node with one thread and refuses it (exit 3) in a node with more, like
+  every other call on a kernel fd.  On 2.0.0 the launch child's own
+  `sendmsg` of the listener kept the filter from matching it, so a
+  worker could send on a socket another thread read, unseen.  The
+  launch socketpair is now close-on-exec.  [proc_gate: sendmsg worker,
+  sendmsg alone]
 
 Command line, API and the abstract checker:
 

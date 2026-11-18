@@ -152,6 +152,9 @@ A node with one thread behaves as if threads did not exist.
 In a node with more than one thread, a call on a kernel descriptor (a
 pipe or a file the threads may share) is refused (exit 3) before it
 runs, since its contents and offset are not part of the world.
+That includes
+.Fn sendmsg
+on a kernel socket.
 Writes to stdout and stderr are allowed, as is the C library's query
 of whether one of them is a terminal.
 Calls the checker does not intercept (such as

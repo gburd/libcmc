@@ -59,7 +59,7 @@ for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "proc_gate: racepipe.c does not build"; fail=1; }
-for f in fault kernelfd durack threadpos memrace syncpoint; do
+for f in fault kernelfd durack threadpos memrace syncpoint sendmsg; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
@@ -409,6 +409,14 @@ expect "memrace: a locked counter holds"                      0 "No error has be
 expect "memrace: a seq_cst handoff holds"                     0 "No error has been found" --model-file "$OUT/mr-seqcst-tsan.model"
 expect "memrace: a relaxed handoff is a data race"            1 "data race on node 0" --model-file "$OUT/mr-relaxed-tsan.model"
 expect "memrace: a relaxed atomic makes a pass INCOMPLETE"    2 "weaker than seq_cst" --model-file "$OUT/mr-relaxedadd-tsan.model"
+# sendmsg on a kernel socket (below fd 500) is seen too: a second filter
+# stops it for the checker, which sends it on in a node with one thread
+# and refuses it in one with more.  In worker mode main's send can land
+# between the worker's two, which the world cannot tell apart.
+printf '[target]\nbinary = %s\nnodes = 1\nargs = worker\n[invariants]\nnever_b = "node[0][0] == 0 or node[0][1] != 98"\n' "$B/proc/sendmsg" > "$OUT/sm-worker.model"
+printf '[target]\nbinary = %s\nnodes = 1\nargs = alone\n[invariants]\nback = "node[0][0] == 0 or node[0][1] == 120"\nreached = "eventually node[0][0] == 1"\n' "$B/proc/sendmsg" > "$OUT/sm-alone.model"
+expect_by 60 "sendmsg: a worker's send on a kernel socket is refused" 3 "uses kernel fd" --model-file "$OUT/sm-worker.model"
+expect_by 60 "sendmsg: one thread's send on a kernel socket runs" 0 "No error has been found" --model-file "$OUT/sm-alone.model"
 
 echo "-- restart: relaunch a crashed node and recover (Tier 3 ask 6)"
 # A server (node 1) stores a client's value durably (fd 193) and loops
