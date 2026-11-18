@@ -576,13 +576,14 @@ static int act_active(const Action *a){
  * ===================================================================== */
 typedef struct { Value v[SP_MAXVAR]; } State;
 
-/* serialize a state to bytes for hashing/dedup (canonical already) */
+/* serialize a state to bytes for hashing/dedup (canonical already).  A
+ * state's variables have passed in_domains(), so each is an integer or,
+ * for a function variable, a function. */
 static size_t state_bytes(const State *st, unsigned char *buf, size_t cap){
 	size_t o=0;
 	for(int i=0;i<S.nvar;i++){ const Value *v=&st->v[i];
 		#define PUT(x) do{ long _x=(x); if(o+sizeof _x<=cap){ memcpy(buf+o,&_x,sizeof _x);} o+=sizeof _x; }while(0)
 		PUT(v->tag); PUT(v->i); PUT(v->n);
-		if(v->tag==T_SET) for(int j=0;j<v->n;j++) PUT(v->e[j]);
 		if(v->tag==T_FUN) for(int j=0;j<v->n;j++){ PUT(v->k[j]); PUT(v->v[j]); }
 		#undef PUT
 	}
@@ -622,10 +623,9 @@ static long sym_map(long x, const int *perm){
 }
 static void sym_apply(const State *in, State *out, const int *perm){
 	*out=*in;
-	for(int vi=0;vi<S.nvar;vi++){ Value *v=&out->v[vi];
+	for(int vi=0;vi<S.nvar;vi++){ Value *v=&out->v[vi];	/* an integer or a function */
 		if(v->tag==T_INT) v->i=sym_map(v->i,perm);
-		else if(v->tag==T_SET){ for(int j=0;j<v->n;j++) v->e[j]=sym_map(v->e[j],perm); set_canon(v); }
-		else if(v->tag==T_FUN){ /* remap keys and values; re-sort by key */
+		else{ /* remap keys and values; re-sort by key */
 			for(int j=0;j<v->n;j++){ v->k[j]=sym_map(v->k[j],perm); v->v[j]=sym_map(v->v[j],perm); }
 			/* insertion sort by key to keep canonical */
 			for(int a=1;a<v->n;a++){ long kk=v->k[a],vv=v->v[a]; int b=a-1; while(b>=0&&v->k[b]>kk){ v->k[b+1]=v->k[b]; v->v[b+1]=v->v[b]; b--; } v->k[b+1]=kk; v->v[b+1]=vv; }
@@ -1103,7 +1103,6 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 			printf("  state:");
 			for(int vi=0;vi<S.nvar;vi++){ const Value *v=&cur->st.v[vi]; printf(" %s=",S.var[vi].name);
 				if(v->tag==T_FUN){ printf("["); for(int j=0;j<v->n;j++) printf("%s%ld:%ld",j?",":"",v->k[j],v->v[j]); printf("]"); }
-				else if(v->tag==T_SET){ printf("{"); for(int j=0;j<v->n;j++) printf("%s%ld",j?",":"",v->e[j]); printf("}"); }
 				else printf("%ld",v->i); }
 			printf("\n");
 			ret=1; break;
