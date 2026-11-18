@@ -3,7 +3,8 @@
 #   1. every man page passes mandoc lint (skipped, loudly, without mandoc);
 #   2. every public function, macro, constant and enum value in
 #      include/cmc.h, and every option cmc_main() parses, is documented
-#      in the man pages;
+#      in the man pages, and the default tree bound (CMC_TREE_CAP) they
+#      state is the source's;
 #   3. no snippet holds Liquid markup, which Jekyll would expand;
 #   4. the guide's server (docs/_includes/snippets/kvserver.c and
 #      kvserver.model) does what the guide says under cmc --model-file:
@@ -49,6 +50,16 @@ for o in $(grep -oE 'strcmp\(a, "--[a-z-]+"\)' "$HERE/src/cmc_cli.c" | grep -oE 
 	grep -qE "^\.(It|Op) Fl -${o#--}( |\$)" "$HERE/man/man1/cmc.1" ||
 		{ echo "docs: option $o is not in cmc(1)"; fail=1; }
 done
+# the default bound on a threaded program's tree search, as the source
+# sets it, is the one cmc(1) and cmc(7) state
+cap=$(sed -n 's/^#define CMC_TREE_CAP \([0-9][0-9]*\)$/\1/p' "$HERE/src/cmc_proc.c")
+if [ -z "$cap" ]; then echo "docs: no CMC_TREE_CAP default in src/cmc_proc.c"; fail=1
+else
+	grep -q "after $cap such worlds" "$HERE/man/man1/cmc.1" ||
+		{ echo "docs: cmc(1) does not give the tree bound's default, $cap"; fail=1; }
+	grep -q "or $cap without it" "$HERE/man/man7/cmc.7" ||
+		{ echo "docs: cmc(7) does not give the tree bound's default, $cap"; fail=1; }
+fi
 
 # Jekyll reads included snippets as Liquid: a {{ or {% in one renders wrong
 if grep -nE '\{\{|\{%' "$HERE"/docs/_includes/snippets/*; then

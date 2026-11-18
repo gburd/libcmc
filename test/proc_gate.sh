@@ -358,6 +358,21 @@ expect "threadpos: a thread on a joined thread's stack runs" 1 "never is violate
 expect "threadpos: one order of a memory update is reached" 1 "not12 is violated" --model-file "$OUT/tp-order12.model"
 expect "threadpos: the other order is reached too"          1 "not21 is violated" --model-file "$OUT/tp-order.model"
 expect_by 300 "threadpos: an endless thread is INCOMPLETE"  2 "max states reached" --model-file "$OUT/tp-spin.model" --max-states 300
+# The default bound on that tree (CMC_TREE_CAP, 1000000) takes hours to
+# reach, so a copy of cmc built with a bound of 200 checks its branch:
+# without --max-states the search stops there, INCOMPLETE, and with it
+# --max-states decides, even past the built-in bound.
+mkdir -p "$B/cap200"
+printf '#include "cmc.h"\nint main(int argc, char **argv) { return cmc_main(argc, argv, NULL, 0); }\n' > "$B/cap200/main.c"
+if $CC -std=c11 -D_POSIX_C_SOURCE=200809L -O1 -w -DCMC_TREE_CAP=200 -I"$HERE/include" -o "$B/cap200/cmc" \
+	"$B/cap200/main.c" "$HERE/src/cmc_cli.c" "$HERE/src/cmc_proc.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc.c"; then
+	CMC=$B/cap200/cmc
+	export CMC_PRELOAD="$B/cmc-preload.so"
+	expect_by 120 "tree bound: an endless thread stops at the built-in bound" 2 "200 worlds with a multi-threaded node were searched without merging" --model-file "$OUT/tp-spin.model"
+	expect_by 120 "tree bound: --max-states takes precedence" 2 "max states reached; 300 distinct" --model-file "$OUT/tp-spin.model" --max-states 300
+	unset CMC_PRELOAD
+	CMC=$B/cmc
+else echo "proc_gate: cmc with CMC_TREE_CAP=200 does not build"; fail=1; fi
 # racepipe: two threads share two kernel pipes.  Their contents are not
 # in the world, so the node is refused rather than searched.
 expect "racepipe: threads sharing kernel pipes are refused" 3 "uses kernel fd" $(run racepipe racepipe)

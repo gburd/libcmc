@@ -3538,8 +3538,12 @@ world_threaded(void)
 
 /* The bound on worlds searched as a tree (world_threaded) when no
  * --max-states is given: each one is a node of the tree, and a threaded
- * program that never stops would otherwise grow it forever. */
-#define TREE_CAP 1000000
+ * program that never stops would otherwise grow it forever.  A build may
+ * set it (-DCMC_TREE_CAP=n), so a gate can reach it; test/docs_gate.sh
+ * checks that cmc(1) states this default. */
+#ifndef CMC_TREE_CAP
+#define CMC_TREE_CAP 1000000
+#endif
 
 /* the BFS frontier: action sequences, appended in one growing pool */
 static int *qpool; static size_t qcap, qused;
@@ -3722,7 +3726,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	 * operations, whatever the encoding misses about their memory.  A
 	 * stutter (a world that encodes like its parent) is expanded there
 	 * too, since the thread that ran may be at a point the encoding
-	 * cannot see.  TREE_CAP bounds the tree. */
+	 * cannot see.  CMC_TREE_CAP bounds the tree. */
 	size_t distinct = 0, cut = 0, replays = 0, ntree = 0; int maxlen = 0;
 	size_t progressed = 0, stutter_leaves = 0;	/* no-progress (self-loop) detection */
 	const char *why = NULL;
@@ -3793,10 +3797,10 @@ cmc_proc_main(const CmcProcOptions *po)
 		}
 		free(seq);
 		if (po->max_states && distinct >= po->max_states) { why = "max states reached"; break; }
-		if (!po->max_states && ntree >= TREE_CAP)
+		if (!po->max_states && ntree >= CMC_TREE_CAP)
 		{
 			static char tbuf[160];
-			snprintf(tbuf, sizeof tbuf, "%d worlds with a multi-threaded node were searched without merging (set the bound with --max-states)", TREE_CAP);
+			snprintf(tbuf, sizeof tbuf, "%d worlds with a multi-threaded node were searched without merging (set the bound with --max-states)", CMC_TREE_CAP);
 			why = tbuf; break;
 		}
 		if (po->time_limit > 0 && now_s() - t0 > po->time_limit) { why = "time limit reached"; break; }

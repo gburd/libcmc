@@ -34,6 +34,13 @@ Process engine (`cmc --model-file`):
   worker could send on a socket another thread read, unseen.  The
   launch socketpair is now close-on-exec.  [proc_gate: sendmsg worker,
   sendmsg alone]
+- The default bound on a threaded program's tree search (1,000,000
+  worlds) can be set at build time with `-DCMC_TREE_CAP=n`, so a gate
+  reaches it: the search stops there INCOMPLETE (exit 2) and
+  `--max-states` still takes precedence.  On 2.0.0 no gate reached the
+  default.  One run to the real default is recorded in
+  `docs/measurements/2026-11-17-tree-cap.md`.  [proc_gate: tree bound
+  rows; docs_gate: the default cmc(1) and cmc(7) state]
 
 Command line, API and the abstract checker:
 
