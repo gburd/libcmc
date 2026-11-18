@@ -601,10 +601,18 @@ static uint64_t fnv(const unsigned char *b, size_t n){ uint64_t h=14695981039346
  * that is a member of S, wherever it appears (int values, set elements,
  * and both the keys and values of functions). */
 static Value g_symset;
-static void sym_init(void){
-	g_symok=0; if(!S.has_sym) return;
+/* Evaluate the symmetry set once; returns 0, or -1 with the reason in
+ * err when it cannot be used (one it cannot read, or of more than 8
+ * values, whose 9! permutations a state would be canonicalised over).
+ * A set of fewer than two values reduces nothing and is accepted. */
+static int sym_init(char *err, size_t errcap){
+	g_symok=0; if(!S.has_sym) return 0;
 	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
-	char e[128]; if(sp_eval_set(S.symmetry,&env,&g_symset,e,sizeof e) && g_symset.tag==T_SET && g_symset.n>=2 && g_symset.n<=8) g_symok=1;
+	char e[128];
+	if(!sp_eval_set(S.symmetry,&env,&g_symset,e,sizeof e)){ snprintf(err,errcap,"symmetry %.80s: %s",S.symmetry,e); return -1; }
+	if(g_symset.n>8){ snprintf(err,errcap,"symmetry %.80s: at most 8 values, not %d",S.symmetry,g_symset.n); return -1; }
+	g_symok=g_symset.n>=2;
+	return 0;
 }
 /* remap x under a permutation perm[] of the symmetry set (perm[i] is the
  * image of g_symset.e[i]); non-members pass through */
@@ -1054,9 +1062,9 @@ static int set_defines(char **defs, int ndefs){
 
 int cmc_spec_main(const char *path, char **defs, int ndefs){
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
-	sym_init();
-	/* parse-check every invariant and guard once (over the init state) */
 	char err[256];
+	if(sym_init(err,sizeof err)){ fprintf(stderr,"cmc: %s: %s\n",path,err); return 3; }
+	/* parse-check every invariant and guard once (over the init state) */
 	State init; if(sp_init_state(&init,err,sizeof err)){ fprintf(stderr,"cmc: %s: init: %s\n",path,err); return 3; }
 
 	seen_cap=1; while(seen_cap<SP_MAXSTATES*2) seen_cap<<=1; seen=calloc(seen_cap,sizeof *seen);

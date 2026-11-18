@@ -67,7 +67,8 @@ SMT-encodable -- not full TLA+.
   `[TAG]` is active only with `--define TAG` (used to plant a bug).
 - `invariant NAME: EXPR` -- checked in every reachable state.
 - `symmetry SET` -- declare SET's values interchangeable, collapsing
-  symmetric states (see below).
+  symmetric states (see below).  SET is a constant set of at most 8
+  values; anything else is an error.
 - `fairness weak` and `property NAME: ...` -- liveness (see below).
 
 Expressions: integers with `+ - * / mod`; sets `{a, b}` and ranges

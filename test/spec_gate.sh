@@ -124,6 +124,25 @@ echo "-- symmetry reduction: interchangeable node ids collapse"
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness
 # check for the declaration.
 expect "token: symmetry collapses the state space" 0 "3 distinct states found" --spec "$HERE/examples/spec/token.cml"
+# over a function whose keys and values are the symmetric ids (both are
+# remapped, and the keys re-sorted): the same verdicts as without it
+sed '/^symmetry/d' "$HERE/test/spec/symfun.cml" > "$OUT/symfun-nosym.cml"
+expect "symfun: symmetry over a function's keys and values" 0 "4 distinct states found"  --spec "$HERE/test/spec/symfun.cml"
+expect "symfun: without symmetry"                           0 "16 distinct states found" --spec "$OUT/symfun-nosym.cml"
+expect "symfun: the bug under symmetry"     1 "is (2 actions)" --spec "$HERE/test/spec/symfun.cml" --define BUG
+expect "symfun: the bug without symmetry"   1 "is (2 actions)" --spec "$OUT/symfun-nosym.cml" --define BUG
+# a symmetry set of sets is canonical after the permutation too
+printf 'module syms\nconst N = 3\nsymmetry 1 .. N\nvar s : 0 .. 7\nvar last : 0 .. N\ninit s == 0 and last == 0\naction add(n in 1 .. N):\n  when last != n and s < 7\n  last%s = n\n  s%s = s + 1\ninvariant ok: last in {0} or last in 1 .. N\n' "'" "'" > "$OUT/syms.cml"
+expect "a symmetric scalar keeps the verdict"  0 "No error has been found" --spec "$OUT/syms.cml"
+# a symmetry declaration of one value, or one that is not a set, is no
+# reduction: the search is the full one
+printf 'module sym1\nsymmetry {1}\nvar x : 0 .. 1\ninit x == 0\naction a:\n  when x == 0\n  x%s = 1\ninvariant ok: TRUE\n' "'" > "$OUT/sym1.cml"
+expect "a one-value symmetry set reduces nothing" 0 "2 distinct states found" --spec "$OUT/sym1.cml"
+# a declaration it cannot use is an error, not a search without it
+for sym in "x" "1 .. 9" "{1, y}"; do
+	printf 'module s\nsymmetry %s\nvar x : 0 .. 1\ninit x == 0\ninvariant ok: TRUE\n' "$sym" > "$OUT/symbad.cml"
+	expect "symmetry $sym is an error" 3 "symmetry $sym:" --spec "$OUT/symbad.cml"
+done
 
 echo "-- liveness: temporal properties under weak fairness"
 # the ticker must eventually reach its max under weak fairness (holds);

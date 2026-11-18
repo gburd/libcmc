@@ -60,6 +60,9 @@ Command line, API and the abstract checker:
   on a scalar variable or none on a function, and a `[fields]` offset
   that is not 0 to 254 are errors now.  [spec_gate: "a variable bound
   twice is an error" and the rows after it]
+- A `symmetry` declaration that cannot be evaluated, or that names
+  more than 8 values, is an error; such a spec was searched without the
+  reduction and no word said so.  [spec_gate: "symmetry x is an error"]
 - `cmc --refine` checks each bound variable of the observed abstract
   state against its declared domain.  An implementation whose observed
   value left the spec's state space (x = 7 for `var x : 0 .. 2`) used

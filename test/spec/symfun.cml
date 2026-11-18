@@ -1,0 +1,36 @@
+# test/spec/symfun.cml: symmetry over a function whose keys and values
+# are node ids.  N interchangeable nodes (1 .. N) pass a token along a
+# chain: owner holds it (0 = none yet) and passed[i] is the node i gave
+# it to (0 = not yet).  A node is given the token only once.  Permuting
+# the ids maps owner, passed's keys and passed's values together, and
+# value 0 is outside the symmetry set, as the obligation requires (see
+# examples/spec/token.cml).  Every chain of k distinct nodes is one orbit,
+# so 16 states fall to 4; spec_gate.sh pins both counts and the verdict.
+# --define BUG lets the holder pass the token on without recording it, so
+# a holder can have passed it already, which `fresh` forbids.
+module symfun
+
+const N = 3
+
+symmetry 1 .. N
+
+var owner : 0 .. N
+var passed : [1 .. N -> 0 .. N]
+
+init owner == 0 and passed == [i in 1 .. N -> 0]
+
+action take(n in 1 .. N):
+  when owner == 0 and (all i in 1 .. N : passed[i] == 0)
+  owner' = n
+
+action give(m in 1 .. N):
+  when owner != 0 and m != owner and passed[m] == 0 and (all i in 1 .. N : passed[i] != m)
+  passed' = [passed except [owner] = m]
+  owner' = m
+
+action skip(m in 1 .. N) [BUG]:
+  when owner != 0 and m != owner and passed[m] == 0
+  passed' = [passed except [m] = owner]
+  owner' = m
+
+invariant fresh: all i in 1 .. N : i != owner or passed[i] == 0
