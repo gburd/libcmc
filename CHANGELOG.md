@@ -53,6 +53,13 @@ Command line, API and the abstract checker:
   Each breach is a model error, exit 3.  No shipped spec changed its
   counts or verdict.  [spec_gate: "the evaluator refuses an operand of
   the wrong type"]
+- A `--bind` file is read whole.  A second binding of a variable used
+  to replace the first, so `x = "node[0][0]"` then `x = "0"` hid the
+  observable and accepted a step the spec forbids.  A variable bound
+  twice, an unknown section or variable, a line with no `=`, an index
+  on a scalar variable or none on a function, and a `[fields]` offset
+  that is not 0 to 254 are errors now.  [spec_gate: "a variable bound
+  twice is an error" and the rows after it]
 - `--define TAG` that gates no action in the spec is an error, so a
   mistyped tag no longer checks the spec without its planted bug.
   [spec_gate: "a --define that gates no action is an error"]

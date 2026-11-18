@@ -315,6 +315,24 @@ expectp "C2: an observation outside init is rejected" 1 "rejected at step 0" "$R
 expectp "C2: a behaviour from init is accepted"       0 "accepted 3"         "$RD" "$S/c2init.cml" "$S/scalar.bind" 0 1 2
 # 1.2: a [TAG] action that is not --define'd is not a step
 expectp "C2: a disabled [BUG] action is not a step"    1 "rejected at step 1" "$RD" "$S/c2gate.cml" "$S/scalar.bind" 0 2
+# a binding is read whole: a line it cannot use is an error, never
+# skipped, since a second binding of x that hid the first accepted the
+# forbidden step 0 -> 2
+binding() {	# binding DESC NEEDLE TEXT: refine_driver on c2init.cml exits 3
+	printf '%b' "$3" > "$OUT/b.bind"
+	expectp "$1" 3 "$2" "$RD" "$S/c2init.cml" "$OUT/b.bind" 0 2
+}
+binding "a variable bound twice is an error"   "x is bound twice"     '[map]\nx = "node[0][0]"\nx = "0"\n'
+binding "an unknown section is an error"       "unknown section"      '[mapp]\nx = "node[0][0]"\n'
+binding "a line without = is an error"         "cannot read"          '[map]\nx = "node[0][0]"\njunk\n'
+binding "an index on a scalar is an error"     "x is not a function"  '[map]\nx[i] = "node[0][0]"\n'
+binding "an unknown variable is an error"      "no variable y"        '[map]\nx = "node[0][0]"\ny = "0"\n'
+binding "a field offset that is no number"     "offset of v"          '[fields]\nv = seven\n[map]\nx = "node[0].v"\n'
+binding "a key before any section is an error" "cannot read"          'x = "node[0][0]"\n[map]\nx = "node[0][0]"\n'
+printf '[map]\nx = "node[0][0]"\n' > "$OUT/b.bind"
+printf 'module f\nvar c : [0 .. 1 -> 0 .. 1]\ninit c == [i in 0 .. 1 -> 0]\ninvariant i: TRUE\n' > "$OUT/fun.cml"
+printf '[map]\nc = "0"\n' > "$OUT/fun.bind"
+expectp "a function variable bound without an index"  3 "c is a function" "$RD" "$OUT/fun.cml" "$OUT/fun.bind" 0
 # 1.4: a truncated expression is an error, never a shorter invariant
 expect "an over-long expression is a model error"  3 "too long" --spec "$S/truncate.cml"
 # 1.5: types, declared domains and integer overflow

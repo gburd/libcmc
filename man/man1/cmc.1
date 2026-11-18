@@ -177,6 +177,8 @@ The binding
 that maps the implementation's observables onto the abstract variables,
 for
 .Fl -refine .
+Each spec variable is bound at most once, a function variable entry by
+entry; a line the reader cannot use is an error.
 .It Fl -refine-steps
 Check refinement at the level of
 .Em steps ,

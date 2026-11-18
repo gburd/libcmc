@@ -119,6 +119,13 @@ cmc --model-file paxos-refine.model --binary ./paxos \
     --refine examples/spec/paxos.cml --bind examples/spec/paxos.bind
 ```
 
+A function variable is bound entry by entry (`chosen[v] = ...`), a
+scalar one whole (`c = ...`); each spec variable at most once.  The
+file may start with `spec =` and `binary =` lines for its reader.  A
+line the reader cannot use (an unknown section or variable, a second
+binding, a field offset that is not 0 to 254) is an error, never
+skipped.
+
 At each reached implementation state the abstract state is built from the
 binding and the abstract invariants are checked against it.  The binding
 may reference only what the code emits, never its internals, so the

@@ -1149,30 +1149,55 @@ int cmc_refine_load_spec(const char *path, char **defs, int ndefs){
 	return sp_load(path);
 }
 
+/* The binding file: [fields] name = byte offset, then [map] VAR = "EXPR"
+ * or VAR[IDX] = "EXPR" per abstract variable, after optional spec= and
+ * binary= header lines.  Every line is read or refused: a second binding
+ * of a variable that hid the first, or a skipped line, would check the
+ * implementation against a map nobody wrote. */
 int cmc_refine_load_bind(const char *path, char *err, size_t errcap){
 	FILE *f=fopen(path,"r"); if(!f){ snprintf(err,errcap,"cannot open %s",path); return -1; }
-	B_nmap=0; S.nfield=0; char line[1024]; int sect=0; /* 1=fields 2=map */
+	B_nmap=0; S.nfield=0; char line[1024]; int sect=0, ln=0; /* 0=header 1=fields 2=map */
+	#define BAD(...) do{ snprintf(err,errcap,__VA_ARGS__); fclose(f); return -1; }while(0)
+	#define BCPY(dst,src,what) do{ if((size_t)snprintf((dst),sizeof(dst),"%s",(src))>=sizeof(dst)) BAD("line %d: %s is too long (limit %zu bytes)",ln,(what),sizeof(dst)-1); }while(0)
 	while(fgets(line,sizeof line,f)){
-		if(!strchr(line,'\n') && !feof(f)){ snprintf(err,errcap,"a line is too long (limit %zu bytes)",sizeof line-2); fclose(f); return -1; }
+		ln++;
+		if(!strchr(line,'\n') && !feof(f)) BAD("a line is too long (limit %zu bytes)",sizeof line-2);
 		char *h=strchr(line,'#'); if(h)*h=0; char *s=sp_trim(line); if(!*s) continue;
-		if(s[0]=='['){ if(!strncmp(s,"[fields]",8)) sect=1; else if(!strncmp(s,"[map]",5)) sect=2; else sect=0; continue; }
-		char *eq=strchr(s,'='); if(!eq){ continue; } /* spec=/binary= header lines ignored here */
+		if(s[0]=='['){
+			if(!strcmp(s,"[fields]")) sect=1; else if(!strcmp(s,"[map]")) sect=2;
+			else BAD("line %d: unknown section %s (a binding has [fields] and [map])",ln,s);
+			continue;
+		}
+		char *eq=strchr(s,'=');
+		if(!eq) BAD("line %d: cannot read %s (want KEY = VALUE)",ln,s);
 		*eq=0; char *k=sp_trim(s); char *v=sp_trim(eq+1);
 		/* strip quotes around v */
 		if(*v=='"'){ v++; char *q=strrchr(v,'"'); if(q)*q=0; }
-		#define BCPY(dst,src,what) do{ if((size_t)snprintf((dst),sizeof(dst),"%s",(src))>=sizeof(dst)){ snprintf(err,errcap,"%s is too long (limit %zu bytes)",(what),sizeof(dst)-1); fclose(f); return -1; } }while(0)
-		if(sect==1){
-			if(S.nfield>=SP_MAXCONST){ snprintf(err,errcap,"too many fields"); fclose(f); return -1; }
-			BCPY(S.fname[S.nfield],k,"field name"); S.foff[S.nfield]=atoi(v); S.nfield++;
+		if(sect==0){
+			/* the header names the spec and binary, for a reader */
+			if(strcmp(k,"spec") && strcmp(k,"binary")) BAD("line %d: cannot read %s before [fields] or [map]",ln,k);
 		}
-		else if(sect==2){
-			if(B_nmap>=SP_MAXVAR){ snprintf(err,errcap,"too many bindings"); fclose(f); return -1; }
+		else if(sect==1){
+			char *e; long off=strtol(v,&e,10);
+			if(S.nfield>=SP_MAXCONST) BAD("too many fields");
+			if(!*v || *e || off<0 || off>254) BAD("line %d: the offset of %s must be a number from 0 to 254, not '%s'",ln,k,v);
+			BCPY(S.fname[S.nfield],k,"field name"); S.foff[S.nfield]=(int)off; S.nfield++;
+		}
+		else{
+			if(B_nmap>=SP_MAXVAR) BAD("too many bindings");
 			/* k is VAR or VAR[idx] */
 			char *lb=strchr(k,'['); if(lb){ *lb=0; char *rb=strchr(lb+1,']'); if(rb)*rb=0; BCPY(B_map[B_nmap].idx,sp_trim(lb+1),"binding index"); } else B_map[B_nmap].idx[0]=0;
-			BCPY(B_map[B_nmap].var,sp_trim(k),"binding variable"); BCPY(B_map[B_nmap].expr,v,"binding expression"); B_nmap++;
+			BCPY(B_map[B_nmap].var,sp_trim(k),"binding variable"); BCPY(B_map[B_nmap].expr,v,"binding expression");
+			int vi=var_index(B_map[B_nmap].var);
+			if(vi<0) BAD("line %d: the spec has no variable %s",ln,B_map[B_nmap].var);
+			for(int m=0;m<B_nmap;m++) if(!strcmp(B_map[m].var,B_map[B_nmap].var)) BAD("line %d: %s is bound twice",ln,B_map[B_nmap].var);
+			if(S.var[vi].is_fun && !B_map[B_nmap].idx[0]) BAD("line %d: %s is a function; bind it as %s[i] = \"...\"",ln,B_map[B_nmap].var,B_map[B_nmap].var);
+			if(!S.var[vi].is_fun && B_map[B_nmap].idx[0]) BAD("line %d: %s is not a function; bind it as %s = \"...\"",ln,B_map[B_nmap].var,B_map[B_nmap].var);
+			B_nmap++;
 		}
-		#undef BCPY
 	}
+	#undef BCPY
+	#undef BAD
 	fclose(f);
 	if(B_nmap==0){ snprintf(err,errcap,"binding has no [map]"); return -1; }
 	return 0;
@@ -1191,9 +1216,9 @@ static int var_domain(const Var *V, Value *dom, char *err, size_t errcap){
 static int build_abstract(const CmcObs *obs, State *out, char *err, size_t errcap){
 	State st; for(int i=0;i<S.nvar;i++) st.v[i]=vint(0);
 	for(int m=0;m<B_nmap;m++){
-		int vi=var_index(B_map[m].var); if(vi<0){ snprintf(err,errcap,"binding for unknown var %s",B_map[m].var); return -1; }
+		int vi=var_index(B_map[m].var);	/* checked by cmc_refine_load_bind() */
 		Var *V=&S.var[vi];
-		if(B_map[m].idx[0] && V->is_fun){
+		if(V->is_fun){
 			Value dom; if(var_domain(V,&dom,err,errcap)){ return -1; }
 			Value fn={0}; fn.tag=T_FUN;
 			for(int e=0;e<dom.n && fn.n<SP_MAPMAX;e++){
