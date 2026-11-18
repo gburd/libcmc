@@ -113,7 +113,14 @@ worker(void *arg)
 	else if (!strcmp(wmode, "ioctl")) (void) ioctl(pipefd[0], FIONREAD, &c);
 	else if (!strcmp(wmode, "stdin_tty")) (void) ioctl(0, TCGETS, &c);
 	else if (!strcmp(wmode, "stdout")) (void) !write(1, "", 0);
-	else if (!strcmp(wmode, "durable")) { (void) fsync(193); (void) !read(193, &c, 0); }
+	else if (!strcmp(wmode, "durable")) { (void) fsync(193); (void) fdatasync(193); (void) !read(193, &c, 0); }
+	else if (!strcmp(wmode, "tty2")) { struct termios tio; (void) ioctl(2, TCGETS, &tio); (void) !write(-1, "", 0); }
+	else if (!strcmp(wmode, "efd"))
+	{
+		uint64_t	one = 1;
+
+		(void) !write(pipefd[1], &one, 8);	/* pipefd[1] is an eventfd here */
+	}
 	return NULL;
 }
 
@@ -223,6 +230,33 @@ main(int argc, char **argv)
 
 		code(sendfile(s, 0, NULL, 1));
 	}
+	/* a worker wakes main's poll or epoll_wait on an eventfd */
+	else if (!strcmp(mode, "efdpoll") || !strcmp(mode, "efdepoll"))
+	{
+		pthread_t	t;
+		int			e = eventfd(0, 0);
+		uint64_t	v = 0;
+
+		wmode = "efd";
+		pipefd[1] = e;
+		pthread_create(&t, NULL, worker, NULL);
+		if (!strcmp(mode, "efdpoll"))
+		{
+			struct pollfd p = {e, POLLIN, 0};
+
+			code(poll(&p, 1, -1) == 1 && p.revents == POLLIN ? 0 : -1);
+		}
+		else
+		{
+			int			ep = epoll_create1(0);
+			struct epoll_event ev = {.events = EPOLLIN, .data.u64 = 5}, out;
+
+			epoll_ctl(ep, EPOLL_CTL_ADD, e, &ev);
+			code(epoll_wait(ep, &out, 1, -1) == 1 && out.data.u64 == 5 ? 0 : -1);
+		}
+		code(read(e, &v, 8) == 8 && v == 1 ? 0 : -1);
+		pthread_join(t, NULL);
+	}
 	/* a call on a kernel fd from a worker thread */
 	else if (!strncmp(mode, "worker-", 7))
 	{
@@ -315,6 +349,22 @@ main(int argc, char **argv)
 		code(syscall(SYS_pidfd_open, getppid(), 0));
 	else if (!strcmp(mode, "mq"))
 		code(syscall(SYS_mq_open, "cmc", 0, 0, NULL));
+	else if (!strcmp(mode, "fscorners"))
+	{
+		/* on an owned socket sync_file_range with bad flags is EINVAL, as
+		 * on Linux; fdatasync of the durable record succeeds; an openat2
+		 * whose open_how is too small is refused */
+		int			s = dial(1);
+
+		code(syscall(SYS_sync_file_range, s, 0, 0, 0x80));
+		code(fdatasync(193));
+	}
+	else if (!strcmp(mode, "openat2small"))
+	{
+		uint64_t	how[3] = {0, 0, 0};
+
+		code(syscall(SYS_openat2, AT_FDCWD, "/dev/null", how, 8));
+	}
 	else if (!strcmp(mode, "killself"))
 	{
 		/* a signal to itself goes to the kernel: signal 0 tests only */

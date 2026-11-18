@@ -592,6 +592,19 @@ done
 # `and` and `or` mixed at one level are refused: left to right, the
 # invariant below meant (x == 7 or x == 5) and x == 9, which 2.0.0 found
 # violated in a state that `x == 7 or (x == 5 and x == 9)` would let pass
+for bad in "node[0][0] != " "node[0][0] <= " "node[0][0] >= " "node[0][0] < " "node[0][0] > " \
+	"eventuallyx node[0][0] == 0" "all r in replies : r.abcdefghijk == 0"; do
+	mf "bad$k" 3 "cannot parse" "${H}[invariants]\nb = \"$bad\"\n"
+	k=$((k + 1))
+done
+inv sides2 0 "No error has been found" "node[0][-1] == 0 - 1"
+mf badword 3 "cannot parse" "${H}[invariants]\nb = \"node_x == 0\"\n"
+mf invexprlong 3 "invariant name or expression too long" "${H}[invariants]\nx = \"$(printf '%300s' '' | tr ' ' 'x')\"\n"
+mf evtab 0 "No error has been found" "${H}[invariants]\nok = \"eventually	node[1][0] == 5\"\n"
+printf '[target]\nnodes = 2\n[environment]\nclient_write = 5\n[invariants]\nok = "node[0][0] < 9"' > "$MF/nonewline.model"
+expect_by 60 "model file: a last line without a newline" 0 "No error has been found" --model-file "$MF/nonewline.model" --binary "$B/proc/repl"
+printf '[target]\nbinary = repl\nnodes = 2\n[environment]\nclient_write = 5\n[invariants]\nok = "node[0][0] < 9"\n' > "$B/proc/bare.model"
+(cd "$B/proc" && fail=0 && expect_by 60 "model file: a binary named beside a bare model path" 0 "No error has been found" --model-file bare.model; exit $fail) || fail=1
 inv mixed 3 "cannot parse" "node[1][0] == 7 or node[1][0] == 5 and node[1][0] == 9"
 inv grouped 0 "No error has been found" "node[1][0] != 7 or (node[1][0] == 5 and node[1][0] == 9)" "(node[1][0] == 0 or node[1][0] == 5) and node[1][0] < 9"
 for bad in "node[0" "node[x][0] == 0" "node[0]" "node[0][0" "node[0].nope == 0" "nodez == 1" "(node[0][0] == 0" \
@@ -683,7 +696,12 @@ for m in recvfrom sendto close fcntl readv writev pread pwrite dup ioctl; do
 done
 # the C library's own calls a worker may make: no refusal (INCOMPLETE,
 # since the fixture is not built with the race runtime)
-for m in stdin_tty stdout durable; do edm "worker-$m" 2 "without the race runtime"; done
+for m in stdin_tty stdout durable tty2; do edm "worker-$m" 2 "without the race runtime"; done
+# a worker's eventfd write wakes main parked in poll or epoll_wait on it
+edm efdpoll 2 "without the race runtime" 'woke = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1)"\nreached = "eventually node[0][0] == 1"'
+edm efdepoll 2 "without the race runtime" 'woke = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1)"\nreached = "eventually node[0][0] == 1"'
+edm fscorners 0 "No error has been found" 'linux = "node[0][0] < 1 or (node[0][1] == 32 and node[0][2] == 1)"\nreached = "eventually node[0][0] == 1"'
+edm openat2small 3 "openat2 passes an open_how the checker cannot read"
 # a channel to another process: another program run in the node, SysV
 # shared memory or a message queue (which outlive the process, so their
 # state would survive a crash outside the world), another process's

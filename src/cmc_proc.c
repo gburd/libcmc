@@ -906,8 +906,7 @@ wrong_kind(Node *nd, long nr, int fd)
 	int k = fd_kind(nd, fd);
 
 	if (k == K_NONE) return EBADF;
-	if (k == K_EFD || k == K_EPOLL)
-		return nr == SYS_read || nr == SYS_write ? 0 : ENOTSOCK;
+	if (k == K_EFD || k == K_EPOLL) return ENOTSOCK;
 	switch (nr)
 	{
 		case SYS_connect: return k == K_LISTEN ? EISCONN : 0;

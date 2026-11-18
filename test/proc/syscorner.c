@@ -377,6 +377,14 @@ main(int argc, char **argv)
 		code(sendto(ep, &one, 1, 0, NULL, 0));
 		code(send(plain, "x", 1, MSG_NOSIGNAL));
 		code(recv(plain, &one, 1, MSG_DONTWAIT));
+		/* listen and bind on a connection: one to the node's own
+		 * listener, which is there natively as under cmc */
+		int			c = socket(AF_INET, SOCK_STREAM, 0);
+		struct sockaddr_in me = addr(BASE);
+
+		code(connect(c, (struct sockaddr *) &me, sizeof me));
+		code(listen(c, 4));
+		code(bind(c, (struct sockaddr *) &me, sizeof me));
 	}
 	else if (!strcmp(mode, "notconn"))
 	{
