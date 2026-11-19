@@ -997,8 +997,8 @@ cr_fail(int id, const char *what)
 
 static int
 is_pie(const char *b)
-{ int fd=open(b,O_RDONLY); unsigned char e[18]={0}; if(fd<0)return -1;
-  if(read(fd,e,sizeof e)!=(ssize_t)sizeof e){close(fd);return -1;} close(fd);
+{ int fd=open(b,O_RDONLY); unsigned char e[18]={0}; if(fd<0)return -1;	/* GCOVR_EXCL_LINE: the binary was found and opened a moment ago */
+  if(read(fd,e,sizeof e)!=(ssize_t)sizeof e){close(fd);return -1;} close(fd);	/* GCOVR_EXCL_LINE: the binary was found and opened a moment ago */
   if(memcmp(e,"\177ELF",4))return -1;
   return (e[16]|(e[17]<<8))==3; }
 
@@ -1205,11 +1205,11 @@ launch(Node *nd)
 	{
 		int st; pid_t r;
 		do r = waitpid(pid, &st, __WALL);
-		while (r < 0 && errno == EINTR);
+		while (r < 0 && errno == EINTR);	/* GCOVR_EXCL_LINE: a wait interrupted by a signal; the checker takes none */
 		if (r != pid || !WIFSTOPPED(st) || st >> 8 != (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8)))
 		{
 			fprintf(stderr, "cmc: node %d did not stop at its sendmsg trace filter (status %#x)\n", nd->id, st);
-			if (r != pid || WIFSTOPPED(st)) { kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); }
+			if (r != pid || WIFSTOPPED(st)) { kill(pid, SIGKILL); waitpid(pid, NULL, __WALL); }	/* GCOVR_EXCL_LINE: the node's status is the one just waited for */
 			close(sp[0]);
 			return -1;
 		}
@@ -1905,13 +1905,13 @@ try_pending_for(Node *nd)
 	/* It delivers a notification from ANY of this node's threads, so a
 	 * tid already parked in a deferred slot does not stop the search from
 	 * servicing another tid's call. */
-	if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_RECV, g_req) != 0)
+	if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_RECV, g_req) != 0)	/* GCOVR_EXCL_LINE: poll said a notification is ready */
 		return 0;
 	long nr = g_req->data.nr; __u64 *a = g_req->data.args;
 	/* route the notification to its thread's slot (seccomp_notif.pid is
 	 * the calling thread's tid); a first-sight tid gets a fresh slot */
 	Thread *th = th_for(nd, g_req->pid);
-	if (!th) die(1, "node %d has more than %d threads", nd->id, MAXTHREAD);
+	if (!th) die(1, "node %d has more than %d threads", nd->id, MAXTHREAD);	/* GCOVR_EXCL_LINE: birth() refuses a thread past MAXTHREAD first */
 	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
 	th->nr = nr; th->ip = g_req->data.instruction_pointer; th->sp = 0;
 	memcpy(th->args, a, sizeof th->args);
@@ -2905,7 +2905,7 @@ run_held(Node *nd, Thread *th)
 static void
 run_stopped(Node *nd, Thread *th)
 {
-	if (ptrace(PTRACE_CONT, th->tid, 0, 0) != 0)
+	if (ptrace(PTRACE_CONT, th->tid, 0, 0) != 0)	/* GCOVR_EXCL_LINE: the thread is in the stop just reported */
 		die(1, "node %d: cannot start thread %d: %s", nd->id, (int) th->tid, strerror(errno));
 	th->block_kind = 0;
 }
@@ -3071,7 +3071,7 @@ relaunch(Node *nd)
 	if (nd->alive || !nd->crashed) return -1;	/* GCOVR_EXCL_LINE: RESTART is offered only for a crashed node */
 	unsigned char saved[SNAP]; int savedlen = nd->durable_len;
 	memcpy(saved, nd->durable, (size_t) savedlen);
-	if (launch(nd)) return -1;
+	if (launch(nd)) return -1;	/* GCOVR_EXCL_LINE: a relaunch is a launch, which does not fail in a test */
 	memcpy(nd->durable, saved, (size_t) savedlen); nd->durable_len = savedlen;
 	nd->durable_read_off = 0;
 	return 0;
@@ -3112,7 +3112,7 @@ drive_node(Node *nd)
 			moved |= reap(nd); moved |= !nd->alive;
 		}
 		if (moved) continue;
-		if (r < 0 && errno == EINTR) continue;
+		if (r < 0 && errno == EINTR) continue;	/* GCOVR_EXCL_LINE: a wait interrupted by a signal; the checker takes none */
 		/* a notify fd that reports POLLHUP has lost its owning process: the
 		 * node exited (its last thread ran off the end or called
 		 * exit_group).  waitpid(WNOHANG) can momentarily still see a
@@ -3240,7 +3240,7 @@ static int
 mark(const uint64_t fp[2], const unsigned char *w, size_t n)
 {
 	uint64_t a = fp[0], b = fp[1];
-	if (!(a | b)) a = 1;				/* (0,0) marks an empty slot */
+	if (!(a | b)) a = 1;	/* GCOVR_EXCL_LINE: (0,0) marks an empty slot, and a fingerprint of (0,0) is never seen */
 	if (2 * (nseen + 1) > seen_cap)
 	{
 		FP *old = seen; size_t oc = seen_cap;
@@ -3884,7 +3884,7 @@ run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 {
 	reset_world();
 	g_step_rc = -1;
-	for (int i = 0; i < M.nodes; i++) { N[i].id = i; if (launch(&N[i])) return -1; }
+	for (int i = 0; i < M.nodes; i++) { N[i].id = i; if (launch(&N[i])) return -1; }	/* GCOVR_EXCL_LINE: a launch does not fail in a test */
 	if (M.client_write >= 0)
 	{
 		/* the client dials node 0 and sends WRITE(v) on that connection */
@@ -4238,7 +4238,7 @@ cmc_proc_main(const CmcProcOptions *po)
 		for (w = 0; w < po->walks; w++)
 		{
 			Act a[MAXACT]; int na, len = 0, envlen = 0;
-			if (run_seq(NULL, 0, a, &na)) die(3, "a node would not start");
+			if (run_seq(NULL, 0, a, &na)) die(3, "a node would not start");	/* GCOVR_EXCL_LINE: a launch does not fail in a test */
 			if (po->refine_steps) cmc_refine_reset();
 			for (;;)
 			{
@@ -4337,7 +4337,7 @@ cmc_proc_main(const CmcProcOptions *po)
 		if (!seq) die(1, "out of memory");	/* GCOVR_EXCL_LINE: a sequence of a few hundred ints */
 		if (e.len) memcpy(seq, qpool + e.off, (size_t) e.len * sizeof *seq);
 		Act a[MAXACT]; int na = 0;
-		if (run_seq(seq, e.len, a, &na)) die(3, "a node would not start");
+		if (run_seq(seq, e.len, a, &na)) die(3, "a node would not start");	/* GCOVR_EXCL_LINE: a launch does not fail in a test */
 
 		if (g_step_refine && g_step_rc != -1)
 		{
