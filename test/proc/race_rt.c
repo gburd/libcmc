@@ -476,10 +476,18 @@ atomics(void)
 	ATOMIC_SIZE(16, uint16_t);
 	ATOMIC_SIZE(32, uint32_t);
 	ATOMIC_SIZE(64, uint64_t);
+	ATOMIC_SIZE(128, unsigned __int128);
 	check(ok, "every atomic entry point computes its operation");
+	{
+		static volatile unsigned __int128 w = ~(uint64_t) 0;
+
+		check(__tsan_atomic128_fetch_add(&w, 1, MO_SEQ_CST) == ~(uint64_t) 0 &&
+			  __tsan_atomic128_load(&w, MO_SEQ_CST) == (unsigned __int128) 1 << 64,
+			  "a 16-byte fetch_add carries into the high half");
+	}
 	check(nweak == 0 && nreport == 0, "seq_cst atomics report nothing");
-	/* 14 calls at each of four sizes, the last a load that checks the result */
-	check(natomic == 4 * 14, "each atomic operation is a choice point");
+	/* 14 calls at each of five sizes, the last a load that checks the result */
+	check(natomic == 5 * 14 + 2, "each atomic operation is a choice point");
 	__tsan_atomic_thread_fence(MO_SEQ_CST);
 	__tsan_atomic_signal_fence(MO_RELAXED);
 	check(nweak == 0, "a seq_cst fence is not weak");

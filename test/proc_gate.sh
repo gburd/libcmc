@@ -82,6 +82,7 @@ for f in twothread twothread_join racewake raceemit raceborn durack memrace sync
 	tsan "$f-tsan" "$T/$f.c"
 done
 tsan raceemit-bug-tsan "$T/raceemit.c" -DBUG
+tsan atomic128-tsan "$T/atomic128.c" -mcx16
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -436,6 +437,15 @@ expect "memrace: a locked counter holds"                      0 "No error has be
 expect "memrace: a seq_cst handoff holds"                     0 "No error has been found" --model-file "$OUT/mr-seqcst-tsan.model"
 expect "memrace: a relaxed handoff is a data race"            1 "data race on node 0" --model-file "$OUT/mr-relaxed-tsan.model"
 expect "memrace: a relaxed atomic makes a pass INCOMPLETE"    2 "weaker than seq_cst" --model-file "$OUT/mr-relaxedadd-tsan.model"
+# atomic128: 16-byte atomics (-mcx16) link against the runtime, order a
+# payload when seq_cst, race when relaxed, and compute their operations.
+for m in seqcst relaxed rmw; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nwhole = "node[0].phase < 2 or node[0].value == 7 or node[0].value == 25"\ndone = "eventually node[0].phase == 2"\n' \
+		"$B/proc/atomic128-tsan" "$m" > "$OUT/a128-$m.model"
+done
+expect "atomic128: a seq_cst 16-byte handoff holds"           0 "No error has been found" --model-file "$OUT/a128-seqcst.model"
+expect "atomic128: a relaxed 16-byte handoff is a data race"  1 "data race on node 0" --model-file "$OUT/a128-relaxed.model"
+expect "atomic128: 16-byte fetch_add and compare-exchange"    0 "No error has been found" --model-file "$OUT/a128-rmw.model"
 # two nodes running the racy program: the first report wins
 sed 's/^nodes = 1$/nodes = 2/' "$OUT/mr-unlocked-tsan.model" > "$OUT/mr-unlocked2-tsan.model"
 expect "memrace: two racing nodes, one report"                1 "data race on node" --model-file "$OUT/mr-unlocked2-tsan.model"

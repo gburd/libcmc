@@ -308,6 +308,10 @@ The runtime keeps a vector clock per thread and per synchronisation
 object, with happens-before edges from thread creation and join, the
 lock, condition variable, semaphore, barrier and once calls (pthread
 and C11), and atomics by their memory order.
+Atomics of 1 to 16 bytes are provided; the 16-byte ones, which
+.Fl mcx16
+enables, run on
+.Ic cmpxchg16b .
 It reports two accesses to a byte from different threads, at least one
 a write and not both atomic, that no edge orders: a
 .Em data race ,

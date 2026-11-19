@@ -44,8 +44,7 @@
  * runtime does not model (a pipe, a signal, a raw futex) is missing, so
  * accesses it orders are reported as a race: a false alarm, never a
  * missed race.  pthread_exit is not followed: a thread must return from
- * its start function for its join to carry its writes.  16-byte atomics
- * are not provided, so a program that uses them fails to link.
+ * its start function for its join to carry its writes.
  *
  * The runtime allocates nothing from the program's heap.  Its tables are
  * mapped at fixed addresses at start-up, so the program's own memory
@@ -537,6 +536,135 @@ ATOMICS(8, uint8_t)
 ATOMICS(16, uint16_t)
 ATOMICS(32, uint32_t)
 ATOMICS(64, uint64_t)
+
+/*
+ * 16-byte atomics, which a program built with -mcx16 uses (a pointer and
+ * its generation count, say).  This file is built without -mcx16, where
+ * the __atomic builtins on 16 bytes would call libatomic, which a node
+ * need not link; so every operation is a loop on cmpxchg16b, which the
+ * cx16 target attribute lets the compiler emit.  A load is a
+ * compare-exchange of 0 with 0, which writes nothing visible, as
+ * libatomic's own 16-byte load does on x86-64.
+ */
+#if defined(__x86_64__) && defined(__SIZEOF_INT128__)
+typedef unsigned __int128 u128;
+
+/* noinline: clang drops the target attribute when it inlines the
+ * function, and then calls libatomic after all */
+__attribute__((target("cx16"), noinline)) static u128
+cas128(volatile u128 *a, u128 expect, u128 v)
+{
+	return __sync_val_compare_and_swap(a, expect, v);
+}
+
+/* the operations of the fetch_ entry points, by name */
+static u128 op_add(u128 x, u128 v) { return x + v; }
+static u128 op_sub(u128 x, u128 v) { return x - v; }
+static u128 op_and(u128 x, u128 v) { return x & v; }
+static u128 op_or(u128 x, u128 v) { return x | v; }
+static u128 op_xor(u128 x, u128 v) { return x ^ v; }
+static u128 op_nand(u128 x, u128 v) { return ~(x & v); }
+static u128 op_set(u128 x, u128 v) { (void) x; return v; }
+
+/* replace *a by op(*a, v) atomically; the old value */
+static u128
+rmw128(volatile u128 *a, u128 v, u128 (*op) (u128, u128))
+{
+	u128		old = cas128(a, 0, 0);
+
+	for (;;)
+	{
+		u128		seen = cas128(a, old, op(old, v));
+
+		if (seen == old)
+			return old;
+		old = seen;
+	}
+}
+
+u128		__tsan_atomic128_load(const volatile u128 *a, int mo);
+void		__tsan_atomic128_store(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_exchange(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_fetch_add(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_fetch_sub(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_fetch_and(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_fetch_or(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_fetch_xor(volatile u128 *a, u128 v, int mo);
+u128		__tsan_atomic128_fetch_nand(volatile u128 *a, u128 v, int mo);
+int			__tsan_atomic128_compare_exchange_strong(volatile u128 *a, u128 *c, u128 v, int mo, int fmo);
+int			__tsan_atomic128_compare_exchange_weak(volatile u128 *a, u128 *c, u128 v, int mo, int fmo);
+u128		__tsan_atomic128_compare_exchange_val(volatile u128 *a, u128 c, u128 v, int mo, int fmo);
+
+u128
+__tsan_atomic128_load(const volatile u128 *a, int mo)
+{
+	atomic_pre(a, sizeof(u128), mo, 0, PC());
+	return cas128((volatile u128 *) a, 0, 0);
+}
+
+void
+__tsan_atomic128_store(volatile u128 *a, u128 v, int mo)
+{
+	atomic_pre(a, sizeof(u128), mo, 1, PC());
+	(void) rmw128(a, v, op_set);
+	atomic_post(a, mo, 1);
+}
+
+#define RMW128(name, op) \
+u128 \
+__tsan_atomic128_##name(volatile u128 *a, u128 v, int mo) \
+{ \
+	atomic_pre(a, sizeof(u128), mo, 1, PC()); \
+	u128 r = rmw128(a, v, op); \
+	atomic_post(a, mo, 1); \
+	return r; \
+}
+
+RMW128(exchange, op_set)
+RMW128(fetch_add, op_add)
+RMW128(fetch_sub, op_sub)
+RMW128(fetch_and, op_and)
+RMW128(fetch_or, op_or)
+RMW128(fetch_xor, op_xor)
+RMW128(fetch_nand, op_nand)
+
+int
+__tsan_atomic128_compare_exchange_strong(volatile u128 *a, u128 *c, u128 v, int mo, int fmo)
+{
+	(void) fmo;
+	atomic_pre(a, sizeof(u128), mo, 1, PC());
+	u128		old = cas128(a, *c, v);
+	int			ok = old == *c;
+
+	*c = old;
+	atomic_post(a, mo, ok);
+	return ok;
+}
+
+int
+__tsan_atomic128_compare_exchange_weak(volatile u128 *a, u128 *c, u128 v, int mo, int fmo)
+{
+	(void) fmo;
+	atomic_pre(a, sizeof(u128), mo, 1, PC());
+	u128		old = cas128(a, *c, v);
+	int			ok = old == *c;
+
+	*c = old;
+	atomic_post(a, mo, ok);
+	return ok;
+}
+
+u128
+__tsan_atomic128_compare_exchange_val(volatile u128 *a, u128 c, u128 v, int mo, int fmo)
+{
+	(void) fmo;
+	atomic_pre(a, sizeof(u128), mo, 1, PC());
+	u128		old = cas128(a, c, v);
+
+	atomic_post(a, mo, old == c);
+	return old;
+}
+#endif
 
 void		__tsan_atomic_thread_fence(int mo);
 void		__tsan_atomic_signal_fence(int mo);

@@ -18,6 +18,12 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+The race runtime provides the 16-byte atomics (`__tsan_atomic128_*`)
+that gcc and clang emit for `__int128` atomics under `-mcx16`.  A
+program that used them failed to link against `libcmc-race.a`.  Gate:
+proc_gate rows atomic128 (a seq_cst handoff holds, a relaxed one is a
+race, fetch_add and compare-exchange compute) and race_rt.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a
