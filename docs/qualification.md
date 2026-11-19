@@ -120,7 +120,7 @@ in the kernel, untouched.
 | the order of nodes' steps between quiescent points | exact | at launch, after a RESTART, and after a call that wakes a parked node, which node runs first is a search choice (STEP); within one step a node's calls that reach no other node are not interleaved with another's | proc_gate dialexit (both outcomes of a dial to a node that exits), badptr and dialexit 300 runs each |
 | the state hook (fd 3, fd 193) | exact | a record of up to 64 bytes; a longer or unfinished record is exit 3 | proc_gate longrec, partrec |
 | deduplication | exact | the full world encoding is compared on a fingerprint match; a connection is named by its slot, not its peer | proc_gate fingerprint, fpfuzz, twoconn |
-| crash and restart | approximate | a crash keeps the fd-193 record; a restart hands it back on the first read of fd 193 | proc_gate durlog, restart |
+| crash and restart | approximate | a crash keeps the fd-193 record; a restart hands it back on the first read of fd 193; a crash can fall after any write, send, close or durable write of a single-threaded node | proc_gate durlog, restart, durack-single, ackfirst |
 | `eventually P` | exact for an exhaustive search | unmet after a full search is a violation; a bounded or simulated run is INCOMPLETE | proc_gate twothread reach |
 | a run that never progressed | refused | INCOMPLETE without an `eventually` property | proc_gate noprogress |
 | a fault signal (`abort`, a failed `assert`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`) | exact at the default disposition | the node is killed and the run ends with a violation (exit 1) and its trace; a handler is exit 3 | proc_gate fault |

@@ -16,6 +16,10 @@
  * Canonical state: fd 3 holds [0, 0] (two bytes) while the node runs;
  * fd 193 holds [v] (one byte), which is all a crashed node reports.
  *
+ * With -DSINGLE the main thread makes the two calls itself: a crash can
+ * fall between any two calls of a single-threaded node too, not only
+ * between its steps (crash_point() in src/cmc_proc.c).
+ *
  *   cc -O1 -no-pie -o durack test/proc/durack.c -lpthread
  */
 #define _GNU_SOURCE
@@ -63,7 +67,12 @@ main(void)
 	if (read(conn, req, sizeof req) != 2 || req[0] != 'W')
 		return 1;
 	val = req[1];
+#ifdef SINGLE
+	(void) t;
+	worker(NULL);
+#else
 	pthread_create(&t, NULL, worker, NULL);
 	pthread_join(t, NULL);
+#endif
 	return 0;
 }

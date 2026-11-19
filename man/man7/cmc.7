@@ -401,6 +401,17 @@ This is how a server that waits for a request, or for a peer to connect,
 detects that it has waited long enough -- an election timeout.
 .It CRASH
 Crash budget is left: a live node dies.
+A crash can fall between any two calls that reach outside the process,
+not only where a node waits.
+While crash budget is left, a single-threaded node stops right after
+each write or send on a checker-owned descriptor, each close of one, and
+each durable write to descriptor 193; the search may then crash it there
+or run it on
+.Pq Sy RUN .
+No invariant is checked at such a point, since a program may report its
+state only after its effects; the crash that follows is checked.
+A write to the volatile state hook is not such a point, since a crash
+discards it.
 .It DROP
 Drop budget is left: a connection carrying bytes is reset.
 Its queues are discarded and each end's next call fails with

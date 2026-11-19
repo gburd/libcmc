@@ -5,6 +5,19 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A crash can fall between any two system calls of a single-threaded node
+that reach outside the process, not only between its steps.  While
+crash budget is left, a node stops after each write or send on a
+checker-owned fd, each close of one, and each durable write, and the
+search may crash it there.  Before, a node that acked a client and then
+wrote its durable record, with no blocking call between, passed.  This
+changes verdicts: a fixture whose backup acks from memory now fails
+(guarded with `--crashes 1`), and state counts with crashes grow (the
+guide's server: 15 to 26 distinct states).  No invariant is checked at
+such a mid-step point, since a program reports its state after its
+effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
+row, and the guide's trace in docs_gate.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

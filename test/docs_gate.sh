@@ -83,13 +83,13 @@ if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
 			[ "$rc" = "$want" ] && grep -q -- "$needle" "$OUT/kv.txt" ||
 				{ echo "docs: guide: $d (exit $rc, wanted $want and \"$needle\"; see $OUT/kv.txt)"; cat "$OUT/kv.txt"; fail=1; }
 		}
-		kv "the correct server does not pass" 0 "15 distinct states found"
-		kv "the bug is not caught as the guide shows" 1 "3. crash n0" --binary "$KB/kvserver-bug"
+		kv "the correct server does not pass" 0 "26 distinct states found"
+		kv "the bug is not caught as the guide shows" 1 "4. crash n0" --binary "$KB/kvserver-bug"
 		kv "the bug shows without a crash, which the guide says it does not" 0 "No error has been found" --binary "$KB/kvserver-bug" --crashes 0
 		kv "simulation does not find the bug" 1 "no_lost_ack is violated" --binary "$KB/kvserver-bug" --simulate --seed 1 --walks 200
 		printf '[target]\nbinary = kvserver\nnodes = 2\n[environment]\nclient_write = 7\ncrashes = 1\n[invariants]\nnever_acked = "all r in replies : 0 == 1"\n' > "$KB/never.model"
 		"$B/cmc" --model-file "$KB/never.model" > "$OUT/kv-never.txt" 2>&1
-		[ $? = 1 ] && grep -q "5. deliver n1->n0" "$OUT/kv-never.txt" ||
+		[ $? = 1 ] && grep -q "8. deliver n1->n0" "$OUT/kv-never.txt" ||
 			{ echo "docs: guide: no acknowledgement is reachable, so no_lost_ack would pass vacuously"; fail=1; }
 	else
 		echo "docs: kvserver.c does not build"; fail=1

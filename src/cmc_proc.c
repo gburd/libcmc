@@ -1755,6 +1755,30 @@ visible(long nr, const __u64 *a)
 	}
 }
 
+/* Is call nr of a node with one thread a point where a crash may fall?
+ * A machine can lose power between any two system calls, and what other
+ * machines or the disk see is decided per call, so while a crash is in
+ * the budget each call with an effect outside the process ends the step:
+ * a write or send on a checker-owned fd (bytes reach a peer or the
+ * client), a close of one (a FIN or an RST), and a durable write (fd
+ * 193).  Its answer is held (BK_DONE), and the search may RUN the node
+ * on or CRASH it first (midstep_node()).  Calls with no outside effect
+ * stay inside the step, and so does a write to the volatile state hook,
+ * which a crash discards.  A node with more
+ * than one thread holds every visible call already (visible()). */
+static int
+crash_point(const Node *nd, long nr, const __u64 *a)
+{
+	if (bud.crashes <= 0 || node_multi(nd)) return 0;
+	int fd = (int) a[0];
+	switch (nr)
+	{
+		case SYS_write: return fd >= 500 || fd == DURABLE_FD;
+		case SYS_sendto: case SYS_close: return fd >= 500;
+		default: return 0;
+	}
+}
+
 /* Is call nr, in a node with more than one thread, a call on a kernel fd
  * the model does not answer?  Two threads that share a pipe or a file
  * interleave there on Linux, and its contents and offset are kernel
@@ -1918,7 +1942,7 @@ try_pending_for(Node *nd)
 	if (node_multi(nd) && kernel_fd_call(nr, a))
 		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %ld); only checker-owned fds and the state hook are modelled between threads", nd->id, (int) a[0], nr);
 	/* decided before the call is served, which may add or end a thread */
-	int hold = node_multi(nd) && visible(nr, a);
+	int hold = (node_multi(nd) && visible(nr, a)) || crash_point(nd, nr, a);
 	if (hold || nr == SYS_clone || nr == SYS_clone3) th->sp = stack_pointer(nd, th);
 	cap_begin(th);
 	int parked = serve(nd, th);
@@ -3139,6 +3163,21 @@ drive_node(Node *nd)
  * so its state record is not one it reports between steps: the
  * invariants, the refinement checks and the seen set wait for the world
  * to settle, and the STEPs to it are part of the action that led there. */
+/* The single-threaded node held at a crash point (crash_point()), or -1.
+ * Such a world is mid-step: the program's state hook may lag the call
+ * just made (a program reports its state after its effects), so no
+ * invariant is checked there, and its only actions are to run the node
+ * on and to crash it. */
+static int
+midstep_node(void)
+{
+	for (int i = 0; i < M.nodes; i++)
+		if (N[i].alive && !node_multi(&N[i]))
+			for (int t = 0; t < N[i].nth; t++)
+				if (N[i].th[t].inuse && N[i].th[t].block_kind == BK_DONE) return i;
+	return -1;
+}
+
 static int
 world_settled(void)
 {
@@ -3607,6 +3646,17 @@ enum_actions(Act *out)
 	for (int d = 0; d < M.nodes; d++)
 		if (node_has_running(&N[d])) ADD(A_STEP, d, -1, -1);
 	if (c > 0) return c;
+	/* a node held mid-step at a crash point: it runs on, or crashes */
+	{
+		int d = midstep_node();
+		if (d >= 0)
+		{
+			for (int ti = 0; ti < N[d].nth; ti++)
+				if (N[d].th[ti].inuse && N[d].th[ti].block_kind == BK_DONE) ADD(A_RUN, d, -1, ti);
+			if (bud.crashes > 0) ADD(A_CRASH, d, -1, -1);
+			return c;
+		}
+	}
 	for (int d = 0; d < M.nodes; d++)
 	{
 		Node *nd = &N[d];
@@ -3897,14 +3947,14 @@ run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 	/* the refinement steps are checked at quiescent worlds only; the
 	 * nodes' STEPs between them are part of one step of the spec */
 	if (g_step_refine) cmc_refine_reset();
-	if (g_step_refine && world_settled()) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
+	if (g_step_refine && world_settled() && midstep_node() < 0) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	for (int s = 0; s < seqlen; s++)
 	{
 		Act a[MAXACT]; int na = enum_actions(a);
 		if (seq[s] < 0 || seq[s] >= na)
 			die(1, "replay diverged at step %d: action %d of %d (is the target deterministic?)", s, seq[s], na);
 		apply(&a[seq[s]]);
-		if (g_step_refine && world_settled()) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
+		if (g_step_refine && world_settled() && midstep_node() < 0) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	}
 	*nact = enum_actions(acts);
 	return 0;
@@ -4258,6 +4308,7 @@ cmc_proc_main(const CmcProcOptions *po)
 					continue;
 				}
 				int which = -1; states++;
+				int mid = midstep_node() >= 0;
 				if (g_fault_node >= 0 || g_race_node >= 0)
 				{
 					kill_all();
@@ -4267,7 +4318,7 @@ cmc_proc_main(const CmcProcOptions *po)
 					free(seq);
 					return 1;
 				}
-				if (!check_invariants(&which))
+				if (!mid && !check_invariants(&which))
 				{
 					if (which == -2) { kill_all(); return 3; }
 					kill_all();
@@ -4276,7 +4327,7 @@ cmc_proc_main(const CmcProcOptions *po)
 					free(seq);
 					return 1;
 				}
-				if (po->refine)
+				if (po->refine && !mid)
 				{
 					const char *inm = NULL; char rerr[256];
 					int rr = refine_check_state(po->refine_steps, &inm, rerr, sizeof rerr);
@@ -4368,9 +4419,9 @@ cmc_proc_main(const CmcProcOptions *po)
 			continue;
 		}
 		replays++;
-		int which = -1; int ok = check_invariants(&which);
+		int which = -1; int ok = midstep_node() >= 0 ? 1 : check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
-		if (ok && po->refine && !po->refine_steps)
+		if (ok && po->refine && !po->refine_steps && midstep_node() < 0)
 		{
 			/* C1: does this reached state refine the abstract model? */
 			const char *inm = NULL; char rerr[256];

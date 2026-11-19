@@ -62,6 +62,9 @@ $CC -O1 -no-pie -w -o "$B/proc/racepipe" "$T/racepipe.c" -lpthread || { echo "pr
 for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files syscorner edges; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
+$CC -O1 -no-pie -w -DSINGLE -o "$B/proc/durack-single" "$T/durack.c" || { echo "proc_gate: durack.c -DSINGLE does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/ackfirst" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/ackfirst-bug" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -DC11 -DBUG -o "$B/proc/syncpoint-c11-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DC11 -DBUG does not build"; fail=1; }
 # A multi-threaded node passes only when built with the race runtime:
@@ -338,6 +341,13 @@ expect "raceborn: sending before the clone holds"         0 "No error has been f
 # between it and the worker's next call (the value durable, its ack not
 # sent).  A hook write held before it ran made the two one step.
 expect "durack: a crash between a durable write and its ack" 0 "No error has been found" $(run durack durack-tsan)
+# A crash can fall between any two calls with an outside effect, in a
+# single-threaded node too: durack-single makes both calls in one step,
+# and ackfirst-bug acks before its durable write with no blocking call
+# between them.
+expect "durack-single: a crash between two calls of one step" 0 "No error has been found" $(run durack durack-single)
+expect "ackfirst: durable before the ack holds"            0 "No error has been found" $(run ackfirst ackfirst)
+expect "ackfirst: an ack before the durable write is lost" 1 "acked_durable is violated" $(run ackfirst ackfirst-bug)
 # threadpos: worlds with a multi-threaded node are never merged, since a
 # thread's record cannot tell apart two iterations of one loop (loop), a
 # thread born on the stack of one already joined (seq), or memory that
@@ -765,9 +775,12 @@ expect_by 120 "simulate: C1 catches the paxos bug" 1 "does not refine" $(runx "$
 
 # faults the fixtures' own models leave out: their invariants still hold
 # with a drop, a crash and a timeout added from the command line
-for f in crossrpc lease fifo quorum guarded; do
+for f in crossrpc lease fifo quorum; do
 	expect_by 120 "$f: holds with a drop, a crash and a timeout added" 0 "No error has been found" $(run "$f" "$f") --drops 1 --crashes 1 --timeouts 1 --max-states 3000
 done
+# guarded's backup keeps the value only in memory, so a crash right after
+# it acks (between two of its calls, not between steps) loses an acked value
+expect_by 120 "guarded: a crash between the backup's ack and its exit loses the value" 1 "agree_on_ack is violated" $(run guarded guarded) --drops 1 --crashes 1 --timeouts 1 --max-states 3000
 # what is not a node binary is refused before anything starts
 cp /etc/hostname "$OUT/notelf" 2> /dev/null || printf 'x' > "$OUT/notelf"
 expect "a file that is no ELF is refused" 3 "is not an ELF executable" $(run repl repl) --binary "$OUT/notelf"

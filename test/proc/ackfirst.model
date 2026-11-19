@@ -1,0 +1,12 @@
+# A model file for test/proc/ackfirst.c: an acked value must be durable,
+# even when the node crashes between two of its calls.
+[target]
+nodes = 1
+[environment]
+client_write = 5
+crashes = 1
+[invariants]
+# node[0][0] is the value a running node reports, or its durable record
+# once crashed
+acked_durable = "all r in replies : node[0][0] == r.val"
+acks = "eventually some r in replies : r.val == 5"

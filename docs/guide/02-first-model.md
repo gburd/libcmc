@@ -71,10 +71,10 @@ build/cmc --model-file kvserver.model
 
 ```
 cmc: model file kvserver.model, binary kvserver, 2 nodes, breadth-first search
-  environment: client_write 7, timeouts 0, crashes 1, drops 0
+  environment: client_write 7, timeouts 0, crashes 1, drops 0, restarts 0
 Model checking completed. No error has been found.
-22 states generated, 15 distinct states found, 0 states left on queue.
-The depth of the complete state graph search is 6.
+34 states generated, 26 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 11.
 ```
 
 libcmc ran both nodes as real processes, tried every order of the
@@ -105,19 +105,23 @@ build/cmc --model-file kvserver.model --binary ./kvserver-bug
 
 ```
 Error: Invariant no_lost_ack is violated.
-Error: The behavior up to this point is (3 actions):
-       step n0
+Error: The behavior up to this point is (4 actions):
+       step n1
     1. accept client->n0
     2. deliver client->n0
-    3. crash n0
+    3. run n0 t0
+    4. crash n0
   node states: node[0]=() node[1]=()
   replies: (n0,7)
 ```
 
-Three events: the primary accepts the client's connection, reads the
-write and acknowledges it, then crashes before the value is durable
-anywhere.  The unnumbered `step n0` says the primary ran first when both
-nodes started; which node goes first is a choice the search makes too.  The client holds an acknowledgement for 7, and no node has
+Four events: the primary accepts the client's connection and reads the
+write, runs on to its acknowledgement, then crashes before the value is
+durable anywhere.  A crash can fall between any two system calls that
+reach outside the process, so the search stops the primary right after
+its send (`run n0 t0` carries it that far) and tries a crash there.  The
+unnumbered `step n1` says the backup ran first when both nodes started;
+which node goes first is a choice the search makes too.  The client holds an acknowledgement for 7, and no node has
 it.  Breadth-first search finds the shortest such sequence; the exit
 status is 1.
 
