@@ -27,7 +27,8 @@ jobs:
   check:
     name: make check (${{ matrix.cc }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # proc_gate's rows for 2.1 bring make check to about 14 minutes
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
