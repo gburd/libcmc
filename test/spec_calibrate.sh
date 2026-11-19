@@ -29,7 +29,19 @@ test/spec|guard.cml||guard.tla|guard_safe.cfg|PASS
 test/spec|guard.cml|--define BUG|guard.tla|guard_bug.cfg|VIOLATION
 examples/spec|paxos.cml||paxos.tla|paxos_safe.cfg|PASS
 examples/spec|paxos.cml|--define BUG|paxos.tla|paxos_bug.cfg|VIOLATION
+examples/spec|fpaxos.cml||fpaxos.tla|fpaxos_safe.cfg|PASS
+examples/spec|fpaxos.cml|--define BUG|fpaxos.tla|fpaxos_bug.cfg|VIOLATION
+examples/spec|caspaxos.cml||caspaxos.tla|caspaxos_safe.cfg|PASS
+examples/spec|caspaxos.cml|--define BUG|caspaxos.tla|caspaxos_bug.cfg|VIOLATION
+examples/spec|zab.cml||zab.tla|zab_safe.cfg|PASS
+examples/spec|zab.cml|--define BUG|zab.tla|zab_bug.cfg|VIOLATION
+examples/spec|fastpaxos.cml||fastpaxos.tla|fastpaxos_view.cfg|PASS
+examples/spec|fastpaxos.cml|--define BUG|fastpaxos.tla|fastpaxos_bug.cfg|VIOLATION
 "
+# fastpaxos.tla keeps each round 2 promise's sender, which the .cml
+# counts away; fastpaxos_view.cfg checks it under VIEW Abstract, the
+# .cml's state, so the distinct-state counts are comparable (without
+# the VIEW, TLC finds 2112 states at the same depth, 12).
 
 num() { grep -oE "$2" "$1" | grep -oE '[0-9]+' | head -1; }
 printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
@@ -41,8 +53,10 @@ printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
 
 	bash "$TLC" "$HERE/$dir/$tla" "$HERE/$dir/$cfg" -workers 1 > "$to" 2>&1
 
-	c_distinct=$(num "$co" '[0-9]+ distinct states found')
-	t_distinct=$(num "$to" '[0-9]+ distinct states found')
+	# the summary line: TLC's progress lines print "33,335 distinct
+	# states found" with a thousands separator
+	c_distinct=$(num "$co" 'generated, [0-9]+ distinct states found')
+	t_distinct=$(num "$to" 'generated, [0-9]+ distinct states found')
 	c_depth=$(num "$co" 'complete state graph search is [0-9]+')
 	t_depth=$(num "$to" 'complete state graph search is [0-9]+')
 	c_viol=$(grep -c 'is violated' "$co")

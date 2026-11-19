@@ -18,6 +18,16 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+Hand-written TLA+ twins for `fpaxos.cml`, `caspaxos.cml`, `zab.cml` and
+`fastpaxos.cml` (examples/spec/*.tla, in the style of `paxos.tla`), each
+cited to its paper.  Single-worker TLC gives the same distinct-state
+count and depth as `cmc --spec`, and the same shortest BUG trace:
+fpaxos 36,756 states, depth 20, trace 12; caspaxos 3,280, 17, 12; zab
+27,913, 26, 13; fastpaxos 1,976, 12, 11.  The Fast Paxos twin keeps the
+sender of each promise, which the `.cml` only counts, so its count is
+taken under a VIEW that forgets the sender (2,112 states without it).
+Gate: `make check-spec-calibration`.
+
 In `cmc --spec`, `and` and `or` short-circuit left to right as in TLC,
 so a guard such as `x > 0 and y / x == 2` or `i == N or f[i] == 0`
 protects its partial operation.  Before, both operands were evaluated

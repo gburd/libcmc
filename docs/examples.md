@@ -58,13 +58,16 @@ checked three ways that agree -- `cmc --spec`, TLC
   and promises of `paxos.cml` with a phase 1 quorum `Q1` and a phase 2
   quorum `Q2`.  Agreement holds at `A = 4`, `Q1 = 3`, `Q2 = 2`, where
   two phase 2 quorums can be disjoint but `Q1 + Q2 > A`.  Reference:
-  Howard, Malkhi, Spiegelman, OPODIS 2016.
+  Howard, Malkhi, Spiegelman, OPODIS 2016; the twin `fpaxos.tla` gives
+  TLC the same 36,756 distinct states.
 - `fastpaxos.cml` -- Fast Paxos, extending `consensus`: a fast round,
   then a classic round whose coordinator reads a classic quorum of
   promises and applies the paper's rule for a collision.  Agreement
   holds when the Quorum Requirement `Qc + 2*Qf > 2*N` does (here N = 3,
   Qc = 2, Qf = 3), and the BUG build's `Qf = 2` breaks it.  Reference:
-  Lamport, Fast Paxos, 2006.
+  Lamport, Fast Paxos, 2006.  The twin `fastpaxos.tla` keeps who sent
+  each promise, which the `.cml` only counts; under the VIEW that
+  forgets the sender TLC finds the same 1,976 distinct states.
 - `raft.cml` -- Raft leader election; Election Safety (at most one
   leader per term).  Reference: Ongaro's `raft.tla`.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,
@@ -73,14 +76,17 @@ checked three ways that agree -- `cmc --spec`, TLC
   each applying a change function to the highest-ballot state a quorum
   of promises reports.  Its invariant is the paper's: a confirmed state
   descends from every earlier confirmed state, tracked by a ghost parent
-  per round.  Two rounds.  Reference: Rystsov, 2018.
+  per round.  Two rounds.  Reference: Rystsov, 2018; the twin
+  `caspaxos.tla` gives TLC the same 3,280 distinct states.
 - `zab.cml` -- Zab with epochs: discovery takes a new leader's initial
   history from the most up-to-date member of a quorum, followers
   synchronise to it, and the leader broadcasts and commits a prefix.
   Of two epochs' committed prefixes one extends the other.  Three
   servers, two epochs, histories of at most two transactions, no
   crashes.  Reference: Junqueira, Reed, Serafini, DSN 2011, and
-  ZooKeeper's `Zab.tla`.
+  ZooKeeper's `Zab.tla`.  The twin `zab.tla` holds histories as
+  sequences and orders servers by (current epoch, last zxid), as the
+  paper does, and gives TLC the same 27,913 distinct states.
 - `twophase.cml` -- two-phase commit, the canonical non-consensus
   example; Consistency (atomicity): a committed and an aborted resource
   manager never coexist.  Reference: Lamport's `TwoPhase.tla`.
