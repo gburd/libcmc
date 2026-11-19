@@ -5,6 +5,19 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 2.1.0 (2026-11-19)
+
+Closes the four gaps 2.0.0 documented in the process engine (a
+`sendmsg` on a kernel fd, the file system, memory interleavings between
+threads, and the untested tree bound) and adds a coverage gate holding
+function and branch coverage of every source file at 90% or more.
+Writing the tests found more than twenty other places where cmc
+checked less than it was asked or answered unlike Linux; each is fixed
+with a test that fails on 2.0.0.  As in 2.0.0, results can change for
+the same input: a multi-threaded node built without the race runtime,
+which could pass, is now INCOMPLETE, and several constructs that ran
+unseen are refused.
+
 Process engine (`cmc --model-file`):
 
 - Every lock acquisition is a choice point between threads, including

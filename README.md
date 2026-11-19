@@ -38,7 +38,9 @@ cover.  Output follows TLC's wording.
 three engines and gates that could report success after a tool failed.
 2.0.0 fixes each one found, with a test that fails on 1.3.0 (see the
 [soundness remediation plan](docs/plans/soundness-remediation.md) and
-[CHANGELOG.md](CHANGELOG.md)).  A pass covers only the instance and the
+[CHANGELOG.md](CHANGELOG.md)); 2.1.0 closes the gaps 2.0.0 documented
+and holds every source file to 90% function and branch coverage (see
+the [2.1 plan](docs/plans/2.1-boundaries.md)).  A pass covers only the instance and the
 budgets searched, and only the behaviour
 [docs/qualification.md](docs/qualification.md) lists as modelled; a
 construct outside it is refused, not passed.  Use cmc as one input
@@ -100,16 +102,18 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 2.0.0.  `cmc --model-file`
+Release 2.1.0.  `cmc --model-file`
 checks the shipped binary as it runs, under seccomp, with the network,
 timeouts, crashes and connection resets as search decisions.  Blocking
-sockets, `poll`/`ppoll`/`epoll`, `fcntl` for `O_NONBLOCK`, `eventfd`,
-threads and node restart are intercepted, each with the limits listed in
-cmc(7) and the remediation plan.  The order of a multi-threaded node's
-system calls on checker-owned fds, futexes and the state hook is a
-search choice, and such a node may not share pipes or files between its
-threads; interleavings of memory accesses between those calls are not
-explored.  The worked examples are small
+sockets, `poll`/`ppoll`/`epoll`, `fcntl`, `eventfd`, threads and node
+restart are intercepted, each with the limits listed in cmc(7) and
+docs/qualification.md.  The order of nodes and of a multi-threaded
+node's system calls and lock acquisitions is a search choice; memory
+accesses between them are checked for data races by the race runtime
+(`libcmc-race.a`, linked into a node built with `-fsanitize=thread`),
+and without it a multi-threaded node cannot pass.  The file system is
+read-only to a node, and a node's channels to other processes are
+refused.  The worked examples are small
 safety demonstrations, not complete models of the protocols they are
 named after.
 Process mode replays every state from a fresh launch, so the rate scales
