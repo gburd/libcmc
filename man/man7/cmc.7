@@ -343,13 +343,21 @@ is covered: the search explores every order of its synchronisation
 operations and system calls, and every interleaving of its accesses is
 equivalent to one of those.
 .Pp
-What the runtime does not see: code not compiled with the
-instrumentation (other libraries, the C library itself); with gcc,
+The runtime defines
 .Fn memcpy ,
-.Fn memset
-and
 .Fn memmove
-calls, which stay plain library calls (clang reports them).
+and
+.Fn memset ,
+and their fortified forms
+.Fn __memcpy_chk ,
+.Fn __memmove_chk
+and
+.Fn __memset_chk ,
+in the executable, so each such call records the bytes it reads and
+writes, whichever form the compiler left and from whichever library.
+.Pp
+What the runtime does not see: other accesses by code not compiled
+with the instrumentation (other libraries, the C library itself).
 A synchronisation edge the runtime does not model (a pipe, a signal, a
 raw
 .Fn futex )

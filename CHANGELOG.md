@@ -34,6 +34,19 @@ now loads libgcc_s at `__tsan_init` and the join takes the thread's
 final clock.  Gate: proc_gate rows threadexit (exit, thrd, nested, and
 a read before the join that is still a race).
 
+The race runtime sees `memcpy`, `memmove` and `memset` called from
+instrumented code.  gcc leaves them as calls to the C library, and with
+`_FORTIFY_SOURCE` (on by default in many distributions' compilers)
+both gcc and clang call `__memcpy_chk` and its siblings; the runtime
+saw only clang's unfortified `__tsan_memcpy`.  An unlocked `memcpy` into
+a buffer another thread read passed with either compiler.  The runtime
+now defines the plain and fortified forms in the executable, records
+the bytes each reads and writes, and copies with the C library's
+function.  Being in the executable, they also serve calls from
+uninstrumented libraries, which now count as accesses.  Gate: proc_gate
+rows memcopy and memcopy-chk (memcpy, memset and memmove race
+unlocked, a locked memcpy holds) and race_rt.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

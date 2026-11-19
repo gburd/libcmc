@@ -84,6 +84,8 @@ done
 tsan raceemit-bug-tsan "$T/raceemit.c" -DBUG
 tsan atomic128-tsan "$T/atomic128.c" -mcx16
 tsan threadexit-tsan "$T/threadexit.c"
+tsan memcopy-tsan "$T/memcopy.c"
+tsan memcopy-chk-tsan "$T/memcopy.c" -DCHK
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -460,6 +462,21 @@ expect "threadexit: pthread_exit publishes to the join"        0 "No error has b
 expect "threadexit: thrd_exit publishes to thrd_join"          0 "No error has been found" --model-file "$OUT/te-thrd.model"
 expect "threadexit: pthread_exit from a nested call"           0 "No error has been found" --model-file "$OUT/te-nested.model"
 expect "threadexit: a read before the join is a data race"     1 "data race on node 0" --model-file "$OUT/te-early.model"
+# memcopy: a memcpy, memset or memmove into a buffer another thread reads
+# unlocked is a data race, whether the compiler left a plain call (gcc),
+# a __tsan_ call (clang) or a fortified __*_chk call (both, under
+# _FORTIFY_SOURCE); under a mutex it holds.  On 2.1.0 every plain and
+# fortified form passed.
+for v in "" -chk; do
+	for m in cpy set move cpylock; do
+		printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nsane = "node[0].phase < 2 or node[0].value == 1"\ndone = "eventually node[0].phase == 2"\n' \
+			"$B/proc/memcopy$v-tsan" "$m" > "$OUT/mc-$m$v.model"
+	done
+	expect "memcopy$v: an unlocked memcpy is a data race"  1 "data race on node 0" --model-file "$OUT/mc-cpy$v.model"
+	expect "memcopy$v: an unlocked memset is a data race"  1 "data race on node 0" --model-file "$OUT/mc-set$v.model"
+	expect "memcopy$v: an unlocked memmove is a data race" 1 "data race on node 0" --model-file "$OUT/mc-move$v.model"
+	expect "memcopy$v: a memcpy under the mutex holds"     0 "No error has been found" --model-file "$OUT/mc-cpylock$v.model"
+done
 # two nodes running the racy program: the first report wins
 sed 's/^nodes = 1$/nodes = 2/' "$OUT/mr-unlocked-tsan.model" > "$OUT/mr-unlocked2-tsan.model"
 expect "memrace: two racing nodes, one report"                1 "data race on node" --model-file "$OUT/mr-unlocked2-tsan.model"

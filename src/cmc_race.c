@@ -38,9 +38,8 @@
  * returns at once, so the same binary runs as an ordinary program.
  *
  * Limits.  Code not compiled with the instrumentation (other libraries,
- * the C library) is not checked.  With gcc, memcpy, memset and memmove
- * calls are plain library calls and are not checked (clang reports them
- * through __tsan_memcpy and friends).  A synchronisation edge the
+ * the C library) is not checked, apart from their calls to memcpy,
+ * memset and memmove, which this file defines.  A synchronisation edge the
  * runtime does not model (a pipe, a signal, a raw futex) is missing, so
  * accesses it orders are reported as a race: a false alarm, never a
  * missed race.
@@ -53,6 +52,9 @@
  * The functions below have the instrumentation's names and prototypes,
  * so they are declared here rather than in a header.
  */
+/* this file defines memcpy and its fortified forms, which the C
+ * library's fortify macros would otherwise redefine */
+#undef _FORTIFY_SOURCE
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <pthread.h>
@@ -134,11 +136,18 @@ map_table(void *at, size_t bytes)
 	return p == at ? p : NULL;
 }
 
+static void mem_lookup(void);
+static void *copy_bytes(void *d, const void *s, size_t n);
+static void *set_bytes(void *d, int c, size_t n);
+static int	mem_ready;
+
 void		__tsan_init(void);
 
 void
 __tsan_init(void)
 {
+	if (!mem_ready)
+		mem_lookup();
 	if (active || getenv("CMC_STATE_FD") == NULL)
 		return;
 	cells = map_table(CELL_BASE, CELLS * sizeof(Cell));
@@ -302,7 +311,7 @@ access_byte(int t, uintptr_t a, int is_write, int is_atomic, uintptr_t pc)
 				race(pc, c->rpc[u], a);
 				return;
 			}
-		memset(c->rclk, 0, sizeof c->rclk);
+		set_bytes(c->rclk, 0, sizeof c->rclk);
 		c->ratomic = 0;
 		c->wtid = (uint8_t) t;
 		c->wclk = tvc[t][t];
@@ -355,9 +364,6 @@ void		__tsan_func_entry(void *pc);
 void		__tsan_func_exit(void);
 void		__tsan_vptr_read(void **p);
 void		__tsan_vptr_update(void **p, void *v);
-void	   *__tsan_memcpy(void *d, const void *s, unsigned long n);
-void	   *__tsan_memmove(void *d, const void *s, unsigned long n);
-void	   *__tsan_memset(void *d, int c, unsigned long n);
 
 void
 __tsan_read_range(void *p, unsigned long n)
@@ -395,37 +401,161 @@ __tsan_vptr_update(void **p, void *v)
 	access_range(p, sizeof *p, 1, 0, PC());
 }
 
+/*
+ * memcpy, memmove and memset.  clang's instrumentation calls the
+ * __tsan_ forms; gcc's leaves plain calls to memcpy, memmove and memset;
+ * and with _FORTIFY_SOURCE both compilers call __memcpy_chk and its
+ * siblings.  This file defines all of them.  A definition in the
+ * executable comes first in symbol lookup, so it serves every shared
+ * library's calls as well (the C library's own calls inside itself stay
+ * internal), and each records the bytes it reads and writes, then copies.
+ *
+ * The copy is the C library's memmove or memset once __tsan_init has
+ * looked them up, and a byte loop before that (a library's constructor may copy
+ * before the program's run).  The loops are volatile, so no compiler
+ * turns one back into a call to the function it is in.  A call made
+ * while this thread is already inside the runtime (the dynamic linker's,
+ * or the preload's allocator reached from dlsym) only copies.  The
+ * runtime's own copies call copy_bytes and set_bytes, never the names
+ * defined here, so it never records itself or recurses.
+ */
+static void *(*libc_memmove) (void *, const void *, size_t);
+static void *(*libc_memset) (void *, int, size_t);
+static _Thread_local int in_runtime;
+
+static void
+mem_lookup(void)
+{
+	mem_ready = 1;
+	in_runtime++;
+	*(void **) &libc_memmove = dlsym(RTLD_NEXT, "memmove");
+	*(void **) &libc_memset = dlsym(RTLD_NEXT, "memset");
+	in_runtime--;
+}
+
+static void *
+copy_bytes(void *d, const void *s, size_t n)
+{
+	if (libc_memmove != NULL)
+		return libc_memmove(d, s, n);
+	if ((uintptr_t) d < (uintptr_t) s)
+		for (size_t i = 0; i < n; i++)
+			((volatile unsigned char *) d)[i] = ((const unsigned char *) s)[i];
+	else
+		for (size_t i = n; i > 0; i--)
+			((volatile unsigned char *) d)[i - 1] = ((const unsigned char *) s)[i - 1];
+	return d;
+}
+
+static void *
+set_bytes(void *d, int c, size_t n)
+{
+	if (libc_memset != NULL)
+		return libc_memset(d, c, n);
+	for (size_t i = 0; i < n; i++)
+		((volatile unsigned char *) d)[i] = (unsigned char) c;
+	return d;
+}
+
+/* a copy of n bytes from s to d, made by the code at pc */
+static void *
+mem_copy(void *d, const void *s, size_t n, uintptr_t pc)
+{
+	if (active && !in_runtime)
+	{
+		in_runtime++;
+		access_range(s, n, 0, 0, pc);
+		access_range(d, n, 1, 0, pc);
+		in_runtime--;
+	}
+	return copy_bytes(d, s, n);
+}
+
+static void *
+mem_set(void *d, int c, size_t n, uintptr_t pc)
+{
+	if (active && !in_runtime)
+	{
+		in_runtime++;
+		access_range(d, n, 1, 0, pc);
+		in_runtime--;
+	}
+	return set_bytes(d, c, n);
+}
+
+/* the fortified forms' check: a copy longer than its destination ends
+ * the program as the C library's own check does */
+extern void __chk_fail(void) __attribute__((noreturn));
+
+static void
+chk(size_t n, size_t room)
+{
+	if (n > room)
+		__chk_fail();
+}
+
+void	   *__tsan_memcpy(void *d, const void *s, unsigned long n);
+void	   *__tsan_memmove(void *d, const void *s, unsigned long n);
+void	   *__tsan_memset(void *d, int c, unsigned long n);
+void	   *__memcpy_chk(void *d, const void *s, size_t n, size_t room);
+void	   *__memmove_chk(void *d, const void *s, size_t n, size_t room);
+void	   *__memset_chk(void *d, int c, size_t n, size_t room);
+
 void *
 __tsan_memcpy(void *d, const void *s, unsigned long n)
 {
-	access_range(s, n, 0, 0, PC());
-	access_range(d, n, 1, 0, PC());
-	for (unsigned long i = 0; i < n; i++)
-		((volatile unsigned char *) d)[i] = ((const unsigned char *) s)[i];
-	return d;
+	return mem_copy(d, s, n, PC());
 }
 
 void *
 __tsan_memmove(void *d, const void *s, unsigned long n)
 {
-	access_range(s, n, 0, 0, PC());
-	access_range(d, n, 1, 0, PC());
-	if ((uintptr_t) d < (uintptr_t) s)
-		for (unsigned long i = 0; i < n; i++)
-			((volatile unsigned char *) d)[i] = ((const unsigned char *) s)[i];
-	else
-		for (unsigned long i = n; i > 0; i--)
-			((volatile unsigned char *) d)[i - 1] = ((const unsigned char *) s)[i - 1];
-	return d;
+	return mem_copy(d, s, n, PC());
 }
 
 void *
 __tsan_memset(void *d, int c, unsigned long n)
 {
-	access_range(d, n, 1, 0, PC());
-	for (unsigned long i = 0; i < n; i++)
-		((volatile unsigned char *) d)[i] = (unsigned char) c;
-	return d;
+	return mem_set(d, c, n, PC());
+}
+
+void *
+memcpy(void *restrict d, const void *restrict s, size_t n)
+{
+	return mem_copy(d, s, n, PC());
+}
+
+void *
+memmove(void *d, const void *s, size_t n)
+{
+	return mem_copy(d, s, n, PC());
+}
+
+void *
+memset(void *d, int c, size_t n)
+{
+	return mem_set(d, c, n, PC());
+}
+
+void *
+__memcpy_chk(void *d, const void *s, size_t n, size_t room)
+{
+	chk(n, room);
+	return mem_copy(d, s, n, PC());
+}
+
+void *
+__memmove_chk(void *d, const void *s, size_t n, size_t room)
+{
+	chk(n, room);
+	return mem_copy(d, s, n, PC());
+}
+
+void *
+__memset_chk(void *d, int c, size_t n, size_t room)
+{
+	chk(n, room);
+	return mem_set(d, c, n, PC());
 }
 
 /* ---- atomics -------------------------------------------------------- */
@@ -910,7 +1040,7 @@ pthread_create(pthread_t *th, const pthread_attr_t *attr, void *(*start) (void *
 		active = 0;
 		return fn(th, attr, start, arg);
 	}
-	memcpy(tvc[t], tvc[p], sizeof(Clock));
+	copy_bytes(tvc[t], tvc[p], sizeof(Clock));
 	tvc[t][t] = 1;
 	tvc[p][p]++;
 	starts[t].start = start;
@@ -986,7 +1116,7 @@ thrd_create(thrd_t *th, thrd_start_t start, void *arg)
 		active = 0;
 		return fn(th, start, arg);
 	}
-	memcpy(tvc[t], tvc[p], sizeof(Clock));
+	copy_bytes(tvc[t], tvc[p], sizeof(Clock));
 	tvc[t][t] = 1;
 	tvc[p][p]++;
 	cstarts[t].start = start;

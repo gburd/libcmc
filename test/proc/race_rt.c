@@ -73,10 +73,12 @@ check(int ok, const char *what)
 static void
 reset(void)
 {
-	memset(cells, 0, CELLS * sizeof(Cell));
-	memset(syncs, 0, SYNCS * sizeof(Sync));
-	memset(tvc, 0, sizeof tvc);
-	memset(tid_of, 0, sizeof tid_of);
+	/* the runtime's own tables, cleared without recording the writes,
+	 * which memset (the runtime's wrapper) would */
+	set_bytes(cells, 0, CELLS * sizeof(Cell));
+	set_bytes(syncs, 0, SYNCS * sizeof(Sync));
+	set_bytes(tvc, 0, sizeof tvc);
+	set_bytes(tid_of, 0, sizeof tid_of);
 	atomic_store(&nthreads, 1);
 	tvc[0][0] = 1;
 	self = 0;
@@ -405,6 +407,73 @@ create_join(void)
 
 typedef void (*Acc) (void *);
 
+/* the plain and fortified copies: each copies like the C library, with
+ * the byte loops (before the lookup) and with the C library's functions */
+static void
+mem_copies(char *d, const char *what)
+{
+	char		w[64];
+	size_t		n = strlen(what);
+
+	memcpy(d, "0123456789", 10);
+	memmove(d + 2, d, 6);
+	check(memcmp(d, "0101234589", 10) == 0, what);
+	__memcpy_chk(d, "0123456789", 10, 16);
+	__memmove_chk(d, d + 2, 6, 16);
+	snprintf(w, sizeof w, "%.*s: fortified", (int) n, what);
+	check(memcmp(d, "2345676789", 10) == 0, w);
+	memset(d, 'q', 3);
+	__memset_chk(d + 3, 'r', 2, 13);
+	snprintf(w, sizeof w, "%.*s: memset", (int) n, what);
+	check(memcmp(d, "qqqrr7", 6) == 0, w);
+}
+
+static void
+mem_entry_points(char *d)
+{
+	void	   *(*keep) (void *, const void *, size_t) = libc_memmove;
+	void	   *(*keep_set) (void *, int, size_t) = libc_memset;
+
+	mem_copies(d, "memmove copies forward, memcpy and memset");
+	libc_memmove = NULL;
+	libc_memset = NULL;
+	mem_copies(d, "before the lookup, the byte loops copy the same");
+	libc_memmove = keep;
+	libc_memset = keep_set;
+	check(libc_memmove != NULL && libc_memset != NULL, "__tsan_init looks up the C library's copies");
+
+	/* a fortified copy longer than its room ends the program */
+	fflush(stdout);
+	pid_t		pid = fork();
+
+	if (pid == 0)
+	{
+		signal(SIGABRT, SIG_DFL);
+		__memcpy_chk(d, "0123456789", 10, 4);
+		exit(0);
+	}
+	int			st = 0;
+
+	waitpid(pid, &st, 0);
+	check(WIFSIGNALED(st), "a fortified copy past its room fails as the C library's does");
+}
+
+/* a length the compiler cannot see, so it makes the calls, not moves */
+static volatile size_t four = sizeof(int);
+static void w_cpy(void) { memcpy(&x, &y, four); }
+static volatile int sink;
+static void r_cpy(void) { int v; memcpy(&v, &x, four); sink = v; }
+static void w_set(void) { memset(&x, 0, four); }
+static void w_chk(void) { __memcpy_chk(&x, &y, four, sizeof x); }
+/* volatile: memcpy is known not to read in_runtime, so a compiler may
+ * otherwise drop the increment */
+static void w_inside(void)
+{
+	(*(volatile int *) &in_runtime)++;
+	memcpy(&x, &y, four);
+	(*(volatile int *) &in_runtime)--;
+}
+
 static void
 entry_points(void)
 {
@@ -441,6 +510,8 @@ entry_points(void)
 	__tsan_memmove(dst, dst + 2, 6);
 	check(memcmp(dst, "2345676789", 10) == 0, "__tsan_memmove backward overlap");
 	check(nreport == 0, "one thread's accesses never race");
+	mem_entry_points(dst);
+	check(nreport == 0, "one thread's copies never race");
 }
 
 /* every atomic entry point, at every size, with seq_cst: no weak report */
@@ -913,6 +984,11 @@ main(void)
 	scenario("a read ordered before a write does not race", S(lock_r_unlock), S(lock_w_unlock), 1, 0);
 	scenario("an atomic read and an atomic write never race", S(atomic_load_x), S(atomic_add), 1, 0);
 	scenario("an atomic read and a plain write race", S(atomic_load_x), S(plain_w), 1, 1);
+	scenario("an unordered memcpy and memcpy race", S(w_cpy), S(r_cpy), 1, 1);
+	scenario("an unordered memset and read race", S(w_set), S(r_x), 1, 1);
+	scenario("an unordered __memcpy_chk and write race", S(w_chk), S(w_x), 1, 1);
+	scenario("a mutex orders a memcpy", S(lock_w_unlock), S(lock_r_unlock), 1, 0);
+	scenario("a copy made inside the runtime is not recorded", S(w_inside), S(w_x), 1, 0);
 	barrier();
 	create_join();
 	entry_points();
