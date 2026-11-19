@@ -76,7 +76,6 @@ reset(void)
 	memset(cells, 0, CELLS * sizeof(Cell));
 	memset(syncs, 0, SYNCS * sizeof(Sync));
 	memset(tvc, 0, sizeof tvc);
-	memset(exit_vc, 0, sizeof exit_vc);
 	memset(tid_of, 0, sizeof tid_of);
 	atomic_store(&nthreads, 1);
 	tvc[0][0] = 1;
@@ -773,8 +772,8 @@ stranger_atomic(void *arg)
 	return NULL;
 }
 
-/* a C11 thread that finishes after the runtime turned off records no
- * exit clock */
+/* a C11 thread joined after the runtime turned off gives the joiner
+ * no clock */
 static int
 late_child(void *arg)
 {
@@ -794,7 +793,7 @@ c11_late(void)
 	active = 0;
 	pass_turn(1);
 	thrd_join(ct, NULL);
-	check(exit_vc[1][1] == 0, "a C11 thread that ends while the runtime is off records no exit clock");
+	check(tvc[0][1] == 0, "a C11 join while the runtime is off takes no clock");
 	active = 1;
 	reset();
 

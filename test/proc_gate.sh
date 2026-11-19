@@ -83,6 +83,7 @@ for f in twothread twothread_join racewake raceemit raceborn durack memrace sync
 done
 tsan raceemit-bug-tsan "$T/raceemit.c" -DBUG
 tsan atomic128-tsan "$T/atomic128.c" -mcx16
+tsan threadexit-tsan "$T/threadexit.c"
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -446,6 +447,19 @@ done
 expect "atomic128: a seq_cst 16-byte handoff holds"           0 "No error has been found" --model-file "$OUT/a128-seqcst.model"
 expect "atomic128: a relaxed 16-byte handoff is a data race"  1 "data race on node 0" --model-file "$OUT/a128-relaxed.model"
 expect "atomic128: 16-byte fetch_add and compare-exchange"    0 "No error has been found" --model-file "$OUT/a128-rmw.model"
+# threadexit: a thread that ends by pthread_exit or thrd_exit, from its
+# start function or deeper, gives its join the same edge as a return
+# (on 2.1.0 each was reported as a race, and pthread_exit's first-use
+# load of libgcc_s was refused as a kernel fd); a read before the join
+# is still a race.
+for m in exit thrd nested early; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nwhole = "node[0].phase < 2 or node[0].value == 7"\ndone = "eventually node[0].phase == 2"\n' \
+		"$B/proc/threadexit-tsan" "$m" > "$OUT/te-$m.model"
+done
+expect "threadexit: pthread_exit publishes to the join"        0 "No error has been found" --model-file "$OUT/te-exit.model"
+expect "threadexit: thrd_exit publishes to thrd_join"          0 "No error has been found" --model-file "$OUT/te-thrd.model"
+expect "threadexit: pthread_exit from a nested call"           0 "No error has been found" --model-file "$OUT/te-nested.model"
+expect "threadexit: a read before the join is a data race"     1 "data race on node 0" --model-file "$OUT/te-early.model"
 # two nodes running the racy program: the first report wins
 sed 's/^nodes = 1$/nodes = 2/' "$OUT/mr-unlocked-tsan.model" > "$OUT/mr-unlocked2-tsan.model"
 expect "memrace: two racing nodes, one report"                1 "data race on node" --model-file "$OUT/mr-unlocked2-tsan.model"

@@ -43,12 +43,12 @@
  * through __tsan_memcpy and friends).  A synchronisation edge the
  * runtime does not model (a pipe, a signal, a raw futex) is missing, so
  * accesses it orders are reported as a race: a false alarm, never a
- * missed race.  pthread_exit is not followed: a thread must return from
- * its start function for its join to carry its writes.
+ * missed race.
  *
- * The runtime allocates nothing from the program's heap.  Its tables are
- * mapped at fixed addresses at start-up, so the program's own memory
- * layout is the same with and without it, and the same on every replay.
+ * The runtime allocates nothing from the program's heap, apart from the
+ * C library's record of libgcc_s, which __tsan_init loads.  Its tables
+ * are mapped at fixed addresses at start-up, and every replay makes the
+ * same calls, so the program's memory layout is the same on every replay.
  *
  * The functions below have the instrumentation's names and prototypes,
  * so they are declared here rather than in a header.
@@ -114,7 +114,6 @@ static int	active;				/* under cmc, and the tables are mapped */
 static int	reported;			/* a race was reported: stop checking */
 static int	weak_told;
 static Clock tvc[MAXT];			/* each thread's vector clock */
-static Clock exit_vc[MAXT];		/* a thread's clock when it returned */
 static atomic_int nthreads = 1;
 static _Thread_local int self = -1;	/* this thread's index; main is 0 */
 
@@ -153,6 +152,15 @@ __tsan_init(void)
 	tvc[0][0] = 1;
 	active = 1;
 	marker(RACE_HELLO, 0, 0, 0);
+
+	/*
+	 * glibc's pthread_exit and thrd_exit unwind the thread's stack with
+	 * libgcc_s, which it loads on first use: an open and a read of a
+	 * kernel fd, refused once the node has a second thread.  Load it now,
+	 * while the node has one, so that call finds it loaded.  A C library
+	 * without it aborts in pthread_exit anyway, so a failure is ignored.
+	 */
+	(void) dlopen("libgcc_s.so.1", RTLD_NOW | RTLD_NODELETE);
 }
 
 /* This thread's index, or -1 when the runtime is off.  A thread the
@@ -879,15 +887,11 @@ thread_tramp(void *p)
 	Start	   *s = p;
 
 	self = s->t;
-	void	   *r = s->start(s->arg);
-
-	if (active)
-		memcpy(exit_vc[s->t], tvc[s->t], sizeof(Clock));
-	return r;
+	return s->start(s->arg);
 }
 
 /* A new thread starts with its creator's clock, which then ticks.  The
- * pthread_t names the index, so a join knows whose exit clock to take. */
+ * pthread_t names the index, so a join knows whose clock to take. */
 static pthread_t tid_of[MAXT];
 
 int
@@ -919,6 +923,21 @@ pthread_create(pthread_t *th, const pthread_attr_t *attr, void *(*start) (void *
 	return r;
 }
 
+/*
+ * After a join of th returns, thread t takes the joined thread's clock.
+ * That is its clock at the end, however it ended: a return from its
+ * start function, pthread_exit or thrd_exit from any depth, after its
+ * thread-specific destructors.  Nothing ticks a thread's clock once it
+ * has ended, and an index is never given to a second thread.
+ */
+static void
+join_clock(int t, pthread_t th)
+{
+	for (int k = 1; k < MAXT; k++)
+		if (pthread_equal(tid_of[k], th))
+			vc_join(tvc[t], tvc[k]);
+}
+
 int
 pthread_join(pthread_t th, void **ret)
 {
@@ -927,9 +946,7 @@ pthread_join(pthread_t th, void **ret)
 	int			t = me();
 
 	if (r == 0 && t >= 0)
-		for (int k = 1; k < MAXT; k++)
-			if (pthread_equal(tid_of[k], th))
-				vc_join(tvc[t], exit_vc[k]);
+		join_clock(t, th);
 	return r;
 }
 
@@ -950,11 +967,7 @@ cthread_tramp(void *p)
 	Cstart	   *s = p;
 
 	self = s->t;
-	int			r = s->start(s->arg);
-
-	if (active)
-		memcpy(exit_vc[s->t], tvc[s->t], sizeof(Clock));
-	return r;
+	return s->start(s->arg);
 }
 
 int
@@ -994,8 +1007,6 @@ thrd_join(thrd_t th, int *ret)
 	int			t = me();
 
 	if (r == thrd_success && t >= 0)
-		for (int k = 1; k < MAXT; k++)
-			if (pthread_equal(tid_of[k], (pthread_t) th))
-				vc_join(tvc[t], exit_vc[k]);
+		join_clock(t, (pthread_t) th);
 	return r;
 }

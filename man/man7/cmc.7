@@ -305,7 +305,11 @@ cc -no-pie -o prog prog.o libcmc-race.a -lpthread
 .Pp
 gcc and clang emit the same calls.
 The runtime keeps a vector clock per thread and per synchronisation
-object, with happens-before edges from thread creation and join, the
+object, with happens-before edges from thread creation and join (a
+thread may end by returning,
+.Fn pthread_exit
+or
+.Fn thrd_exit ) , the
 lock, condition variable, semaphore, barrier and once calls (pthread
 and C11), and atomics by their memory order.
 Atomics of 1 to 16 bytes are provided; the 16-byte ones, which
@@ -345,10 +349,7 @@ instrumentation (other libraries, the C library itself); with gcc,
 .Fn memset
 and
 .Fn memmove
-calls, which stay plain library calls (clang reports them); and
-.Fn pthread_exit ,
-so a thread must return from its start function for its join to carry
-its writes.
+calls, which stay plain library calls (clang reports them).
 A synchronisation edge the runtime does not model (a pipe, a signal, a
 raw
 .Fn futex )

@@ -24,6 +24,16 @@ program that used them failed to link against `libcmc-race.a`.  Gate:
 proc_gate rows atomic128 (a seq_cst handoff holds, a relaxed one is a
 race, fetch_add and compare-exchange compute) and race_rt.
 
+A thread that ends by `pthread_exit` or `thrd_exit` gives its join the
+same happens-before edge as one that returns from its start function.
+The race runtime took the joined thread's clock only on a return, so
+the joiner's reads of what such a thread wrote were reported as data
+races; and glibc's first `pthread_exit` loads libgcc_s, a read of a
+kernel fd the checker refused in a multi-threaded node.  The runtime
+now loads libgcc_s at `__tsan_init` and the join takes the thread's
+final clock.  Gate: proc_gate rows threadexit (exit, thrd, nested, and
+a read before the join that is still a race).
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a
