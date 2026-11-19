@@ -125,7 +125,13 @@ static int var_index(const char *name){ for(int i=0;i<S.nvar;i++) if(!strcmp(S.v
  * plus quantifiers  (all|some|count) V in SET : EXPR  and set/fun forms.
  * Returns a Value; sets *ok=0 on an evaluation/parse error.
  * ===================================================================== */
-typedef struct { const char *p; Env *env; int ok; char err[128]; } Pst;
+/* dead > 0 while the parser reads an operand that and/or short-circuits
+ * past (TLC evaluates left to right and never evaluates it).  Such an
+ * operand is still parsed, and a syntax error in it is still an error,
+ * but its value is ignored and evaluation errors in it (a wrong type,
+ * division by zero, an application outside the domain, an overflow)
+ * are not raised: `x > 0 and y / x == 2` is FALSE at x = 0. */
+typedef struct { const char *p; Env *env; int ok; char err[128]; int dead; } Pst;
 
 static void sp_skip(Pst *s){ while(*s->p && isspace((unsigned char)*s->p)) s->p++; }
 static int sp_word(Pst *s, const char *w){
@@ -136,6 +142,10 @@ static int sp_word(Pst *s, const char *w){
 static Value sp_or(Pst *s);
 static void fail(Pst *s, const char *m){ if(s->ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",m); } }
 
+/* an evaluation error: fails s and returns 1, or, in an operand that
+ * is not evaluated, returns 0 so the caller parses on */
+static int efail(Pst *s, const char *m){ if(s->dead) return 0; fail(s,m); return 1; }
+
 static const char *tag_name(int t){ return t==T_INT?"an integer":t==T_BOOL?"a boolean":t==T_SET?"a set":"a function"; }
 
 /* An operand of the wrong type is a model error, as TLC reports it.
@@ -144,12 +154,12 @@ static const char *tag_name(int t){ return t==T_INT?"an integer":t==T_BOOL?"a bo
  * otherwise fails s, naming where the value was used; same_type() does
  * the same for the two sides of == and != (TLC refuses TRUE = 1). */
 static int need(Pst *s, const Value *v, int tag, const char *where){
-	if(v->tag==tag) return 1;
+	if(v->tag==tag || s->dead) return 1;
 	if(s->ok){ s->ok=0; snprintf(s->err,sizeof s->err,"expected %s in %s, not %s",tag_name(tag),where,tag_name(v->tag)); }
 	return 0;
 }
 static int same_type(Pst *s, const Value *a, const Value *b, const char *op){
-	if(a->tag==b->tag) return 1;
+	if(a->tag==b->tag || s->dead) return 1;
 	if(s->ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s compares %s with %s",op,tag_name(a->tag),tag_name(b->tag)); }
 	return 0;
 }
@@ -182,6 +192,14 @@ static Value sp_atom(Pst *s){
 			sp_skip(s); if(!(s->p[0]=='-'&&s->p[1]=='>')){ fail(s,"expected -> in function literal"); return z; } s->p+=2;
 			const char *body=s->p;
 			Value f={0}; f.tag=T_FUN; f.n=0;
+			if(dom.n==0 || s->dead){
+				/* no element to bind: parse the body once, unevaluated */
+				Pst sub=*s; sub.p=body; sub.dead++;
+				Env ne=*s->env; if(!env_bind(s,&ne,id,0)) return z; sub.env=&ne;
+				(void)sp_or(&sub);
+				if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return z; }
+				s->p=sub.p; dom.n=0;
+			}
 			for(int e=0;e<dom.n;e++){
 				if(f.n>=SP_MAPMAX){ fail(s,"function too large"); return z; }
 				/* bind id=dom.e[e], evaluate body */
@@ -202,14 +220,15 @@ static Value sp_atom(Pst *s){
 		int fi=var_index(fn);
 		Value f;
 		if(fi>=0) f=s->env->var[fi]; else { fail(s,"except on a non-variable"); return z; }
-		if(f.tag!=T_FUN){ fail(s,"except on a variable that is not a function"); return z; }
+		if(f.tag!=T_FUN){ if(efail(s,"except on a variable that is not a function")) return z; f=z; f.tag=T_FUN; }
 		for(;;){
 			sp_skip(s); if(*s->p!='['){ fail(s,"expected [ in except"); return z; } s->p++;
 			Value kk=sp_or(s); if(!s->ok || !need(s,&kk,T_INT,"a function key")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++;
 			sp_skip(s); if(*s->p!='='){ fail(s,"expected = in except"); return z; } s->p++;
 			Value vv=sp_or(s); if(!s->ok || !need(s,&vv,T_INT,"a function value")) return z;
 			int hit=0; for(int i=0;i<f.n;i++) if(f.k[i]==kk.i){ f.v[i]=vv.i; hit=1; break; }
-			if(!hit){ if(f.n>=SP_MAPMAX){ fail(s,"function too large"); return z; } f.k[f.n]=kk.i; f.v[f.n]=vv.i; f.n++; }
+			if(!hit && f.n>=SP_MAPMAX){ if(efail(s,"function too large")) return z; hit=1; }
+			if(!hit){ f.k[f.n]=kk.i; f.v[f.n]=vv.i; f.n++; }
 			sp_skip(s); if(*s->p==','){ s->p++; continue; } break;
 		}
 		sp_skip(s); if(*s->p!=']'){ fail(s,"expected ] to close except"); return z; } s->p++;
@@ -219,7 +238,7 @@ static Value sp_atom(Pst *s){
 		/* set literal {a, b, ...} (possibly empty) */
 		s->p++; Value set={0}; set.tag=T_SET; set.n=0; sp_skip(s);
 		if(*s->p!='}'){
-			for(;;){ Value ev=sp_or(s); if(!s->ok || !need(s,&ev,T_INT,"a set")) return z; if(set.n>=SP_SETMAX){ fail(s,"set too large"); return z; } set.e[set.n++]=ev.i; sp_skip(s); if(*s->p==','){ s->p++; continue; } break; }
+			for(;;){ Value ev=sp_or(s); if(!s->ok || !need(s,&ev,T_INT,"a set")) return z; if(set.n>=SP_SETMAX){ if(efail(s,"set too large")) return z; } else set.e[set.n++]=ev.i; sp_skip(s); if(*s->p==','){ s->p++; continue; } break; }
 		}
 		sp_skip(s); if(*s->p!='}'){ fail(s,"expected }"); return z; } s->p++;
 		set_canon(&set); return set;
@@ -246,12 +265,14 @@ static Value sp_atom(Pst *s){
 			if(*s->p=='['){ s->p++; Value kv=sp_or(s); if(!s->ok || !need(s,&kv,T_INT,"node[][]")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++; k=kv.i; }
 			else if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn); int fi=-1; for(int j=0;j<S.nfield;j++) if(!strcmp(S.fname[j],fn)) fi=j; if(fi<0){ fail(s,"unknown field"); return z; } k=S.foff[fi]; }
 			else { fail(s,"node[i] needs [k] or .field"); return z; }
+			if(s->dead) return vint(0);	/* i may be a placeholder */
 			return vint(o->node_byte(o->ctx,i,(int)k));
 		}
 		if(!strcmp(id,"r")){
 			/* r.src / r.val when ranging over replies (param r bound to index) */
 			if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn);
 				long ri=0; for(int i=0;i<s->env->np;i++) if(!strcmp("r",s->env->pname[i])) ri=s->env->pval[i];
+				if(s->dead) return vint(0);
 				if(!strcmp(fn,"src")) return vint(o->repl_src(o->ctx,(int)ri));
 				if(!strcmp(fn,"val")) return vint(o->repl_val(o->ctx,(int)ri));
 				fail(s,"reply has .src and .val"); return z; }
@@ -273,9 +294,9 @@ static Value sp_atom(Pst *s){
 		Value base = s->env->var[vi];
 		sp_skip(s);
 		if(*s->p=='['){ s->p++; Value kk=sp_or(s); if(!s->ok || !need(s,&kk,T_INT,"a function key")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ] in application"); return z; } s->p++;
-			if(base.tag!=T_FUN){ fail(s,"applied a non-function"); return z; }
+			if(base.tag!=T_FUN){ efail(s,"applied a non-function"); return z; }
 			for(int i=0;i<base.n;i++) if(base.k[i]==kk.i) return vint(base.v[i]);
-			fail(s,"function applied outside its domain"); return z; }
+			efail(s,"function applied outside its domain"); return z; }
 		return base;
 	}
 	(void)save; fail(s,"unknown identifier"); return z;
@@ -305,9 +326,10 @@ static Value sp_setspec(Pst *s){
 	Value lo=sp_add(s); if(!s->ok) return lo; sp_skip(s);
 	if(s->p[0]=='.'&&s->p[1]=='.'){ s->p+=2; Value hi=sp_add(s); if(!s->ok) return hi;
 		if(!need(s,&lo,T_INT,"..") || !need(s,&hi,T_INT,"..")) return lo;
-		Value set={0}; set.tag=T_SET; for(long x=lo.i;x<=hi.i;x++){ if(set.n>=SP_SETMAX){ fail(s,"range too large"); return set; } set.e[set.n++]=x; } set_canon(&set); return set; }
+		Value set={0}; set.tag=T_SET; if(s->dead) return set;
+		for(long x=lo.i;x<=hi.i;x++){ if(set.n>=SP_SETMAX){ fail(s,"range too large"); return set; } set.e[set.n++]=x; } set_canon(&set); return set; }
 	/* a bare set-valued expression (a variable of set type) */
-	if(s->ok && lo.tag!=T_SET){ fail(s,"expected a set (LO .. HI or {..}), not a scalar"); return lo; }
+	if(s->ok && lo.tag!=T_SET){ if(efail(s,"expected a set (LO .. HI or {..}), not a scalar")) return lo; lo=(Value){0}; lo.tag=T_SET; }
 	return lo;
 }
 
@@ -319,17 +341,17 @@ static Value sp_setspec(Pst *s){
 static Value sp_mul(Pst *s){
 	Value a=sp_atom(s);
 	for(;;){ sp_skip(s);
-		if(*s->p=='*'){ s->p++; Value b=sp_atom(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r)){ fail(s,"integer overflow in *"); return a; } a=vint(r); }
-		else if(*s->p=='/'){ s->p++; Value b=sp_atom(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0){ fail(s,"divide by zero"); return a; } if(a.i<0||b.i<0){ fail(s,"/ of a negative number is not supported"); return a; } a=vint(a.i/b.i); }
-		else if(sp_word(s,"mod")){ Value b=sp_atom(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0){ fail(s,"mod by zero"); return a; } if(a.i<0||b.i<0){ fail(s,"mod of a negative number is not supported"); return a; } a=vint(a.i%b.i); }
+		if(*s->p=='*'){ s->p++; Value b=sp_atom(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
+		else if(*s->p=='/'){ s->p++; Value b=sp_atom(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0 && efail(s,"divide by zero")) return a; if((a.i<0||b.i<0) && efail(s,"/ of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i/b.i:0); }
+		else if(sp_word(s,"mod")){ Value b=sp_atom(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0 && efail(s,"mod by zero")) return a; if((a.i<0||b.i<0) && efail(s,"mod of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i%b.i:0); }
 		else break; }
 	return a;
 }
 static Value sp_add(Pst *s){
 	Value a=sp_mul(s);
 	for(;;){ sp_skip(s);
-		if(*s->p=='+'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(__builtin_add_overflow(a.i,b.i,&r)){ fail(s,"integer overflow in +"); return a; } a=vint(r); }
-		else if(*s->p=='-'&&s->p[1]!='>'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(__builtin_sub_overflow(a.i,b.i,&r)){ fail(s,"integer overflow in -"); return a; } a=vint(r); }
+		if(*s->p=='+'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(__builtin_add_overflow(a.i,b.i,&r) && efail(s,"integer overflow in +")) return a; a=vint(r); }
+		else if(*s->p=='-'&&s->p[1]!='>'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(__builtin_sub_overflow(a.i,b.i,&r) && efail(s,"integer overflow in -")) return a; a=vint(r); }
 		else break; }
 	return a;
 }
@@ -346,6 +368,7 @@ static Value sp_quant(Pst *s){
 		Value set=sp_setspec(s); if(!s->ok) return vbool(0);
 		sp_skip(s); if(*s->p!=':'){ fail(s,"expected ':' in quantifier"); return vbool(0); } s->p++;
 		const char *body=s->p; long cnt=0; int res=isall?1:0; const char *endp=body;
+		if(s->dead) set.n=0;	/* parse the body once, below */
 		for(int e=0;e<set.n;e++){
 			Pst sub=*s; sub.p=body; Env ne=*s->env; if(!env_bind(s,&ne,var,set.e[e])) return vbool(0); sub.env=&ne;
 			Value bv=sp_or(&sub); need(&sub,&bv,T_BOOL,q); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return vbool(0); }
@@ -354,8 +377,8 @@ static Value sp_quant(Pst *s){
 			if(issome && bv.i) res=1;
 			if(iscount && bv.i) cnt++;
 		}
-		if(set.n==0){ /* still parse the body once so a broken body is caught */
-			Pst sub=*s; sub.p=body; Env ne=*s->env; if(!env_bind(s,&ne,var,0)) return vbool(0); sub.env=&ne;
+		if(set.n==0){ /* still parse the body once, unevaluated, so a broken body is caught */
+			Pst sub=*s; sub.p=body; sub.dead++; Env ne=*s->env; if(!env_bind(s,&ne,var,0)) return vbool(0); sub.env=&ne;
 			Value bv=sp_or(&sub); need(&sub,&bv,T_BOOL,q); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return vbool(0); } endp=sub.p;
 		}
 		s->p=endp;
@@ -378,8 +401,31 @@ static Value sp_quant(Pst *s){
 	return a;			/* a bare arithmetic/boolean value */
 }
 static Value sp_not(Pst *s){ sp_skip(s); if(sp_word(s,"not")){ Value v=sp_not(s); need(s,&v,T_BOOL,"not"); return vbool(!v.i); } return sp_quant(s); }
-static Value sp_and(Pst *s){ Value a=sp_not(s); for(;;){ if(sp_word(s,"and")){ Value b=sp_not(s); if(need(s,&a,T_BOOL,"and")) need(s,&b,T_BOOL,"and"); a=vbool(a.i&&b.i); } else break; } return a; }
-static Value sp_or(Pst *s){ Value a=sp_and(s); for(;;){ if(sp_word(s,"or")){ Value b=sp_and(s); if(need(s,&a,T_BOOL,"or")) need(s,&b,T_BOOL,"or"); a=vbool(a.i||b.i); } else break; } return a; }
+/* and/or evaluate left to right and short-circuit, as TLC does: once
+ * the left operand decides the result, the right one is parsed but not
+ * evaluated (see Pst.dead) */
+static Value sp_and(Pst *s){
+	Value a=sp_not(s);
+	while(sp_word(s,"and")){
+		if(!need(s,&a,T_BOOL,"and")) return a;
+		int skip=!a.i; s->dead+=skip;
+		Value b=sp_not(s);
+		s->dead-=skip;
+		if(!skip && need(s,&b,T_BOOL,"and")) a=b;
+	}
+	return a;
+}
+static Value sp_or(Pst *s){
+	Value a=sp_and(s);
+	while(sp_word(s,"or")){
+		if(!need(s,&a,T_BOOL,"or")) return a;
+		int skip=a.i!=0; s->dead+=skip;
+		Value b=sp_and(s);
+		s->dead-=skip;
+		if(!skip && need(s,&b,T_BOOL,"or")) a=b;
+	}
+	return a;
+}
 
 /* evaluate EXPR to a Value in env; returns 1 ok, 0 error (msg in err) */
 static int sp_eval(const char *expr, Env *env, Value *out, char *errbuf, size_t errcap){

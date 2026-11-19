@@ -84,6 +84,13 @@ invariants and liveness goals are booleans; `==` and `!=` compare two
 values of one type.  Anything else, such as `not votes` for a set
 `votes`, or `TRUE == 1`, is a model error (exit 3), never a value.
 
+`and` and `or` evaluate left to right and stop once the left operand
+decides the result, as TLC does.  So a guard can protect a partial
+operation: `x > 0 and y / x == 2` is FALSE at `x = 0`, and
+`i == N or f[i] == 0` never applies `f` outside its domain.  The operand
+that is skipped is still parsed, so an unknown name or a syntax error in
+it is refused, but its type and its evaluation errors are not checked.
+
 ## Modules and a shared base
 
 `examples/spec/consensus.cml` is a base for the consensus family -- it

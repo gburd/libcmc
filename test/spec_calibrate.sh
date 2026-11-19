@@ -12,12 +12,21 @@ TLC="$HERE/calib/hc/tlc.sh"
 OUT=${CMC_SCRATCH:-$HOME/tmp/cmc-build}/spec-calib
 mkdir -p "$OUT"
 fail=0
+# TLC is optional: without a java the checks cannot run, so say so
+# (tlc.sh uses its pinned java, or finds one through nix)
+java=$(sed -n 's/^JAVA=//p' "$TLC")
+if [ ! -x "$java" ] && ! command -v nix >/dev/null; then
+	echo "spec_calibrate: skipped (no TLC: neither the pinned java nor nix is available)"
+	exit 0
+fi
 
 # row: DIR | CML [--define TAG] | TLA | CFG | want-verdict(PASS|VIOLATION)
 rows="
 test/spec|counter.cml||counter.tla|counter.cfg|PASS
 test/spec|mutex.cml||mutex.tla|mutex_safe.cfg|PASS
 test/spec|mutex.cml|--define BUG|mutex.tla|mutex_bug.cfg|VIOLATION
+test/spec|guard.cml||guard.tla|guard_safe.cfg|PASS
+test/spec|guard.cml|--define BUG|guard.tla|guard_bug.cfg|VIOLATION
 examples/spec|paxos.cml||paxos.tla|paxos_safe.cfg|PASS
 examples/spec|paxos.cml|--define BUG|paxos.tla|paxos_bug.cfg|VIOLATION
 "

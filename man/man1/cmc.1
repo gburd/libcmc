@@ -140,6 +140,12 @@ Model-check an abstract specification
 .Pq a Pa .cml No module
 on its own, the way TLC checks a TLA+ module: no implementation, just
 the declared variables, actions and invariants.
+As in TLC,
+.Cm and
+and
+.Cm or
+evaluate left to right and short-circuit, so a guard can protect a
+division or a function application.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
 .It Fl -emit-tla Ar file

@@ -134,6 +134,7 @@ in the kernel, untouched.
 | safety verdicts, distinct states, depth | exact | agrees with TLC on every `.cml` model; the seen set compares canonical bytes, not hashes | spec_gate, emit_gate, apalache_gate |
 | `eventually P`, `A ~> B` under `fairness weak` or none | exact | TLA+ semantics with stuttering; checked against TLC on each probe | spec_gate liveness rows, emit_gate |
 | liveness under `symmetry` | refused | exit 3 | (code; no fixture yet) |
+| `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
 | declared domains | exact | init and every successor must lie in each variable's domain | spec_gate boundpass, succbound |
 | text that does not fit a buffer | refused | exit 3 | spec_gate truncate |

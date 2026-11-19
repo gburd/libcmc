@@ -18,6 +18,13 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+In `cmc --spec`, `and` and `or` short-circuit left to right as in TLC,
+so a guard such as `x > 0 and y / x == 2` or `i == N or f[i] == 0`
+protects its partial operation.  Before, both operands were evaluated
+and such a spec was refused (exit 3).  The skipped operand is still
+parsed.  Gates: spec_gate guard and short-circuit rows, and the guard
+row of spec_calibrate against TLC.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

@@ -119,6 +119,12 @@ expect "fastpaxos: shortest trace is 11 actions" 1 "is (11 actions)" --spec "$HE
 expect "twophase: atomicity holds"            0 "No error has been found" --spec "$HERE/examples/spec/twophase.cml"
 expect "twophase: the no-unanimity bug breaks atomicity" 1 "consistency is violated" --spec "$HERE/examples/spec/twophase.cml" --define BUG
 
+# guards that protect a division and an application (test/spec/guard.tla
+# is the TLC twin; cmc 2.1 refused this spec)
+expect "guard: short-circuit guards hold"   0 "7 distinct states found" --spec "$HERE/test/spec/guard.cml"
+expect "guard: depth matches TLC (7)"       0 "complete state graph search is 7" --spec "$HERE/test/spec/guard.cml"
+expect "guard: the unmarked advance is caught" 1 "is (1 actions)" --spec "$HERE/test/spec/guard.cml" --define BUG
+
 echo "-- symmetry reduction: interchangeable node ids collapse"
 # the token spec's node ids are fully symmetric; with symmetry declared,
 # the state space shrinks (10 -> 3) with the SAME verdict -- the soundness
@@ -203,7 +209,7 @@ typed() {
 }
 typed "not of a set"                      "expected a boolean" "not {1}"
 typed "and of an integer"                 "expected a boolean" "x and TRUE"
-typed "or of a function"                  "expected a boolean" "TRUE or f"
+typed "or of a function"                  "expected a boolean" "FALSE or f"
 typed "an invariant that is an integer"   "expected a boolean" "x + 1"
 typed "a guard that is a set"             "expected a boolean" "TRUE" "{x}"
 typed "all over an integer body"          "expected a boolean" "all i in 0 .. 1 : i"
@@ -241,6 +247,12 @@ typed "a broken set in a quantifier" "unknown identifier"    "all i in y .. 1 : 
 typed "or of a set on the right" "expected a boolean in or"  "FALSE or {1}"
 typed "an and of a broken operand"  "unknown identifier"       "TRUE and y"
 typed "an or of a broken operand"   "unknown identifier"       "FALSE or y"
+# and/or short-circuit as TLC does: an operand the left one decides is
+# still parsed (a name error or a syntax error in it is refused) but not
+# evaluated, so its type and evaluation errors are not raised
+typed "an unknown name past a short-circuit" "unknown identifier" "x == 0 or y == 0"
+typed "a syntax error past a short-circuit"  "expected )"         "FALSE and (x == 0"
+typed "a non-boolean left of a short-circuit" "expected a boolean in and" "x and FALSE"
 typed "a set with text after it"  "trailing text"            "x in {0} 1"
 typed "a range with a broken bound" "unknown identifier"       "x in 0 .. (y)"
 typed "a literal with no -> after the set" "expected -> in function literal" "[i in 0 .. 1 0] == f"
@@ -305,6 +317,18 @@ value "orders"                      0 "0 < 1 and 1 > 0 and 1 <= 1 and 1 >= 1 and
 value "membership"                  0 "x in {0} and not (x in {}) and 1 in 0 .. 1"
 value "functions of one length differ in a value" 1 "f == [i in 0 .. 1 -> 0]"
 value "functions of one length differ in a key"   1 "[i in 0 .. 1 -> i] == [i in 1 .. 2 -> i - 1]"
+# the right operand of a decided and/or is not evaluated (cmc 2.1
+# evaluated it and refused each of these)
+value "or skips a division by zero"  0 "x == 0 or 1 / x == 1"
+value "and skips an application outside the domain" 0 "x > 0 and f[2] == 0 or x == 0"
+value "or skips a non-boolean"       0 "TRUE or f"
+value "and skips a quantifier" 0 "not (FALSE and (all i in 0 .. 1 : 1 / i == 0))"
+value "a quantifier over no element evaluates no body" 0 "all i in 1 .. x : 1 / (i - 1) == 0"
+value "and skips an overflow"        0 "x == 1 and 9223372036854775807 + 1 == 0 or TRUE"
+value "or skips a set past its limit" 0 "TRUE or x in 0 .. 99"
+value "and skips a function literal" 0 "not (FALSE and [i in 0 .. 1 -> 1 / i] == f)"
+value "and skips an except outside the domain" 0 "x == 1 and [x except [0] = 1] == f or TRUE"
+value "an evaluated operand still errs" 1 "x == 0 and f[0] == 1"
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
 expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml"

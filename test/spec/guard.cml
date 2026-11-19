@@ -1,0 +1,34 @@
+# test/spec/guard.cml: guards that protect a partial operation.  `and`
+# and `or` evaluate left to right and short-circuit, as in TLC, so the
+# right operand is not evaluated where the left one decides: f is never
+# applied outside its domain 0 .. N-1 at x = N, and N / x is never
+# taken at x = 0.  cmc 2.1 evaluated both operands and refused this
+# spec.  test/spec/guard.tla is its TLA+ twin for the calibration.
+#
+#   cmc --spec test/spec/guard.cml
+#   cmc --spec test/spec/guard.cml --define BUG   (advance unmarked)
+
+module guard
+
+const N = 3
+
+var x : 0 .. N
+var f : [0 .. N-1 -> 0 .. 1]
+
+init x == 0 and f == [i in 0 .. N-1 -> 0]
+
+action mark:
+  when x < N and f[x] == 0
+  f' = [f except [x] = 1]
+
+action next:
+  when x < N and f[x] == 1
+  x' = x + 1
+
+# the bug: advance without marking
+action skip [BUG]:
+  when x < N and f[x] == 0
+  x' = x + 1
+
+invariant ratio: x == 0 or N / x >= 1
+invariant marked: x == 0 or f[x-1] == 1

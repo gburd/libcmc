@@ -31,6 +31,8 @@ examples/spec|twophase|twophase|CONSTANT N = 3|consistency|VIOLATION|--define BU
 examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|PASS|
 examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|VIOLATION|--define BUG
 test/spec|countops|countops|CONSTANT N = 3|bounded|PASS|
+test/spec|guard|guard|CONSTANT N = 3|ratio marked|PASS|
+test/spec|guard|guard|CONSTANT N = 3|ratio marked|VIOLATION|--define BUG
 "
 check() {
 	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7
