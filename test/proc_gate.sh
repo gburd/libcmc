@@ -669,7 +669,6 @@ scm() {	# scm MODE EXIT NEEDLE
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nany = "node[0][0] < 9"\n' "$B/proc/syscorner" "$1" > "$SC/r-$1.model"
 	expect_by 60 "syscorner $1: $3" "$2" "$3" --model-file "$SC/r-$1.model"
 }
-scm nbclient 3 "a non-blocking connect (EINPROGRESS) is not modelled"
 scm robufefd 3 "an eventfd read at an address it does not own"
 printf '[target]\nbinary = %s\nnodes = 2\nargs = durread\n[invariants]\nfresh = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 1)"\nreached = "eventually node[0][0] == 1"\n' "$B/proc/syscorner" > "$SC/durread.model"
 expect_by 60 "syscorner durread: a fresh durable record reads EOF, fsyncs, cannot seek" 0 "No error has been found" --model-file "$SC/durread.model"
@@ -696,6 +695,51 @@ scm bigwrite 1 "writes 4096 bytes in one call"
 printf '[target]\nbinary = %s\nnodes = 2\nargs = notconnpipe\n[invariants]\nnever = "node[0][0] < 1"\nkilled = "eventually node[0][0] < 1"\n' "$B/proc/syscorner" > "$SC/r-notconnpipe.model"
 expect_by 60 "syscorner notconnpipe: SIGPIPE ends the writer" 0 "No error has been found" --model-file "$SC/r-notconnpipe.model"
 scm connect 3 "connects to port 20099, which is no node's"
+
+echo "-- a libpq-style client: non-blocking connect, POLLOUT, SO_ERROR"
+# nbconnect.c makes the socket calls libpq's connectDBStart() and
+# PQconnectPoll() make.  Each mode runs natively on loopback (the server
+# first, except in refused, where nothing listens), and its record is
+# then the model's invariant: cmc must reach it and no other.  On 2.1.0
+# the first non-blocking connect ended the check (exit 3).
+$CC -O1 -no-pie -w -o "$B/proc/nbconnect" "$T/nbconnect.c" || { echo "proc_gate: nbconnect.c does not build"; fail=1; }
+NB=$OUT/nbconnect
+mkdir -p "$NB"
+# record_model BINARY MODE STATEFILE ENV MODEL: a model whose invariants
+# say node 0's finished record is the one in STATEFILE, eight bytes to
+# an invariant, and that it is reached
+record_model() {
+	# shellcheck disable=SC2046
+	set -- "$1" "$2" "$4" "$5" $(od -An -tu1 "$3" | tr -s ' \n' ' ')
+	bin=$1 mode=$2 env=$3 model=$4; shift 4
+	if [ $# -lt 3 ]; then return 1; fi
+	shift 2; shift
+	invs="" cond="" k=0
+	for v in "$@"; do
+		cond="$cond and node[0][$k] == $v"; k=$((k + 1))
+		if [ $((k % 8)) = 0 ] || [ $k = $# ]; then
+			invs="${invs}linux$k = \"node[0][0] < 1 or (${cond# and })\"\n"; cond=""
+		fi
+	done
+	# a record ends in two check bytes over it: a mode whose other
+	# records are Linux's too (early) asks only that this one is reached
+	[ "$mode" = early ] && invs=""
+	eval "h1=\${$(($# - 1))} h2=\${$#}"
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[invariants]\n%breached = "eventually node[0][0] == 1 and node[0][%d] == %s and node[0][%d] == %s"\n' \
+		"$bin" "$mode" "$env" "$invs" "$((k - 2))" "$h1" "$((k - 1))" "$h2" > "$model"
+}
+for m in ok early refused; do
+	(
+		cd "$NB" || exit 1
+		if [ "$m" != refused ]; then timeout 30 "$B/proc/nbconnect" 1 "$m" 3>/dev/null > /dev/null 2>&1 & sleep 0.1; fi
+		timeout 30 "$B/proc/nbconnect" 0 "$m" 3>"$NB/$m.state" > /dev/null 2>&1
+		wait
+	)
+	if ! record_model "$B/proc/nbconnect" "$m" "$NB/$m.state" "timeouts = 0" "$NB/$m.model"; then
+		echo "FAIL nbconnect $m: the native run left no record"; fail=1; continue
+	fi
+	expect_by 120 "nbconnect $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$NB/$m.model"
+done
 
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end

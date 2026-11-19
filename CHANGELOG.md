@@ -18,6 +18,21 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+A non-blocking `connect()` is modelled instead of refused, so a client
+that connects the way libpq does (connect returning `EINPROGRESS`, a
+poll for `POLLOUT`, then `getsockopt(SO_ERROR)`) runs under the checker.
+The handshake completes when the search says, into a live peer's
+backlog or refused, and a call on the socket before then may see it
+either way, as on loopback.  `setsockopt` and `getsockopt` of
+`SO_KEEPALIVE`, `SO_REUSEADDR`, `SO_REUSEPORT` and `TCP_NODELAY` are
+recorded and read back and change nothing; `SO_RCVBUF` and `SO_SNDBUF`
+may be set; `SO_ERROR` reads the pending error; other options, which
+were accepted and ignored, are now refused.  `getsockname` and
+`getpeername` answer on owned sockets instead of being refused.  A
+socket redialled after a refusal keeps its `O_NONBLOCK` and
+`FD_CLOEXEC` (they were lost).  Gate: proc_gate nbconnect ok, early and
+refused, each against a native run.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

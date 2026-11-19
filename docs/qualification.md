@@ -33,7 +33,7 @@ The engine runs each node as a real process under seccomp user
 notification and answers the system calls below.  The file system is
 read-only to a node (see below).  `readv`, `writev`,
 `pread`, `pwrite`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
-`dup` family, `getsockopt`, `getsockname`, `getpeername`, `ioctl`,
+`dup` family, `ioctl`,
 `splice` and `sendfile` are refused on a checker-owned fd (exit 3), and
 run in the kernel on any other.  Every other system call runs
 in the kernel, untouched.
@@ -42,10 +42,12 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `socket`, `bind`, `listen`, `setsockopt` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts, "a UDP socket is refused", syscorner ipv6 |
+| `socket`, `bind`, `listen` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i | proc_gate verdicts, "a UDP socket is refused", syscorner ipv6 |
+| `setsockopt`, `getsockopt` | approximate | `SO_KEEPALIVE`, `SO_REUSEADDR`, `SO_REUSEPORT` and `TCP_NODELAY` are recorded, read back and inherited by an accepted socket, and change nothing (no keepalive timer, no Nagle delay, no port reuse); `SO_RCVBUF` and `SO_SNDBUF` may be set and change nothing, and reading them is refused; `SO_ERROR` reads and clears the pending error (`ECONNREFUSED`, `ECONNRESET`, `EPIPE`); any other option is exit 3 | proc_gate nbconnect |
+| `getsockname`, `getpeername` | approximate | 127.0.0.1 everywhere; a listener's port is 20000+i, a dialler's own port is 40000 + 256 i + (fd - 500), not an ephemeral port; `ENOTCONN` with no peer; `getsockname` of a socket not connected is exit 3 | proc_gate nbconnect |
 | a socket call on the wrong kind of fd (an eventfd, an epoll instance, a socket in the wrong state, a closed fd) | exact | Linux's errno: `ENOTSOCK`, `EINVAL`, `EISCONN`, `EBADF`; a read of a socket never dialled is `ENOTCONN`, a write `EPIPE` with its `SIGPIPE` | proc_gate syscorner wrongfd, notconn, notconnpipe, against a native run |
 | `fcntl` `O_NONBLOCK` and `FD_CLOEXEC` | exact | each fd keeps its own flags (a connection, the listener, an eventfd, an epoll instance, a socket not yet dialled); other `fcntl` commands on an owned fd are exit 1 | proc_gate syscorner eventfd, nbepoll, selfdial, fcntldup |
-| a non-blocking `connect` | refused | exit 3; `EINPROGRESS` and `getsockopt(SO_ERROR)` are not modelled | proc_gate syscorner nbclient |
+| a non-blocking `connect` | exact, single-threaded | `EINPROGRESS` always; the handshake completes when the search says (CONNECT), into the backlog of a live peer or refused by one that is down, and any call on the socket before then is a choice between both outcomes; while it is out, reads and writes are `EAGAIN`, `connect` is `EALREADY`, `SO_ERROR` 0, `poll` not ready; once refused, the first of `SO_ERROR`, a read, a write or `connect` reports `ECONNREFUSED`, then a read is 0, a write `EPIPE`, `connect` `ECONNABORTED`; `POLLOUT` with `POLLERR`, `POLLHUP` as Linux reports them; a blocking call on a socket still handshaking, or a non-blocking connect in a node with more than one thread, is exit 3 | proc_gate nbconnect ok, early, refused, against a native run |
 | `connect` to a live node | approximate | always succeeds and waits at the listener, even before the peer calls `listen()` | proc_gate verdicts |
 | `connect` to a node that is down | exact | `ECONNREFUSED`; later reads `ENOTCONN`, writes `EPIPE`; the socket may be dialled again | proc_gate "a dead node refuses the connection", tcpsem redial |
 | `accept`, `accept4` | exact | which waiting dialler is a search choice; per dialler, oldest first; the sockaddr out-parameter is not filled; `accept4` flags other than `SOCK_CLOEXEC` are refused | proc_gate verdicts, "accept4 SOCK_NONBLOCK is refused" |
