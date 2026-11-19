@@ -209,6 +209,32 @@ on any file,
 and
 .Fn io_uring_setup ,
 whose operations would bypass the checker.
+.Pp
+A node is one process running one program, and its channels to other
+processes end the check (exit 3): a second
+.Fn execve
+(the first is the checker's own launch of the binary), SysV shared
+memory, message queues and semaphores and POSIX message queues, whose
+SysV objects outlive the process,
+.Fn process_vm_readv
+and
+.Fn process_vm_writev ,
+and a signal or a pidfd to any process but the node itself.
+.Pp
+Each checker-owned descriptor keeps its own
+.Dv O_NONBLOCK
+and
+.Dv FD_CLOEXEC ,
+and a socket call on the wrong kind of descriptor gets Linux's errno
+.Pf ( Er ENOTSOCK ,
+.Er EINVAL ,
+.Er EISCONN ,
+.Er EBADF ) .
+A non-blocking
+.Fn connect
+is refused, since its completion through
+.Fn getsockopt
+is not modelled.
 On a descriptor the checker owns,
 .Fn lseek
 gets

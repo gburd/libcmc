@@ -73,6 +73,62 @@ Process engine (`cmc --model-file`):
   `docs/measurements/2026-11-17-tree-cap.md`.  [proc_gate: tree bound
   rows; docs_gate: the default cmc(1) and cmc(7) state]
 
+- Each checker-owned fd keeps its own flags.  On 2.0.0 a `fcntl` on an
+  epoll fd or a socket not yet dialled read and wrote the listener's,
+  so a client made non-blocking before `connect` made the node's
+  listener non-blocking and itself blocking, and an eventfd's
+  `FD_CLOEXEC` read back 0.  A non-blocking `connect` (EINPROGRESS)
+  ends the check (exit 3).  `poll` and `epoll_wait` no longer call a
+  listening socket or an epoll instance writable, report a socket never
+  dialled with `POLLOUT | POLLHUP`, and report a closed fd with
+  `POLLNVAL` at once instead of parking.  [proc_gate: syscorner eventfd,
+  poll, nbepoll, nbclient, pollclosed, each against a native run]
+- A socket call on the wrong kind of fd gets Linux's errno.  On 2.0.0
+  `accept` on a connected socket, a plain socket or an eventfd took the
+  listener's next connection, `listen` on an eventfd made it the
+  listener, `connect`, `bind` and `setsockopt` on an eventfd or an
+  epoll instance succeeded, and `sendto` and `recvfrom` on an eventfd
+  worked as a write and a read: a program with such a slip passed.
+  Now ENOTSOCK, EINVAL, EISCONN, EBADF, ENOTCONN or EPIPE, as Linux
+  gives.  [proc_gate: syscorner wrongfd, notconn, against a native run]
+- A node's channels to other processes end the check (exit 3): a
+  second `execve`, SysV shared memory, message queues and semaphores
+  and POSIX message queues (the SysV objects outlive the process, so
+  their contents survived a crash outside the world), `process_vm_readv`
+  and `process_vm_writev`, and a signal or pidfd to any other process,
+  the checker's process group included.  A signal to the node itself
+  still goes to the kernel.  On 2.0.0 each went unseen.  [proc_gate:
+  edges exec, shm, vmread, mq, killparent, killgroup, pidfd, killself]
+- `epoll_wait` into memory the checker cannot write returns EFAULT, as
+  Linux does, instead of ending the check.  [proc_gate: syscorner robuf]
+- A refusal of `dup2`, `dup3`, `splice` or `sendfile` with a checker-owned
+  fd at either end names the owned fd, not the call's first one.
+  [proc_gate: edges dup2, dup3, splice, sendfile]
+
+Model files:
+
+- An invariant that mixes `and` and `or` at one level without
+  parentheses is a parse error.  They associated left to right with
+  equal precedence, so `a or b and c` meant `(a or b) and c`, which a
+  reader who expects `and` to bind tighter takes for a different
+  invariant.  Every shipped model file still parses.  [proc_gate:
+  inv-mixed, inv-grouped]
+
+Coverage:
+
+- `make coverage` builds with gcc `--coverage`, runs every gate of
+  `make check`, and fails unless function and branch coverage of each
+  `src/*.c` file and overall are at least 90%; CI runs it.  The node
+  side (the preload and the race runtime) is measured in process
+  (`test/proc/preload_alloc.c`, `test/proc/race_rt.c`).  Each
+  `GCOVR_EXCL` marker sits on a check that cannot fail in a test, or on
+  the node launcher's code past the point its counts can be written,
+  with its reason; the report lists them.  At release: functions
+  98.2%, branches 91.5% (cmc.c 98.7% and 91.5%, cmc_cli.c 100% and
+  99.0%, cmc_preload.c 100% and 100%, cmc_proc.c 96.2% and 90.2%,
+  cmc_race.c 100% and 100%, cmc_spec.c 100% and 90.1%).  At 2.0.0:
+  96.7% and 69.6%.
+
 Command line, API and the abstract checker:
 
 - A number given to a `cmc` option must be a whole decimal number in

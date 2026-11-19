@@ -42,7 +42,10 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `socket`, `bind`, `listen`, `setsockopt` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts, "a UDP socket is refused" |
+| `socket`, `bind`, `listen`, `setsockopt` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts, "a UDP socket is refused", syscorner ipv6 |
+| a socket call on the wrong kind of fd (an eventfd, an epoll instance, a socket in the wrong state, a closed fd) | exact | Linux's errno: `ENOTSOCK`, `EINVAL`, `EISCONN`, `EBADF`; a read of a socket never dialled is `ENOTCONN`, a write `EPIPE` with its `SIGPIPE` | proc_gate syscorner wrongfd, notconn, notconnpipe, against a native run |
+| `fcntl` `O_NONBLOCK` and `FD_CLOEXEC` | exact | each fd keeps its own flags (a connection, the listener, an eventfd, an epoll instance, a socket not yet dialled); other `fcntl` commands on an owned fd are exit 1 | proc_gate syscorner eventfd, nbepoll, selfdial, fcntldup |
+| a non-blocking `connect` | refused | exit 3; `EINPROGRESS` and `getsockopt(SO_ERROR)` are not modelled | proc_gate syscorner nbclient |
 | `connect` to a live node | approximate | always succeeds and waits at the listener, even before the peer calls `listen()` | proc_gate verdicts |
 | `connect` to a node that is down | exact | `ECONNREFUSED`; later reads `ENOTCONN`, writes `EPIPE`; the socket may be dialled again | proc_gate "a dead node refuses the connection", tcpsem redial |
 | `accept`, `accept4` | exact | which waiting dialler is a search choice; per dialler, oldest first; the sockaddr out-parameter is not filled; `accept4` flags other than `SOCK_CLOEXEC` are refused | proc_gate verdicts, "accept4 SOCK_NONBLOCK is refused" |
@@ -56,19 +59,18 @@ in the kernel, untouched.
 | `SIGPIPE` on a write into a reset connection | exact for ignored and default | default kills the node; ignored leaves `EPIPE` | proc_gate rstwrite, rstignore |
 | `SIGPIPE` with a handler, or blocked | refused | exit 3 | proc_gate "a SIGPIPE handler is refused" |
 | a crashed peer | approximate | no FIN; a reader may notice (EOF) once drained, standing for a timeout | proc_gate durlog, restart |
-| a buffer the node does not own | exact | `EFAULT` for fixed-size arguments; a partial transfer is exit 3 | proc_gate "a bad write buffer gets EFAULT" |
+| a buffer the node does not own | exact | `EFAULT` for fixed-size arguments, and for `poll`, `epoll_wait`, the clock and `getrandom` into read-only memory; a partial transfer is exit 3 | proc_gate "a bad write buffer gets EFAULT", syscorner badbuf, robuf, edges partwrite through partpoll |
 
 ### Event loops
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `poll`, `ppoll` with no or zero timeout | exact | readiness of a channel or listener is a search choice (WAKE), never automatic | proc_gate pollloop, noprogress |
+| `poll`, `ppoll` with no or zero timeout | exact | readiness of a channel or listener is a search choice (WAKE), never automatic; `POLLOUT` is ready on a connection and an eventfd, never on the listener or an epoll instance, and with `POLLHUP` on a socket never dialled; a closed fd is `POLLNVAL` at once | proc_gate pollloop, noprogress, syscorner poll, pollclosed |
 | a finite `poll`, `ppoll`, `epoll_wait` timeout | refused | exit 3 | proc_gate "a finite poll timeout is refused" |
 | `epoll_create`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` | exact for level-triggered `EPOLLIN`, `EPOLLOUT` | interest list up to 16 fds | proc_gate epollloop |
 | `EPOLLET`, `EPOLLONESHOT`, other epoll flags | refused | exit 3 | proc_gate "EPOLLET is refused" |
 | `eventfd2` | exact without `EFD_SEMAPHORE` | `EFD_NONBLOCK` honoured | proc_gate pollloop |
 | `EFD_SEMAPHORE` | refused | exit 3 | proc_gate "EFD_SEMAPHORE is refused" |
-| `fcntl` `F_GETFL`/`F_SETFL` (`O_NONBLOCK`), `F_GETFD`/`F_SETFD` | exact | any other command is exit 1 | proc_gate pollloop, guarded |
 
 ### Time, randomness and memory
 
@@ -106,6 +108,7 @@ in the kernel, untouched.
 | a path the checker cannot read from the node's memory | refused | exit 3 | proc_gate files badpath |
 | `unlink`, `rename`, `mkdir`, `rmdir`, `link`, `symlink`, `mknod`, `truncate`, `chmod`, `chown`, `utime`, `setxattr` and `removexattr` families, `file_setattr` | refused | exit 3 | proc_gate files, one row per call |
 | `ftruncate`, `fallocate`, `flock` on a kernel fd; `io_uring_setup` | refused | exit 3 | proc_gate files ftruncate, fallocate, flock, io_uring_setup |
+| a channel to another process: a second `execve`, SysV shared memory, message queues and semaphores, POSIX message queues, `process_vm_readv` and `process_vm_writev`, a signal or pidfd to another process | refused | exit 3; a signal to the node itself goes to the kernel | proc_gate edges exec, shm, mq, vmread, killparent, killgroup, pidfd, killself |
 | `lseek`, `fsync`, `fdatasync`, `sync_file_range` on a kernel fd, one thread | exact | the kernel answers | proc_gate files config |
 | `lseek`, `fsync`, `fdatasync`, `ftruncate`, `sync_file_range` on a checker-owned fd | exact | Linux's answer for a socket (`ESPIPE`, `EINVAL`); `fallocate` and `flock` there are refused | proc_gate files sockerr, against a native run |
 | `fsync`, `fdatasync` of fd 193 | exact | succeed: the record is durable when written | proc_gate files durfsync |
