@@ -47,6 +47,28 @@ uninstrumented libraries, which now count as accesses.  Gate: proc_gate
 rows memcopy and memcopy-chk (memcpy, memset and memmove race
 unlocked, a locked memcpy holds) and race_rt.
 
+A review of the race runtime (docs/research/04-review-race-runtime.md)
+found it passing programs that have a data race or a reachable failure.
+It added happens-before edges POSIX and C11 do not promise: from one
+reader's rwlock unlock to another's read lock, from one barrier round
+to the next, from a condition signal to the woken wait, from a store
+(which acquires nothing), and from a failed compare-exchange whose
+failure order is relaxed.  Each is now as the standards say, so the
+race each hid is reported.  And the reduction that makes only
+acquisitions choice points does not cover a try or timed acquisition,
+whose failure needs the other thread inside a section the search runs
+without a switch, nor a semaphore that admits two holders: a pass with
+either is now INCOMPLETE.  The clock forms of the locks, waits and
+semaphore wait are wrapped, and an initialiser that calls `pthread_once`
+keeps its own edge.  The bytes a `read`, `recv`, `readv`, `recvmsg`,
+`pread`, `poll` or `epoll_wait` stores into the program's memory, and
+those a write or send loads, now count as accesses (fortified
+`__read_chk` and its siblings too): a buffer one thread read into while
+another read it unlocked passed.  State counts of the
+existing fixtures are unchanged.  Gate: proc_gate rows syncedge
+(rwread, casfail, casok, bargen, sem2, trymutex, trysem, tryrw,
+readbuf) and race_rt.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

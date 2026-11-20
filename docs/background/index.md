@@ -18,6 +18,7 @@ start at [Design]({{ '/reference/design/' | relative_url }}),
 
 - [Survey and original design]({{ '/background/survey/' | relative_url }})
 - [Adversarial review of actor mode]({{ '/background/review/' | relative_url }})
+- [Review of the race runtime]({{ '/background/race-review/' | relative_url }}) -- the happens-before edges and the acquisition-only reduction, each finding a gate
 - [Calibration against TLC]({{ '/background/calibration/' | relative_url }})
 - [Process mode M0]({{ '/background/process-mode-m0/' | relative_url }}) -- a prototype toward checking code written as it ships
 - [Process mode M1]({{ '/background/process-mode-m1/' | relative_url }}) -- canonical state and a real search over interleavings

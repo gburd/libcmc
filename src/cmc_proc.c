@@ -699,10 +699,12 @@ static Node N[MAXNODES];
 static int g_race_node = -1;
 static uint64_t g_race_pc[2], g_race_addr;
 /* Over the whole search: a node ran more than one thread without the
- * race runtime (its id + 1), and an atomic weaker than seq_cst ran.
- * Either one means the orders searched need not cover every execution,
- * so the search cannot end in a pass (cmc(7), THREADS). */
-static int g_unchecked_node, g_weak_seen;
+ * race runtime (its id + 1), an atomic weaker than seq_cst ran, and a
+ * try or timed acquisition (or a semaphore wait that left another
+ * waiter room) ran with more than one thread.  Any one means the orders
+ * searched need not cover every execution, so the search cannot end in
+ * a pass (cmc(7), THREADS). */
+static int g_unchecked_node, g_weak_seen, g_try_seen;
 /* What a parked thread waits in (3 marks a running thread in the
  * fingerprint).  BK_DONE holds an answer the search has yet to send.  A
  * clone leaves two threads in ptrace stops, each released by a RUN:
@@ -964,7 +966,7 @@ static char preload_path[4096];
 /* the race runtime's markers (cmc_race.c has the same): sched_yield with
  * CMC_RACE_MAGIC, an operation and three words */
 #define CMC_RACE_MAGIC 0x434d4352
-enum { RACE_HELLO = 1, RACE_ATOMIC = 2, RACE_WEAK = 3, RACE_REPORT = 4, RACE_FULL = 5 };
+enum { RACE_HELLO = 1, RACE_ATOMIC = 2, RACE_WEAK = 3, RACE_REPORT = 4, RACE_FULL = 5, RACE_TRY = 6 };
 
 /* Move n bytes to or from a node's memory.  Each returns how many bytes
  * moved: n on success, fewer when the target passed an address it does
@@ -2071,6 +2073,7 @@ serve(Node *nd, Thread *th)
 				{
 					case RACE_HELLO: nd->race_ok = 1; break;
 					case RACE_WEAK: g_weak_seen = 1; break;
+					case RACE_TRY: g_try_seen = 1; break;
 					case RACE_REPORT:
 						if (g_race_node < 0)
 						{
@@ -4480,11 +4483,14 @@ cmc_proc_main(const CmcProcOptions *po)
 	 * atomics.  Otherwise neither a pass nor an unmet `eventually` is a
 	 * verdict: some execution may switch threads between two plain
 	 * accesses, or reorder a weak atomic, where the search did not. */
-	if (g_unchecked_node || g_weak_seen)
+	if (g_unchecked_node || g_weak_seen || g_try_seen)
 	{
 		if (g_unchecked_node)
 			printf("INCOMPLETE (no violation found): node %d ran more than one thread without the race runtime, so its memory accesses between synchronisation points were not checked.  Build it with -fsanitize=thread and link libcmc-race.a (cmc(7), THREADS).  %zu distinct states, %.1f s\n",
 				   g_unchecked_node - 1, distinct, dt);
+		else if (g_try_seen)
+			printf("INCOMPLETE (no violation found): a try or timed lock, or a semaphore that admits more than one thread, ran between threads, and the search does not switch threads inside the sections where its other outcome lies (cmc(7), THREADS).  %zu distinct states, %.1f s\n",
+				   distinct, dt);
 		else
 			printf("INCOMPLETE (no violation found): an atomic weaker than seq_cst ran, and the search explores only sequentially consistent orders (cmc(7), THREADS).  %zu distinct states, %.1f s\n",
 				   distinct, dt);

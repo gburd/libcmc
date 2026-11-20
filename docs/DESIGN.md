@@ -169,14 +169,24 @@ checker answers it and, in a multi-threaded node, treats it as a visible
 operation.  Releases get no marker.  In a program free of data races
 every schedule is equivalent to one that switches threads only before
 acquisitions (a release moves left past race-free accesses, an
-acquisition right), so these points and the system calls are enough.
+acquisition right), so these points and the system calls are enough,
+for acquisitions that wait until they succeed.  A try or timed
+acquisition that fails does not commute with the release that would
+have let it succeed, and a semaphore with count left over admits a
+second holder inside the first one's section; the runtime tells the
+checker when either runs between threads (`RACE_TRY`), and the pass
+becomes INCOMPLETE.  Marking every release instead was measured: the
+twothread tree goes past 600 s from 235 s, raceemit from 2,437 worlds to
+10,228 (docs/research/04-review-race-runtime.md).
 
 Freedom from data races is what the race runtime (`src/cmc_race.c`,
 `libcmc-race.a`) checks.  A node built with `-fsanitize=thread` and
 linked against it instead of the sanitizer's runtime calls into it on
 every instrumented access and atomic.  It keeps vector clocks (per
 thread, per synchronisation object, edges from create and join, the
-wrapped calls and atomics by memory order) and a per-byte record of the
+wrapped calls and atomics by memory order; a rwlock keeps a writers'
+clock and a readers' clock, a barrier one clock per round by parity,
+and a condition signal adds no edge) and a per-byte record of the
 last write and the reads since, in tables mapped at fixed addresses so
 the node's own layout does not move.  An unordered conflicting pair is
 reported through a marker and is a violation.  Atomics are markers too,
