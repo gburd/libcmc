@@ -1,0 +1,61 @@
+== hcd12: cmc --model-file examples/hc/hc.model --binary hc --depth 12 (cmc at d8ae8c2..f806005; same search)
+cmc: model file /scratch/libcmc/wt-fix2/examples/hc/hc.model, binary p/hc, 3 nodes, breadth-first search
+  environment: client_write -1, timeouts 4, crashes 0, drops 0, restarts 0, depth 12
+INCOMPLETE (no violation found): depth bound reached; 23787 distinct states, 0 left on queue, 8459 cut at depth 12, 275.8 s
+Command exited with non-zero status 2
+d12 275.81 s
+== hcd14: cmc --model-file examples/hc/hc.model --binary hc --depth 14 (cmc at d8ae8c2..f806005; same search)
+cmc: model file /scratch/libcmc/wt-fix2/examples/hc/hc.model, binary p/hc, 3 nodes, breadth-first search
+  environment: client_write -1, timeouts 4, crashes 0, drops 0, restarts 0, depth 14
+INCOMPLETE (no violation found): depth bound reached; 53360 distinct states, 0 left on queue, 17426 cut at depth 14, 589.6 s
+Command exited with non-zero status 2
+d14 589.63 s
+== hcd15: cmc --model-file examples/hc/hc.model --binary hc --depth 15 (cmc at d8ae8c2..f806005; same search)
+cmc: model file /scratch/libcmc/wt-fix2/examples/hc/hc.model, binary p/hc, 3 nodes, breadth-first search
+  environment: client_write -1, timeouts 4, crashes 0, drops 0, restarts 0, depth 15
+INCOMPLETE (no violation found): depth bound reached; 78155 distinct states, 0 left on queue, 24795 cut at depth 15, 880.1 s
+Command exited with non-zero status 2
+880.08 s
+== hcd16: cmc --model-file examples/hc/hc.model --binary hc --depth 16 (cmc at d8ae8c2..f806005; same search)
+cmc: model file /scratch/libcmc/wt-fix2/examples/hc/hc.model, binary p/hc, 3 nodes, breadth-first search
+  environment: client_write -1, timeouts 4, crashes 0, drops 0, restarts 0, depth 16
+INCOMPLETE (no violation found): depth bound reached; 112920 distinct states, 0 left on queue, 34765 cut at depth 16, 1334.5 s
+Command exited with non-zero status 2
+d16 1334.51 s
+== hc full at 85051f4 (before this series)
+cmc: model file /scratch/libcmc/wt-fix2/examples/hc/hc.model, binary /scratch/libcmc/s-fix2/p/hc, 3 nodes, breadth-first search
+  environment: client_write -1, timeouts 4, crashes 0, drops 0, restarts 0
+Model checking completed. No error has been found.
+97748 states generated, 36331 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 89.
+  2 invariants held; 792.4 s, 123 replays/s.
+792.42 s
+EXIT 0
+== hc full at d8ae8c2, 2 h cap (timeout exit 124)
+cmc: model file /scratch/libcmc/wt-fix2/examples/hc/hc.model, binary p/hc, 3 nodes, breadth-first search
+  environment: client_write -1, timeouts 4, crashes 0, drops 0, restarts 0
+Command exited with non-zero status 124
+7200.00 s
+EXIT 124
+== hc-bug: --timeouts 12 --simulate --seed S --walks 30000 --depth 600
+seed 4, 5, 6: INCOMPLETE (no violation found): 30000 walks, about 244 s
+-- seed 1
+Walk 22449 (seed 1):
+Error: Invariant agreement is violated.
+  node states: node[0]=1,10 node[1]=1,11 node[2]=0,0
+181.43 s
+-- seed 2
+Walk 22459 (seed 2):
+Error: Invariant agreement is violated.
+  node states: node[0]=1,10 node[1]=1,11 node[2]=0,0
+183.28 s
+-- seed 3
+Walk 15905 (seed 3):
+Error: Invariant agreement is violated.
+  node states: node[0]=1,10 node[1]=0,0 node[2]=1,11
+128.92 s
+-- seed 7
+Walk 25353 (seed 7):
+Error: Invariant agreement is violated.
+  node states: node[0]=1,10 node[1]=0,0 node[2]=1,11
+205.70 s

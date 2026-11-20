@@ -93,12 +93,24 @@ cc -no-pie -o hc examples/hc/hc.c
 cmc --model-file examples/hc/hc.model --binary ./hc
 ```
 
-```
-Model checking completed. No error has been found.
-97748 states generated, 36331 distinct states found, 0 states left on queue.
-```
+Since 2.2 this no longer finishes in a gate's time.  A participant
+dials the next store right after answering a peer, and a dial made
+after a send in the same step is now a point where the peer may act
+first (it may exit, and Linux then refuses the dial), so the search
+has many more interleavings to try.  Bounded runs, measured on a
+48-thread x86-64 host under a load of about 8
+([measurement](../../docs/measurements/2026-11-20-hc-midstep-dial.md)):
 
-(about six minutes, single-threaded).  cmc runs all three participants
+| `--depth` | distinct states | time |
+|---|---|---|
+| 12 | 23,787 | 276 s |
+| 14 | 53,360 | 590 s |
+| 15 | 78,155 | 877 s |
+| 16 | 112,920 | 1,335 s |
+
+Each is INCOMPLETE with no violation found.  Before 2.2 the full search
+finished: 36,331 distinct states at depth 89, in about 13 minutes.
+`make check-examples-slow` runs depth 15.  cmc runs all three participants
 and tries every order of their iterations, and every point at which a
 timeout stands for an unreachable peer, up to four timeouts.  No two
 ever adopt different configurations at one epoch, and the model's
@@ -131,19 +143,19 @@ invisible until the partition heals.
 ```sh
 cc -no-pie -DBUG -o hc-bug examples/hc/hc.c
 cmc --model-file examples/hc/hc.model --binary ./hc-bug \
-    --timeouts 12 --simulate --seed 4 --walks 30000 --depth 600
+    --timeouts 12 --simulate --seed 3 --walks 30000 --depth 600
 ```
 
 ```
-Walk 2529 (seed 4):
+Walk 15905 (seed 3):
 Error: Invariant agreement is violated.
-  node states: node[0]=1,10 node[1]=1,11 node[2]=0,0
+  node states: node[0]=1,10 node[1]=0,0 node[2]=1,11
 ```
 
-The violation needs a long schedule (73 actions, twelve of them
+The violation needs a long schedule (77 actions, twelve of them
 timeouts), so simulation reaches it where the exhaustive search does
-not; a fixed seed makes it reproducible, in about 20 seconds.  Five of
-the first twelve seeds find it within 30,000 walks.
+not; a fixed seed makes it reproducible, in about two minutes.  Of
+seeds 1 to 7, all but 4, 5 and 6 find it within 30,000 walks.
 
 ## What this shows
 

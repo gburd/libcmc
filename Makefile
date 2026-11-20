@@ -128,8 +128,8 @@ check-examples: $(B)/test_cmc $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/proc_gate.sh $(B)
 	test/spec_gate.sh $(B)
 
-# check-examples plus the rows too slow for every push (the full hc
-# check and its planted bug, about seven minutes)
+# check-examples plus the rows too slow for every push (hc to depth 15
+# and its planted bug, about 17 minutes)
 check-examples-slow: $(B)/test_cmc $(B)/cmc $(PRELOAD)
 	CMC_SLOW=1 CC=$(CC) test/proc_gate.sh $(B)
 

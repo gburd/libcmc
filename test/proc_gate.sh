@@ -199,14 +199,15 @@ expect "raftlog: no committed entry is lost" 0 "No error has been found" $(runx 
 expect "raftlog: early-ack loses a committed entry" 1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug)
 expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(runx "$HERE/examples/raft/raftlog.model" raftlog-bug) --simulate --seed 1 --walks 2000
 # hc's model requires that some participant adopts, so agreement is not
-# a vacuous pass.  The full check and the AP-mode bug take about seven
-# minutes together, so they run only with CMC_SLOW=1 (make
-# check-examples-slow, on the calibration's triggers); the quick row
+# a vacuous pass.  The full check no longer finishes in a gate's time
+# (examples/hc/README.md), so CMC_SLOW=1 (make check-examples-slow, on
+# the calibration's triggers) runs it to depth 15, about 15 minutes,
+# and the AP-mode bug by simulation, about 2 minutes; the quick row
 # checks a shorter run is INCOMPLETE rather than a pass.
 expect "hc: a bounded run is not a pass" 2 "INCOMPLETE" $(runx "$HERE/examples/hc/hc.model" hc) --depth 12
 if [ "${CMC_SLOW:-0}" = 1 ]; then
-	expect "hc: agreement holds, and a participant adopts" 0 "No error has been found" $(runx "$HERE/examples/hc/hc.model" hc)
-	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 4 --walks 30000 --depth 600
+	expect_by 2400 "hc: agreement holds to depth 15" 2 "78155 distinct states" $(runx "$HERE/examples/hc/hc.model" hc) --depth 15
+	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 3 --walks 30000 --depth 600
 fi
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)
