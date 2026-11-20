@@ -85,6 +85,57 @@ The search already delays any delivery as long as it likes, so a cut
 alone adds no safety violation; it matters with timeouts.  Gate:
 proc_gate partitions rows.
 
+The race runtime provides the 16-byte atomics (`__tsan_atomic128_*`)
+that gcc and clang emit for `__int128` atomics under `-mcx16`.  A
+program that used them failed to link against `libcmc-race.a`.  Gate:
+proc_gate rows atomic128 (a seq_cst handoff holds, a relaxed one is a
+race, fetch_add and compare-exchange compute) and race_rt.
+
+A thread that ends by `pthread_exit` or `thrd_exit` gives its join the
+same happens-before edge as one that returns from its start function.
+The race runtime took the joined thread's clock only on a return, so
+the joiner's reads of what such a thread wrote were reported as data
+races; and glibc's first `pthread_exit` loads libgcc_s, a read of a
+kernel fd the checker refused in a multi-threaded node.  The runtime
+now loads libgcc_s at `__tsan_init` and the join takes the thread's
+final clock.  Gate: proc_gate rows threadexit (exit, thrd, nested, and
+a read before the join that is still a race).
+
+The race runtime sees `memcpy`, `memmove` and `memset` called from
+instrumented code.  gcc leaves them as calls to the C library, and with
+`_FORTIFY_SOURCE` (on by default in many distributions' compilers)
+both gcc and clang call `__memcpy_chk` and its siblings; the runtime
+saw only clang's unfortified `__tsan_memcpy`.  An unlocked `memcpy` into
+a buffer another thread read passed with either compiler.  The runtime
+now defines the plain and fortified forms in the executable, records
+the bytes each reads and writes, and copies with the C library's
+function.  Being in the executable, they also serve calls from
+uninstrumented libraries, which now count as accesses.  Gate: proc_gate
+rows memcopy and memcopy-chk (memcpy, memset and memmove race
+unlocked, a locked memcpy holds) and race_rt.
+
+A review of the race runtime (docs/research/04-review-race-runtime.md)
+found it passing programs that have a data race or a reachable failure.
+It added happens-before edges POSIX and C11 do not promise: from one
+reader's rwlock unlock to another's read lock, from one barrier round
+to the next, from a condition signal to the woken wait, from a store
+(which acquires nothing), and from a failed compare-exchange whose
+failure order is relaxed.  Each is now as the standards say, so the
+race each hid is reported.  And the reduction that makes only
+acquisitions choice points does not cover a try or timed acquisition,
+whose failure needs the other thread inside a section the search runs
+without a switch, nor a semaphore that admits two holders: a pass with
+either is now INCOMPLETE.  The clock forms of the locks, waits and
+semaphore wait are wrapped, and an initialiser that calls `pthread_once`
+keeps its own edge.  The bytes a `read`, `recv`, `readv`, `recvmsg`,
+`pread`, `poll` or `epoll_wait` stores into the program's memory, and
+those a write or send loads, now count as accesses (fortified
+`__read_chk` and its siblings too): a buffer one thread read into while
+another read it unlocked passed.  State counts of the
+existing fixtures are unchanged.  Gate: proc_gate rows syncedge
+(rwread, casfail, casok, bargen, sem2, trymutex, trysem, tryrw,
+readbuf) and race_rt.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

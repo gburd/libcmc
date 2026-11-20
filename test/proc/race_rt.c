@@ -12,6 +12,8 @@
  * scenario adds one through a wrapped call.  Each scenario asserts
  * whether a race is reported.  Exits 0 when every check holds.
  */
+/* as in cmc_race.c, which defines functions the fortify macros rename */
+#undef _FORTIFY_SOURCE
 #define _GNU_SOURCE
 #include <stdarg.h>
 #include <stdint.h>
@@ -26,12 +28,13 @@ static long race_marker(long nr, ...);
 #undef _exit
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
 
-static int	nreport, nweak, natomic, nhello, nfull, last_full;
+static int	nreport, nweak, natomic, nhello, nfull, last_full, ntry;
 
 static long
 race_marker(long nr, ...)
@@ -52,6 +55,7 @@ race_marker(long nr, ...)
 		case RACE_ATOMIC: natomic++; break;
 		case RACE_WEAK: nweak++; break;
 		case RACE_REPORT: nreport++; break;
+		case RACE_TRY: ntry++; break;
 		case RACE_FULL: nfull++; last_full = (int) a; break;
 		default: break;
 	}
@@ -73,17 +77,19 @@ check(int ok, const char *what)
 static void
 reset(void)
 {
-	memset(cells, 0, CELLS * sizeof(Cell));
-	memset(syncs, 0, SYNCS * sizeof(Sync));
-	memset(tvc, 0, sizeof tvc);
-	memset(exit_vc, 0, sizeof exit_vc);
-	memset(tid_of, 0, sizeof tid_of);
+	/* the runtime's own tables, cleared without recording the writes,
+	 * which memset (the runtime's wrapper) would */
+	set_bytes(cells, 0, CELLS * sizeof(Cell));
+	set_bytes(syncs, 0, SYNCS * sizeof(Sync));
+	set_bytes(tvc, 0, sizeof tvc);
+	set_bytes(tid_of, 0, sizeof tid_of);
 	atomic_store(&nthreads, 1);
 	tvc[0][0] = 1;
 	self = 0;
 	reported = 0;
 	weak_told = 0;
-	nreport = nweak = natomic = nfull = 0;
+	try_told = 0;
+	nreport = nweak = natomic = nfull = ntry = 0;
 }
 
 /* ---- a two-thread harness ------------------------------------------ */
@@ -172,6 +178,80 @@ static once_flag conce = ONCE_FLAG_INIT;
 static _Atomic int flag;
 
 static void w_x(void) { __tsan_write4(&x); }
+static const int one_int = 1;
+static void rd_w(void) { pthread_rwlock_rdlock(&rw); __tsan_write4(&x); pthread_rwlock_unlock(&rw); }
+static void rd_r_only(void) { pthread_rwlock_rdlock(&rw); __tsan_read4(&x); pthread_rwlock_unlock(&rw); }
+static void rd_w_wr(void) { rd_w(); }
+static void wr_r(void) { pthread_rwlock_wrlock(&rw); __tsan_read4(&x); pthread_rwlock_unlock(&rw); }
+static void clockwr_w(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	t.tv_sec += 5;
+	if (pthread_rwlock_clockwrlock(&rw, CLOCK_MONOTONIC, &t) == 0)
+	{
+		__tsan_write4(&x);
+		pthread_rwlock_unlock(&rw);
+	}
+}
+static void clockrd_r(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	t.tv_sec += 5;
+	if (pthread_rwlock_clockrdlock(&rw, CLOCK_MONOTONIC, &t) == 0)
+	{
+		__tsan_read4(&x);
+		pthread_rwlock_unlock(&rw);
+	}
+}
+static void clock_lock_r(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	t.tv_sec += 5;
+	if (pthread_mutex_clocklock(&mu, CLOCK_MONOTONIC, &t) == 0)
+	{
+		__tsan_read4(&x);
+		pthread_mutex_unlock(&mu);
+	}
+}
+static void clockwait_r(void)
+{
+	struct timespec t;
+
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	t.tv_sec += 5;
+	if (sem_clockwait(&sem, CLOCK_MONOTONIC, &t) == 0)
+		__tsan_read4(&x);
+}
+static void cond_clock_r(void)
+{
+	struct timespec t = {0};
+
+	pthread_mutex_lock(&mu);
+	pthread_cond_clockwait(&cv, &mu, CLOCK_MONOTONIC, &t);
+	__tsan_read4(&x);
+	pthread_mutex_unlock(&mu);
+}
+static void cas_fail_r(int fmo)
+{
+	uint32_t	e = 5;
+
+	if (!__tsan_atomic32_compare_exchange_strong((volatile uint32_t *) &flag, &e, 9, MO_SEQ_CST, fmo))
+		__tsan_read4(&x);
+}
+static void cas_fail_rlx_r(void) { cas_fail_r(MO_RELAXED); }
+static void cas_fail_sc_r(void) { cas_fail_r(MO_SEQ_CST); }
+static void store_sc_only(void) { __tsan_atomic32_store((volatile uint32_t *) &flag, 2, MO_SEQ_CST); __tsan_read4(&x); }
+static void init_inner(void) { }
+static pthread_once_t once_in = PTHREAD_ONCE_INIT, once_out = PTHREAD_ONCE_INIT;
+static void init_outer(void) { pthread_once(&once_in, init_inner); __tsan_write4(&y); }
+static void nest_w(void) { pthread_once(&once_out, init_outer); }
+static void nest_r(void) { pthread_once(&once_out, init_outer); __tsan_read4(&y); }
 static void r_x(void) { __tsan_read4(&x); }
 static void lock_w_unlock(void) { pthread_mutex_lock(&mu); __tsan_write4(&x); pthread_mutex_unlock(&mu); }
 static void lock_r_unlock(void) { pthread_mutex_lock(&mu); __tsan_read4(&x); pthread_mutex_unlock(&mu); }
@@ -241,6 +321,7 @@ static void timedwait_r(void)
 }
 static void w_signal(void) { __tsan_write4(&x); pthread_cond_signal(&cv); }
 static void w_broadcast(void) { __tsan_write4(&x); pthread_cond_broadcast(&cv); }
+static void lockw_signal(void) { lock_w_unlock(); pthread_cond_signal(&cv); }
 static void cond_r(void)
 {
 	/* a timed wait that returns at once: the edge from the signal's
@@ -274,6 +355,7 @@ static void c_timed_r(void)
 }
 static void w_csignal(void) { __tsan_write4(&x); cnd_signal(&ccnd); }
 static void w_cbroadcast(void) { __tsan_write4(&x); cnd_broadcast(&ccnd); }
+static void c_lockw_signal(void) { mtx_lock(&cmtx); __tsan_write4(&x); mtx_unlock(&cmtx); cnd_signal(&ccnd); }
 static void ccond_r(void)
 {
 	struct timespec t = {0};
@@ -308,6 +390,135 @@ scenario(const char *what, const Step *mine, const Step *theirs, int join, int w
 
 #define S(...) ((const Step[]) {__VA_ARGS__, NULL, NULL, NULL})
 
+/* ---- system calls that move bytes ----------------------------------- */
+
+/* A read into x by one thread and a plain read of x by another race;
+ * every wrapper moves its bytes and records what it moved. */
+static int	io_fd[2];
+
+static void
+read_x(void)
+{
+	(void) !read(io_fd[0], &x, sizeof x);
+}
+
+static void
+io_calls(void)
+{
+	char		b[8] = "abcdefg", c[8] = {0};
+	struct iovec v[2] = {{c, 3}, {c + 3, 5}};
+	struct msghdr m = {.msg_iov = v, .msg_iovlen = 2};
+	struct pollfd pf = {.fd = 0, .events = POLLIN};
+	struct epoll_event ev;
+	int			ok = 1, e;
+
+	reset();
+	ok &= socketpair(AF_UNIX, SOCK_STREAM, 0, io_fd) == 0;
+	ok &= write(io_fd[1], b, 2) == 2 && read(io_fd[0], c, 8) == 2 && c[1] == 'b';
+	ok &= send(io_fd[1], b, 3, 0) == 3 && recv(io_fd[0], c, 8, 0) == 3;
+	ok &= sendto(io_fd[1], b, 4, 0, NULL, 0) == 4 && recvfrom(io_fd[0], c, 8, 0, NULL, NULL) == 4;
+	ok &= writev(io_fd[1], v, 2) == 8 && readv(io_fd[0], v, 2) == 8;
+	ok &= sendmsg(io_fd[1], &m, 0) == 8 && recvmsg(io_fd[0], &m, 0) == 8;
+	ok &= sendmsg(io_fd[1], &m, MSG_DONTWAIT) == 8 && recv(io_fd[0], c, 8, 0) == 8;
+	pf.fd = io_fd[0];
+	ok &= poll(&pf, 1, 0) == 0;
+	e = epoll_create1(0);
+	ok &= epoll_wait(e, &ev, 1, 0) == 0;
+	close(e);
+	{
+		int			f = open("/dev/zero", O_RDONLY);
+
+		ok &= f >= 0 && pread(f, c, 4, 0) == 4 && c[0] == 0;
+		ok &= pwrite(f, b, 1, 0) == -1;	/* opened read-only: EBADF */
+		close(f);
+	}
+	ok &= write(io_fd[1], b, 7) == 7 && __read_chk(io_fd[0], c, 2, 8) == 2;
+	ok &= __recv_chk(io_fd[0], c, 2, 8, 0) == 2 && __recvfrom_chk(io_fd[0], c, 3, 8, 0, NULL, NULL) == 3;
+	ok &= __poll_chk(&pf, 1, 0, sizeof pf) == 0;
+	{
+		int			f = open("/dev/zero", O_RDONLY);
+
+		ok &= __pread_chk(f, c, 4, 0, 8) == 4;
+		close(f);
+	}
+	check(ok, "every byte-moving wrapper makes its call");
+	check(nreport == 0, "one thread's system calls never race");
+	(void) !write(io_fd[1], &one_int, sizeof one_int);
+	scenario("a read into a buffer races a plain read of it", S(read_x), S(r_x), 1, 1);
+	close(io_fd[0]);
+	close(io_fd[1]);
+}
+
+/* ---- acquisitions the reduction does not cover --------------------- */
+
+/* Each try or timed acquisition, and a semaphore wait that leaves room,
+ * is told to the checker once a node has a second thread; a plain lock
+ * and a semaphore wait that empties the count are not. */
+static void
+uncovered_calls(void)
+{
+	struct timespec later;
+	sem_t		s2;
+
+	clock_gettime(CLOCK_REALTIME, &later);
+	later.tv_sec += 5;
+	reset();
+	pthread_mutex_lock(&mu);
+	pthread_mutex_unlock(&mu);
+	check(ntry == 0, "a trylock with one thread is not told");
+	atomic_store(&nthreads, 2);
+	pthread_mutex_lock(&mu);
+	pthread_mutex_unlock(&mu);
+	sem_init(&s2, 0, 1);
+	sem_wait(&s2);
+	check(ntry == 0, "a lock, and a semaphore wait that empties the count, are covered");
+	sem_post(&s2);
+	sem_post(&s2);
+	sem_wait(&s2);
+	check(ntry == 1, "a semaphore wait that leaves room is told");
+	sem_wait(&s2);
+	sem_destroy(&s2);
+	try_told = 0;
+	pthread_mutex_trylock(&mu);
+	pthread_mutex_unlock(&mu);
+	check(ntry == 2, "a trylock is told");
+	pthread_mutex_timedlock(&mu, &later);
+	pthread_mutex_unlock(&mu);
+	check(ntry == 2, "and told once");
+	try_told = 0;
+	pthread_rwlock_trywrlock(&rw);
+	pthread_rwlock_unlock(&rw);
+	check(ntry == 3, "a rwlock trywrlock is told");
+	try_told = 0;
+	pthread_rwlock_rdlock(&rw);
+	pthread_rwlock_unlock(&rw);
+	pthread_rwlock_wrlock(&rw);
+	pthread_rwlock_unlock(&rw);
+	check(ntry == 3, "a rwlock rdlock and wrlock are covered");
+	reset();
+}
+
+/* ---- a thread that holds too many rwlocks for writing --------------- */
+
+static void
+rw_held_limit(void)
+{
+	static pthread_rwlock_t l[RW_HELD + 1];
+
+	reset();
+	for (int i = 0; i <= RW_HELD; i++)
+	{
+		pthread_rwlock_init(&l[i], NULL);
+		pthread_rwlock_wrlock(&l[i]);
+	}
+	check(nfull == 1 && last_full == 4, "a thread writing more rwlocks than it can track is reported");
+	for (int i = 0; i <= RW_HELD; i++)
+		pthread_rwlock_unlock(&l[i]);
+	active = 1;
+	set_bytes(rw_writing, 0, sizeof rw_writing);
+	reset();
+}
+
 /* ---- a barrier ------------------------------------------------------- */
 
 /* Each thread writes its own word, waits at the barrier, then reads the
@@ -339,6 +550,59 @@ barrier(void)
 	real_join(t, NULL);
 	check(nreport == 0, "a barrier orders each thread's writes before the other's reads");
 	pthread_barrier_destroy(&bar);
+}
+
+/* Rounds of a barrier keep their own clocks, alternating: with one
+ * thread per round, round one's arrival releases into one clock and
+ * round two's into the other, and round three's into the first again.
+ * (The end-to-end case, a woken thread whose acquire runs after another
+ * has arrived at the next round, is proc_gate's syncedge bargen.) */
+static Sync *
+find_sync(const void *a)
+{
+	for (unsigned i = 0; i < SYNCS; i++)
+		if (syncs[i].addr == (uintptr_t) a)
+			return &syncs[i];
+	return NULL;
+}
+
+static void
+barrier_rounds(void)
+{
+	reset();
+	set_bytes(barriers, 0, sizeof barriers);
+	pthread_barrier_init(&bar, NULL, 1);
+	pthread_barrier_wait(&bar);
+	Sync	   *r1 = find_sync((const char *) &bar + 1);
+	uint32_t	at1 = r1 ? r1->vc[0] : 0;
+
+	pthread_barrier_wait(&bar);
+	Sync	   *r2 = find_sync((const char *) &bar + 2);
+
+	check(r1 && r2 && r1->vc[0] == at1 && r2->vc[0] > at1,
+		  "a barrier's second round releases into its own clock");
+	pthread_barrier_wait(&bar);
+	check(r1->vc[0] > at1, "the third round reuses the first round's clock");
+	pthread_barrier_destroy(&bar);
+
+	/* the barrier table: one more barrier than it holds */
+	static pthread_barrier_t many[BARRIERS + 1];
+
+	reset();
+	for (int i = 0; i <= BARRIERS && nfull == 0; i++)
+		pthread_barrier_init(&many[i], NULL, 1);
+	check(nfull == 1 && last_full == 5, "a full barrier table is reported");
+	active = 1;
+	reset();
+	set_bytes(barriers, 0, sizeof barriers);
+	/* re-initialising a barrier reuses its slot */
+	pthread_barrier_init(&many[0], NULL, 1);
+	pthread_barrier_init(&many[0], NULL, 1);
+	check(barriers[1].b == NULL, "a barrier initialised twice keeps one slot");
+	set_bytes(barriers, 0, sizeof barriers);
+	/* a barrier of no slot (initialised out of sight) still works */
+	pthread_barrier_wait(&many[1]);
+	check(nreport == 0 && nfull == 0, "a barrier initialised out of sight keeps one clock");
 }
 
 /* ---- create and join -------------------------------------------------- */
@@ -406,6 +670,73 @@ create_join(void)
 
 typedef void (*Acc) (void *);
 
+/* the plain and fortified copies: each copies like the C library, with
+ * the byte loops (before the lookup) and with the C library's functions */
+static void
+mem_copies(char *d, const char *what)
+{
+	char		w[64];
+	size_t		n = strlen(what);
+
+	memcpy(d, "0123456789", 10);
+	memmove(d + 2, d, 6);
+	check(memcmp(d, "0101234589", 10) == 0, what);
+	__memcpy_chk(d, "0123456789", 10, 16);
+	__memmove_chk(d, d + 2, 6, 16);
+	snprintf(w, sizeof w, "%.*s: fortified", (int) n, what);
+	check(memcmp(d, "2345676789", 10) == 0, w);
+	memset(d, 'q', 3);
+	__memset_chk(d + 3, 'r', 2, 13);
+	snprintf(w, sizeof w, "%.*s: memset", (int) n, what);
+	check(memcmp(d, "qqqrr7", 6) == 0, w);
+}
+
+static void
+mem_entry_points(char *d)
+{
+	void	   *(*keep) (void *, const void *, size_t) = libc_memmove;
+	void	   *(*keep_set) (void *, int, size_t) = libc_memset;
+
+	mem_copies(d, "memmove copies forward, memcpy and memset");
+	libc_memmove = NULL;
+	libc_memset = NULL;
+	mem_copies(d, "before the lookup, the byte loops copy the same");
+	libc_memmove = keep;
+	libc_memset = keep_set;
+	check(libc_memmove != NULL && libc_memset != NULL, "__tsan_init looks up the C library's copies");
+
+	/* a fortified copy longer than its room ends the program */
+	fflush(stdout);
+	pid_t		pid = fork();
+
+	if (pid == 0)
+	{
+		signal(SIGABRT, SIG_DFL);
+		__memcpy_chk(d, "0123456789", 10, 4);
+		exit(0);
+	}
+	int			st = 0;
+
+	waitpid(pid, &st, 0);
+	check(WIFSIGNALED(st), "a fortified copy past its room fails as the C library's does");
+}
+
+/* a length the compiler cannot see, so it makes the calls, not moves */
+static volatile size_t four = sizeof(int);
+static void w_cpy(void) { memcpy(&x, &y, four); }
+static volatile int sink;
+static void r_cpy(void) { int v; memcpy(&v, &x, four); sink = v; }
+static void w_set(void) { memset(&x, 0, four); }
+static void w_chk(void) { __memcpy_chk(&x, &y, four, sizeof x); }
+/* volatile: memcpy is known not to read in_runtime, so a compiler may
+ * otherwise drop the increment */
+static void w_inside(void)
+{
+	(*(volatile int *) &in_runtime)++;
+	memcpy(&x, &y, four);
+	(*(volatile int *) &in_runtime)--;
+}
+
 static void
 entry_points(void)
 {
@@ -442,6 +773,8 @@ entry_points(void)
 	__tsan_memmove(dst, dst + 2, 6);
 	check(memcmp(dst, "2345676789", 10) == 0, "__tsan_memmove backward overlap");
 	check(nreport == 0, "one thread's accesses never race");
+	mem_entry_points(dst);
+	check(nreport == 0, "one thread's copies never race");
 }
 
 /* every atomic entry point, at every size, with seq_cst: no weak report */
@@ -476,10 +809,18 @@ atomics(void)
 	ATOMIC_SIZE(16, uint16_t);
 	ATOMIC_SIZE(32, uint32_t);
 	ATOMIC_SIZE(64, uint64_t);
+	ATOMIC_SIZE(128, unsigned __int128);
 	check(ok, "every atomic entry point computes its operation");
+	{
+		static volatile unsigned __int128 w = ~(uint64_t) 0;
+
+		check(__tsan_atomic128_fetch_add(&w, 1, MO_SEQ_CST) == ~(uint64_t) 0 &&
+			  __tsan_atomic128_load(&w, MO_SEQ_CST) == (unsigned __int128) 1 << 64,
+			  "a 16-byte fetch_add carries into the high half");
+	}
 	check(nweak == 0 && nreport == 0, "seq_cst atomics report nothing");
-	/* 14 calls at each of four sizes, the last a load that checks the result */
-	check(natomic == 4 * 14, "each atomic operation is a choice point");
+	/* 14 calls at each of five sizes, the last a load that checks the result */
+	check(natomic == 5 * 14 + 2, "each atomic operation is a choice point");
 	__tsan_atomic_thread_fence(MO_SEQ_CST);
 	__tsan_atomic_signal_fence(MO_RELAXED);
 	check(nweak == 0, "a seq_cst fence is not weak");
@@ -765,8 +1106,8 @@ stranger_atomic(void *arg)
 	return NULL;
 }
 
-/* a C11 thread that finishes after the runtime turned off records no
- * exit clock */
+/* a C11 thread joined after the runtime turned off gives the joiner
+ * no clock */
 static int
 late_child(void *arg)
 {
@@ -786,7 +1127,7 @@ c11_late(void)
 	active = 0;
 	pass_turn(1);
 	thrd_join(ct, NULL);
-	check(exit_vc[1][1] == 0, "a C11 thread that ends while the runtime is off records no exit clock");
+	check(tvc[0][1] == 0, "a C11 join while the runtime is off takes no clock");
 	active = 1;
 	reset();
 
@@ -889,14 +1230,16 @@ main(void)
 	scenario("sem_post orders before sem_wait", S(w_post), S(wait_r), 1, 0);
 	scenario("sem_post orders before sem_trywait", S(w_post), S(trywait_r), 1, 0);
 	scenario("sem_post orders before sem_timedwait", S(w_post), S(timedwait_r), 1, 0);
-	scenario("a condition signal orders a waiter", S(w_signal), S(cond_r), 1, 0);
-	scenario("a condition broadcast orders a waiter", S(w_broadcast), S(cond_r), 1, 0);
+	scenario("a condition signal adds no edge (a wait may wake spuriously)", S(w_signal), S(cond_r), 1, 1);
+	scenario("a condition broadcast adds no edge", S(w_broadcast), S(cond_r), 1, 1);
+	scenario("a write under the mutex orders before a woken waiter", S(lockw_signal), S(cond_r), 1, 0);
 	scenario("pthread_once orders its initialiser", S(once_w), S(once_r), 1, 0);
 	scenario("C11 call_once orders its initialiser", S(conce_w), S(conce_r), 1, 0);
 	scenario("a C11 mutex orders", S(c_lock_w), S(c_lock_r), 1, 0);
 	scenario("a C11 timed mutex orders", S(c_lock_w), S(c_timed_r), 1, 0);
-	scenario("a C11 condition signal orders", S(w_csignal), S(ccond_r), 1, 0);
-	scenario("a C11 condition broadcast orders", S(w_cbroadcast), S(ccond_r), 1, 0);
+	scenario("a C11 condition signal adds no edge", S(w_csignal), S(ccond_r), 1, 1);
+	scenario("a C11 condition broadcast adds no edge", S(w_cbroadcast), S(ccond_r), 1, 1);
+	scenario("a C11 write under the mutex orders before a woken waiter", S(c_lockw_signal), S(ccond_r), 1, 0);
 	scenario("a seq_cst store and load order a payload", S(store_sc), S(load_sc_r), 1, 0);
 	scenario("a release store and acquire load order a payload", S(store_rel), S(load_acq_r), 1, 0);
 	scenario("relaxed atomics do not order a payload", S(store_rlx), S(load_rlx_r), 1, 1);
@@ -906,7 +1249,27 @@ main(void)
 	scenario("a read ordered before a write does not race", S(lock_r_unlock), S(lock_w_unlock), 1, 0);
 	scenario("an atomic read and an atomic write never race", S(atomic_load_x), S(atomic_add), 1, 0);
 	scenario("an atomic read and a plain write race", S(atomic_load_x), S(plain_w), 1, 1);
+	scenario("two readers of a rwlock are not ordered", S(rd_w), S(rd_r_only), 1, 1);
+	scenario("a reader's unlock orders before a writer", S(rd_w_wr), S(wr_r), 1, 0);
+	scenario("a writer's unlock orders before a reader", S(wr_w), S(rd_r_only), 1, 0);
+	scenario("clock rwlocks order", S(clockwr_w), S(clockrd_r), 1, 0);
+	scenario("a clock lock orders like a lock", S(lock_w_unlock), S(clock_lock_r), 1, 0);
+	scenario("sem_post orders before sem_clockwait", S(w_post), S(clockwait_r), 1, 0);
+	scenario("a clock condition wait reacquires the mutex", S(lock_w_unlock), S(cond_clock_r), 1, 0);
+	scenario("a failed compare-exchange with relaxed failure order is no acquire", S(store_sc), S(cas_fail_rlx_r), 1, 1);
+	scenario("a failed compare-exchange with seq_cst failure order acquires", S(store_sc), S(cas_fail_sc_r), 1, 0);
+	scenario("a store does not acquire", S(store_sc), S(store_sc_only), 1, 1);
+	scenario("a pthread_once inside an initialiser keeps the outer edge", S(nest_w), S(nest_r), 1, 0);
+	scenario("an unordered memcpy and memcpy race", S(w_cpy), S(r_cpy), 1, 1);
+	scenario("an unordered memset and read race", S(w_set), S(r_x), 1, 1);
+	scenario("an unordered __memcpy_chk and write race", S(w_chk), S(w_x), 1, 1);
+	scenario("a mutex orders a memcpy", S(lock_w_unlock), S(lock_r_unlock), 1, 0);
+	scenario("a copy made inside the runtime is not recorded", S(w_inside), S(w_x), 1, 0);
 	barrier();
+	barrier_rounds();
+	uncovered_calls();
+	io_calls();
+	rw_held_limit();
 	create_join();
 	entry_points();
 	atomics();

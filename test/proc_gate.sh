@@ -82,6 +82,12 @@ for f in twothread twothread_join racewake raceemit raceborn durack memrace sync
 	tsan "$f-tsan" "$T/$f.c"
 done
 tsan raceemit-bug-tsan "$T/raceemit.c" -DBUG
+tsan atomic128-tsan "$T/atomic128.c" -mcx16
+tsan threadexit-tsan "$T/threadexit.c"
+tsan memcopy-tsan "$T/memcopy.c"
+tsan memcopy-chk-tsan "$T/memcopy.c" -DCHK
+tsan syncedge-tsan "$T/syncedge.c"
+tsan syncedge-chk-tsan "$T/syncedge.c" -DCHK
 $CC -O1 -no-pie -w -o "$B/proc/raft" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/raft-bug" "$HERE/examples/raft/raft.c" || { echo "proc_gate: raft.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/raftlog" "$HERE/examples/raft/raftlog.c" || { echo "proc_gate: raftlog.c does not build"; fail=1; }
@@ -436,6 +442,66 @@ expect "memrace: a locked counter holds"                      0 "No error has be
 expect "memrace: a seq_cst handoff holds"                     0 "No error has been found" --model-file "$OUT/mr-seqcst-tsan.model"
 expect "memrace: a relaxed handoff is a data race"            1 "data race on node 0" --model-file "$OUT/mr-relaxed-tsan.model"
 expect "memrace: a relaxed atomic makes a pass INCOMPLETE"    2 "weaker than seq_cst" --model-file "$OUT/mr-relaxedadd-tsan.model"
+# atomic128: 16-byte atomics (-mcx16) link against the runtime, order a
+# payload when seq_cst, race when relaxed, and compute their operations.
+for m in seqcst relaxed rmw; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nwhole = "node[0].phase < 2 or node[0].value == 7 or node[0].value == 25"\ndone = "eventually node[0].phase == 2"\n' \
+		"$B/proc/atomic128-tsan" "$m" > "$OUT/a128-$m.model"
+done
+expect "atomic128: a seq_cst 16-byte handoff holds"           0 "No error has been found" --model-file "$OUT/a128-seqcst.model"
+expect "atomic128: a relaxed 16-byte handoff is a data race"  1 "data race on node 0" --model-file "$OUT/a128-relaxed.model"
+expect "atomic128: 16-byte fetch_add and compare-exchange"    0 "No error has been found" --model-file "$OUT/a128-rmw.model"
+# threadexit: a thread that ends by pthread_exit or thrd_exit, from its
+# start function or deeper, gives its join the same edge as a return
+# (on 2.1.0 each was reported as a race, and pthread_exit's first-use
+# load of libgcc_s was refused as a kernel fd); a read before the join
+# is still a race.
+for m in exit thrd nested early; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nwhole = "node[0].phase < 2 or node[0].value == 7"\ndone = "eventually node[0].phase == 2"\n' \
+		"$B/proc/threadexit-tsan" "$m" > "$OUT/te-$m.model"
+done
+expect "threadexit: pthread_exit publishes to the join"        0 "No error has been found" --model-file "$OUT/te-exit.model"
+expect "threadexit: thrd_exit publishes to thrd_join"          0 "No error has been found" --model-file "$OUT/te-thrd.model"
+expect "threadexit: pthread_exit from a nested call"           0 "No error has been found" --model-file "$OUT/te-nested.model"
+expect "threadexit: a read before the join is a data race"     1 "data race on node 0" --model-file "$OUT/te-early.model"
+# memcopy: a memcpy, memset or memmove into a buffer another thread reads
+# unlocked is a data race, whether the compiler left a plain call (gcc),
+# a __tsan_ call (clang) or a fortified __*_chk call (both, under
+# _FORTIFY_SOURCE); under a mutex it holds.  On 2.1.0 every plain and
+# fortified form passed.
+for v in "" -chk; do
+	for m in cpy set move cpylock; do
+		printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nsane = "node[0].phase < 2 or node[0].value == 1"\ndone = "eventually node[0].phase == 2"\n' \
+			"$B/proc/memcopy$v-tsan" "$m" > "$OUT/mc-$m$v.model"
+	done
+	expect "memcopy$v: an unlocked memcpy is a data race"  1 "data race on node 0" --model-file "$OUT/mc-cpy$v.model"
+	expect "memcopy$v: an unlocked memset is a data race"  1 "data race on node 0" --model-file "$OUT/mc-set$v.model"
+	expect "memcopy$v: an unlocked memmove is a data race" 1 "data race on node 0" --model-file "$OUT/mc-move$v.model"
+	expect "memcopy$v: a memcpy under the mutex holds"     0 "No error has been found" --model-file "$OUT/mc-cpylock$v.model"
+done
+# syncedge: the review of the race runtime (docs/research/04-review-
+# race-runtime.md).  Each of these passed on 2.1.0.  rwread: two readers
+# of a rwlock are not ordered.  casfail: a failed compare-exchange with a
+# relaxed failure order is no acquire (casok, seq_cst, holds).  bargen:
+# one barrier round does not order the next.  sem2: a semaphore of count
+# two lets both threads in at once, and try*: a trylock fails only while
+# the other thread holds the lock; both lie inside a section the search
+# runs without a switch, so a pass is INCOMPLETE.  readbuf: the bytes
+# a read stores are an access like any other.
+for m in rwread casfail casok bargen sem2 trymutex trysem tryrw readbuf; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nok = "node[0].phase < 2 or node[0].value == 1"\ndone = "eventually node[0].phase == 2"\n' \
+		"$B/proc/syncedge-tsan" "$m" > "$OUT/se-$m-tsan.model"
+done
+expect "syncedge: two readers of a rwlock race"                 1 "data race on node 0" --model-file "$OUT/se-rwread-tsan.model"
+expect "syncedge: a relaxed failed compare-exchange is no acquire" 1 "data race on node 0" --model-file "$OUT/se-casfail-tsan.model"
+expect "syncedge: a seq_cst failed compare-exchange acquires"   0 "No error has been found" --model-file "$OUT/se-casok-tsan.model"
+expect "syncedge: a barrier round does not order the next"      1 "data race on node 0" --model-file "$OUT/se-bargen-tsan.model"
+expect "syncedge: a read into a buffer races a plain load of it" 1 "data race on node 0" --model-file "$OUT/se-readbuf-tsan.model"
+expect "syncedge: the same through a fortified __read_chk"     1 "data race on node 0" --model-file "$OUT/se-readbuf-tsan.model" --binary "$B/proc/syncedge-chk-tsan"
+expect "syncedge: a semaphore of count two admits two"          1 "data race on node 0" --model-file "$OUT/se-sem2-tsan.model"
+expect "syncedge: a trylock is INCOMPLETE"                      2 "admits more than one thread" --model-file "$OUT/se-trymutex-tsan.model"
+expect "syncedge: a sem_trywait is INCOMPLETE"                  2 "admits more than one thread" --model-file "$OUT/se-trysem-tsan.model"
+expect "syncedge: a tryrdlock is INCOMPLETE"                    2 "admits more than one thread" --model-file "$OUT/se-tryrw-tsan.model"
 # two nodes running the racy program: the first report wins
 sed 's/^nodes = 1$/nodes = 2/' "$OUT/mr-unlocked-tsan.model" > "$OUT/mr-unlocked2-tsan.model"
 expect "memrace: two racing nodes, one report"                1 "data race on node" --model-file "$OUT/mr-unlocked2-tsan.model"
