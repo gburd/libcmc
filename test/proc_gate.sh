@@ -412,6 +412,10 @@ expect "midmerge: and with a crash in the budget"           1 "notfirst is viola
 # backlog, so a crash before the first write leaves it empty
 $CC -O1 -no-pie -w -o "$B/proc/conncrash" "$T/conncrash.c" || { echo "proc_gate: conncrash.c does not build"; fail=1; }
 expect "conncrash: a crash between connect() and the first write" 1 "no_empty is violated" $(run conncrash conncrash)
+# a crash may lose what the node sent and its peer has not read: the
+# primary acks once REPL(v) is in its send queue, too early
+$CC -O1 -no-pie -w -o "$B/proc/sendlost" "$T/sendlost.c" || { echo "proc_gate: sendlost.c does not build"; fail=1; }
+expect "sendlost: a crash loses bytes still in the send queue" 1 "no_loss is violated" $(run sendlost sendlost)
 
 echo "-- a modelled file system (plan 2.2, item 3)"
 # fslog keeps its log in files under the model's [files] dir: pwrite and

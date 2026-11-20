@@ -1,0 +1,11 @@
+# A model file for test/proc/sendlost.c: an acked value must reach the
+# backup.  A crash of the primary may lose the bytes still in its send
+# queue, so the early ack is a bug.
+[target]
+binary = sendlost
+nodes = 2
+[environment]
+client_write = 5
+crashes = 1
+[invariants]
+no_loss = "not (node[1][0] == 2 and some r in replies : r.val == 5)"

@@ -562,6 +562,14 @@ or run it on
 .Pq Sy RUN .
 A crash with modelled files is one action for each way the files can be
 left.
+A crash also loses what the node sent that its peer has not yet read:
+a write returns once the bytes are in the sender's kernel, and a host
+that loses power loses what it had not transmitted.
+For each connection to another node, any prefix of the node's unread
+messages there survives (none lost, the default, up to all of them,
+FIN included), one CRASH action for each combination.
+The trace names a loss
+.Pq Ql crash n0 (unsent bytes lost: way 1) .
 No invariant is checked at such a point, since a program may report its
 state only after its effects; the crash that follows is checked.
 A write to the volatile state hook is not such a point, since a crash

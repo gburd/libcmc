@@ -5090,15 +5090,78 @@ enum_expire(Act *out, int *c)
 	}
 }
 
-/* A CRASH of node d, once for each way its modelled files can be left
- * (fs_crash_choices()): the action's arg picks one. */
+/* Messages node d has sent on connection end (c, e) that its peer has
+ * not read, toward the other end: data and a FIN alike.  0 when the
+ * peer is the client, d itself or already closed, whose queues a crash
+ * leaves alone. */
+static int
+crash_queue(int d, int c, int e)
+{
+	const Conn *cn = &conns[c];
+	int m = 0;
+	if (!cn->used || cn->node[e] != d || cn->node[1 - e] < 0 || cn->node[1 - e] == d || cn->closed[1 - e]) return 0;
+	for (int i = 0; i < MAXMSG; i++)
+		if (bag[i].used && bag[i].conn == c && bag[i].to == 1 - e) m++;
+	return m;
+}
+
+/* How many ways a crash of node d can leave the bytes it sent and its
+ * peers have not read: a write returns once the bytes are in the
+ * sender's kernel, and a host that loses power loses what it had not
+ * yet transmitted.  Per connection end of d with m messages queued,
+ * any prefix of them survives (m + 1 ways), in slot order; the product
+ * over ends, or FS_LIMIT past FS_MAXCRASH.  Way 0 keeps every message. */
+static long
+net_crash_choices(int d)
+{
+	long n = 1;
+	for (int c = 0; c < MAXCONNS; c++)
+		for (int e = 0; e < 2; e++)
+		{
+			n *= crash_queue(d, c, e) + 1;
+			if (n > FS_MAXCRASH) return FS_LIMIT;
+		}
+	return n;
+}
+
+/* Drop, of each queue crash_queue() counts, the last messages choice
+ * says (mixed radix, as net_crash_choices() enumerates: a digit is how
+ * many are lost), and keep the prefix before them.
+ * An end already closed whose FIN is dropped is marked gone, so its
+ * peer may notice the dead host (an EOF) once the prefix is read. */
+static void
+net_crash(int d, long choice)
+{
+	for (int c = 0; c < MAXCONNS; c++)
+		for (int e = 0; e < 2; e++)
+		{
+			int m = crash_queue(d, c, e);
+			if (m == 0) continue;
+			int keep = m - (int) (choice % (m + 1)), k = 0;
+			choice /= m + 1;
+			for (int last = -1, h; (h = conn_next(c, 1 - e, last)) >= 0; k++)
+			{
+				last = bag[h].seq;
+				if (k < keep) continue;
+				if (bag[h].eof) conns[c].gone[e] = 1;
+				bag[h].used = 0;
+			}
+		}
+}
+
+/* A CRASH of node d, once for each way its modelled files and its unread
+ * sends can be left (fs_crash_choices(), net_crash_choices()): the
+ * action's arg picks one, the file choice in its low digit. */
 static void
 add_crashes(Act *out, int *c, int d)
 {
 	long n = fs_crash_choices(&N[d].fs);
 	if (n == FS_LIMIT)
 		die(3, "node %d: a crash could leave its modelled files in more than %d ways; sync them more often", d, FS_MAXCRASH);
-	for (long k = 0; k < n; k++) add_act(out, c, A_CRASH, d, -1, -1, (int) k);
+	long q = net_crash_choices(d);
+	if (q == FS_LIMIT || n * q > FS_MAXCRASH)
+		die(3, "node %d: a crash could leave its files and unread sends in more than %d ways", d, FS_MAXCRASH);
+	for (long k = 0; k < n * q; k++) add_act(out, c, A_CRASH, d, -1, -1, (int) k);
 }
 
 static int
@@ -5524,7 +5587,16 @@ apply(const Act *a)
 			run_connwait(nd, th);
 			g_short = -1;
 			break;
-		case A_CRASH: bud.crashes--; crash_node(nd); fs_crash(&nd->fs, a->arg); nd->undo_kind = 0; break;
+		case A_CRASH:
+		{
+			long nf = fs_crash_choices(&nd->fs);
+			bud.crashes--;
+			net_crash(a->node, a->arg / nf);
+			crash_node(nd);
+			fs_crash(&nd->fs, a->arg % nf);
+			nd->undo_kind = 0;
+			break;
+		}
 		case A_FAIL: fail_held(nd, th, a->arg); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
 		case A_RESTART:
@@ -5664,7 +5736,13 @@ static const char *
 act_name(const Act *a, char *b, size_t n)
 {
 	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal", "expire", "fail"};
-	if (a->kind == A_CRASH && a->arg > 0) snprintf(b, n, "crash n%d (files kept: way %d)", a->node, a->arg);
+	if (a->kind == A_CRASH && a->arg > 0)
+	{
+		long nf = fs_crash_choices(&N[a->node].fs), f = a->arg % nf, q = a->arg / nf;
+		if (q == 0) snprintf(b, n, "crash n%d (files kept: way %ld)", a->node, f);
+		else if (f == 0) snprintf(b, n, "crash n%d (unsent bytes lost: way %ld)", a->node, q);
+		else snprintf(b, n, "crash n%d (files kept: way %ld, unsent bytes lost: way %ld)", a->node, f, q);
+	}
 	else if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_FAIL) snprintf(b, n, "fail n%d t%d (%s)", a->node, a->thr, a->arg ? "ENOSPC" : "EIO");
 	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);

@@ -18,6 +18,16 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+A crash may lose the bytes the node sent that its peer has not read.
+A write returns once the bytes are in the sender's kernel, and a host
+that loses power loses what it had not transmitted, so for each
+connection to another node the crash keeps a chosen prefix of the
+node's unread messages (its FIN included): one CRASH action per
+combination, the trace naming any loss.  Before, every byte sent was
+delivered later, so a primary that acked once REPL(v) was queued,
+before the backup had it, passed under crashes.  State counts with
+crashes grow.  Gate: proc_gate sendlost.
+
 A connect() is a crash point too: the connection waits in the peer's
 backlog once it returns, so a crash before the first write leaves the
 peer an empty connection.  The guide's server grows from 26 to 30
