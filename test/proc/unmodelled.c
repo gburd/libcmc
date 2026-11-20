@@ -21,8 +21,8 @@
  *   rstignore  the same with SIGPIPE ignored: node 0 records 2
  *   rsthandler the same with a SIGPIPE handler (refused)
  *   fork       node 0 forks; the child exits at once (refused)
- *   writev     a writev() on a checker-owned socket (refused)
- *   sendmsg    a sendmsg() on a checker-owned socket (refused)
+ *   writev     a writev() longer than max_write (refused)
+ *   sendmsg    a sendmsg() with ancillary data (refused)
  *   peek       a recv() with MSG_PEEK (refused)
  *   nbaccept   an accept4() with SOCK_NONBLOCK (refused)
  *   udp        a UDP socket (refused)
@@ -198,8 +198,11 @@ main(int argc, char **argv)
 			return 0;
 		if (!strcmp(mode, "writev") || !strcmp(mode, "sendmsg"))
 		{
-			struct iovec v = {.iov_base = "x", .iov_len = 1};
-			struct msghdr mh = {.msg_iov = &v, .msg_iovlen = 1};
+			/* writev past max_write, and sendmsg with ancillary data:
+			 * both refused, while plain ones are modelled */
+			char big[100] = {0}, cm[CMSG_SPACE(sizeof(int))] = {0};
+			struct iovec v = {.iov_base = big, .iov_len = sizeof big};
+			struct msghdr mh = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cm, .msg_controllen = sizeof cm};
 
 			if (!strcmp(mode, "writev"))
 				(void) !writev(s, &v, 1);

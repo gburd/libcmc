@@ -33,6 +33,16 @@ socket redialled after a refusal keeps its `O_NONBLOCK` and
 `FD_CLOEXEC` (they were lost).  Gate: proc_gate nbconnect ok, early and
 refused, each against a native run.
 
+`readv`, `writev`, `sendmsg`, `recvmsg`, `shutdown`, `dup`, `dup2` and
+`dup3` on a checker-owned socket are modelled instead of refused.  The
+vector calls act as one read or write of the iovec array's bytes, with
+ancillary data and a destination address refused.  `shutdown` sends a
+FIN or stops reads as Linux does, including the RST that bytes arriving
+at a socket shut both ways draw.  A dup shares the connection and its
+`O_NONBLOCK` until its last number closes.  A refused dial's pending
+`ECONNREFUSED` was left out of the world encoding; it is in now.  Gate:
+proc_gate sockapi iov, shut, dup and opts, each against a native run.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

@@ -31,9 +31,8 @@ model gives.  None of this page makes a pass mean more than that.
 
 The engine runs each node as a real process under seccomp user
 notification and answers the system calls below.  The file system is
-read-only to a node (see below).  `readv`, `writev`,
-`pread`, `pwrite`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
-`dup` family, `ioctl`,
+read-only to a node (see below).
+`pread`, `pwrite`, `sendmmsg`, `recvmmsg`, `ioctl`,
 `splice` and `sendfile` are refused on a checker-owned fd (exit 3), and
 run in the kernel on any other.  Every other system call runs
 in the kernel, untouched.
@@ -55,6 +54,9 @@ in the kernel, untouched.
 | one queue per connection direction | exact | FIFO; two connections between one node pair never share bytes | proc_gate crossrpc, fifo |
 | `read`, `recvfrom` | approximate | one read takes at most one write's bytes; a short read leaves the rest queued; any `recvfrom` flag or source address is refused | proc_gate verdicts, "MSG_PEEK is refused" (the short read: code only, no fixture yet) |
 | `write`, `sendto` | approximate | at most `[target] max_write` bytes (default 64, cap 4096) per call; a longer write is exit 1; `sendto` flags other than `MSG_NOSIGNAL`, or a destination address, are refused | proc_gate bigmsg |
+| `readv`, `writev`, `sendmsg`, `recvmsg` | as `read` and `write` | the iovec array is gathered or scattered whole, its total within `[target] max_write`; up to 16 entries for a read; `recvmsg` sets `msg_namelen` and `msg_flags` to 0; a destination address, ancillary data, a `recvmsg` flag or a `sendmsg` flag other than `MSG_NOSIGNAL` is exit 3; a count past 1024 is `EINVAL` | proc_gate sockapi iov, "sendmsg with ancillary data is refused" |
+| `shutdown` | exact | `SHUT_WR` sends a FIN and a later write fails `EPIPE`; `SHUT_RD` makes an empty read return 0 at once while bytes queued or arriving are still read; once both are shut, bytes arriving are answered with an RST; `ENOTCONN` on a socket not connected, refused, reset, or past both FINs; a listener's or a timer connection's shutdown is exit 3 | proc_gate sockapi shut |
+| `dup`, `dup2`, `dup3` of a connection | exact | the new number shares the connection, its queue, `O_NONBLOCK` and options; `FD_CLOEXEC` is its own; the socket stays open until its last number closes; a dup of any other owned fd, or onto a fd that is open or below 500, is exit 3 | proc_gate sockapi dup, edges dup2, dup3 |
 | `close` | exact | FIN, or RST when bytes were left unread; bytes already sent stay readable | proc_gate rstwrite, rstignore, tcpsem rstdata |
 | a reset connection | exact | the reset reported once (`ECONNRESET`, or `EPIPE` after a FIN), then reads 0 and writes `EPIPE` | proc_gate rstwrite, rstignore, reset, tcpsem finwrite |
 | an exited listener's backlog | exact | each waiting dial is reset | proc_gate tcpsem backlog |

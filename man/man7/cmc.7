@@ -44,6 +44,17 @@ The checker answers every
 .Fn accept ,
 .Fn read ,
 .Fn write ,
+.Fn readv ,
+.Fn writev ,
+.Fn sendmsg ,
+.Fn recvmsg ,
+.Fn shutdown ,
+.Fn dup
+.Pf ( Fn dup2 , Fn dup3 ) ,
+.Fn getsockopt ,
+.Fn setsockopt ,
+.Fn getsockname ,
+.Fn getpeername ,
 .Fn close ,
 .Fn poll
 .Pf ( Fn ppoll ) ,
@@ -741,6 +752,27 @@ the writer's disposition decides (a handler, or the signal blocked, is
 refused).
 A write to a peer that closed cleanly succeeds once, then fails the same
 way.
+.Fn shutdown
+with
+.Dv SHUT_WR
+sends a FIN, and a later write fails with
+.Er EPIPE ;
+with
+.Dv SHUT_RD
+a read with nothing queued returns 0 at once; once both are shut,
+bytes arriving are answered with an RST.
+A
+.Fn dup
+of a connection shares it, and its
+.Dv O_NONBLOCK ,
+until the last number is closed; a dup of any other descriptor the
+checker owns is refused.
+Vector reads and writes act as one
+.Fn read
+or
+.Fn write
+of the iovec array's bytes; ancillary data and a destination address
+are refused.
 An exited listener resets the dials still in its backlog.
 A
 .Fn connect

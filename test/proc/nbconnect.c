@@ -105,7 +105,9 @@ addr(int id)
 	memset(&a, 0, sizeof a);
 	a.sin_family = AF_INET;
 	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	a.sin_port = htons((unsigned short) (BASE + id));
+	/* natively, away from 20000, where another check on the same host
+	 * may be listening; under cmc node i is 20000 + i */
+	a.sin_port = htons((unsigned short) (BASE + id + (getenv("CMC_STATE_FD") ? 0 : 9100)));
 	return a;
 }
 
@@ -221,7 +223,7 @@ main(int argc, char **argv)
 	code(recv(s, b, sizeof b, 0));
 	ml = sizeof me;
 	code(getpeername(s, (struct sockaddr *) &me, &ml));
-	raw(me.sin_port == htons(BASE + 1));
+	raw(me.sin_port == peer.sin_port);
 	code(close(s));
 	emit(1);
 	return 0;

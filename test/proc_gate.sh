@@ -721,8 +721,9 @@ record_model() {
 			invs="${invs}linux$k = \"node[0][0] < 1 or (${cond# and })\"\n"; cond=""
 		fi
 	done
-	# a record ends in two check bytes over it: a mode whose other
-	# records are Linux's too (early) asks only that this one is reached
+	# a finished record must be reached, named by its last two bytes
+	# (nbconnect ends its record in two check bytes over it); a mode
+	# whose other records are Linux's too (early) asks only that
 	[ "$mode" = early ] && invs=""
 	eval "h1=\${$(($# - 1))} h2=\${$#}"
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[invariants]\n%breached = "eventually node[0][0] == 1 and node[0][%d] == %s and node[0][%d] == %s"\n' \
@@ -739,6 +740,20 @@ for m in ok early refused; do
 		echo "FAIL nbconnect $m: the native run left no record"; fail=1; continue
 	fi
 	expect_by 120 "nbconnect $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$NB/$m.model"
+done
+
+echo "-- the socket calls past read and write"
+# sockapi.c dials its own listener and records each call's outcome, so
+# it runs the same natively and under cmc: cmc must reach Linux's
+# record and no other.  On 2.1.0 each of these calls on a checker-owned
+# socket ended the check (exit 3).
+$CC -O1 -no-pie -w -o "$B/proc/sockapi" "$T/sockapi.c" || { echo "proc_gate: sockapi.c does not build"; fail=1; }
+for m in iov shut dup opts; do
+	(cd "$NB" && timeout 30 "$B/proc/sockapi" 0 "$m" 3>"$NB/sa-$m.state" > /dev/null 2>&1)
+	if ! record_model "$B/proc/sockapi" "$m" "$NB/sa-$m.state" "timeouts = 0" "$NB/sa-$m.model"; then
+		echo "FAIL sockapi $m: the native run left no record"; fail=1; continue
+	fi
+	expect_by 60 "sockapi $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$NB/sa-$m.model"
 done
 
 echo "-- edges: limits, partial transfers, refusals and signals"
@@ -911,8 +926,8 @@ expect "unmodelled: EFD_SEMAPHORE is refused"            3 "EFD_SEMAPHORE" --mod
 expect "unmodelled: a fork is refused"                   3 "forks a second process" --model-file "$OUT/u-fork.model"
 # calls and flags the model does not answer are refused, not passed to a
 # kernel that has no such socket, or ignored
-expect "unmodelled: writev on an owned fd is refused"     3 "checker-owned fd" --model-file "$OUT/u-writev.model"
-expect "unmodelled: sendmsg on an owned fd is refused"    3 "checker-owned fd" --model-file "$OUT/u-sendmsg.model"
+expect "unmodelled: a writev past max_write is refused"   1 "in one vector call; the limit is 64" --model-file "$OUT/u-writev.model"
+expect "unmodelled: sendmsg with ancillary data is refused" 3 "ancillary data is not modelled" --model-file "$OUT/u-sendmsg.model"
 expect "unmodelled: MSG_PEEK is refused"                  3 "recvfrom flags" --model-file "$OUT/u-peek.model"
 expect "unmodelled: accept4 SOCK_NONBLOCK is refused"     3 "accept4 flags" --model-file "$OUT/u-nbaccept.model"
 expect "unmodelled: a UDP socket is refused"              3 "is not modelled" --model-file "$OUT/u-udp.model"

@@ -362,8 +362,10 @@ m_conn_flag(void)
 	for (int c = 0; c < MAXCONNS; c++)
 		if (conns[c].used && conns[c].accepted)
 		{
-			switch (pick(7))
+			switch (pick(9))
 			{
+				case 7: conns[c].shut_wr[pick(2)] ^= 1; break;
+				case 8: conns[c].shut_rd[pick(2)] ^= 1; break;
 				case 4: conns[c].connecting ^= 1; break;
 				case 5: conns[c].nbdial ^= 1; break;
 				case 6: conns[c].refused ^= 1; break;
@@ -386,6 +388,18 @@ m_sockopt(void)
 	if (nd->nc == 0)
 		return 0;
 	nd->sockopt[nd->cfd[pick(nd->nc)] - 500] ^= SO_B_NODELAY;
+	return 1;
+}
+
+/* a second number for a connection (dup) */
+static int
+m_dup(void)
+{
+	Node	   *nd = some_node();
+
+	if (nd->nc == 0 || nd->next_fd - 500 >= MAXOWNED)
+		return 0;
+	nd->dupof[nd->next_fd++ - 500] = nd->cfd[pick(nd->nc)];
 	return 1;
 }
 
@@ -580,13 +594,13 @@ static int (*const mutations[]) (void) = {
 	m_canon, m_durable, m_read_off, m_alive, m_block_kind, m_want,
 	m_recv_conn, m_futex, m_poll_fd, m_poll_events, m_woke, m_msg_byte,
 	m_msg_drop, m_conn_flag, m_nonblock, m_pend, m_efd, m_budget, m_clock,
-	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned, m_efd_cloexec, m_plain, m_sockopt,
+	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned, m_efd_cloexec, m_plain, m_sockopt, m_dup,
 };
 static const char *const mutation_names[] = {
 	"canon", "durable", "read_off", "alive", "block_kind", "want",
 	"recv_conn", "futex", "poll_fd", "poll_events", "woke", "msg_byte",
 	"msg_drop", "conn_flag", "nonblock", "pend", "efd", "budget", "clock",
-	"reply", "newborn", "thread_count", "position", "held", "cloned", "efd_cloexec", "plain", "sockopt",
+	"reply", "newborn", "thread_count", "position", "held", "cloned", "efd_cloexec", "plain", "sockopt", "dup",
 };
 
 /* ---- changes the encoding must hide ------------------------------- */
