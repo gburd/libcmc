@@ -90,6 +90,12 @@ or
 that returns at once over such a connection, after an earlier send of
 the step, to a peer that could reset the connection first (it holds
 unread bytes from the writer), stops so the RST may arrive before it.
+So does a blocking
+.Fn connect
+to a node that holds such bytes, which may exit first, and a
+non-blocking
+.Fn accept
+with nothing waiting while any node does, which may dial first.
 No invariant is checked at such a point, and it is never merged.
 Elsewhere other nodes do not act inside a step: what the node computes
 between two calls touches only its own memory, so it commutes with

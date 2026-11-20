@@ -1062,6 +1062,15 @@ for m in rstout rsteout; do
 	ms $m "the peer's RST can come before a zero-timeout POLLOUT poll" 1 "not1 is violated" \
 		'[invariants]\nnot1 = "node[0][0] != 1"'
 done
+# a second blocking connect after the write may find node 1 gone (it
+# exits once it has read), and a non-blocking accept may find node 1's
+# dial back: both outcomes are Linux's (each was one only)
+for m in reconn nbaccept; do
+	for v in 1 2; do
+		ms $m "node 1 may react before the call, or not ($v)" 1 "not$v is violated" \
+			"[invariants]\\nnot$v = \"node[0][0] != $v\""
+	done
+done
 
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes

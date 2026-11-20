@@ -5,6 +5,17 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A blocking `connect` after a send earlier in the step, to a node that
+has not read those bytes, stops so that node may react first; it may
+exit, and Linux then refuses the dial.  A non-blocking `accept` with
+nothing waiting stops the same way while any node holds unread bytes
+from the caller, since that node may dial it in reaction.  Neither was
+a point where the others could act, so a second dial never saw the
+peer gone and a drain of the backlog never found a reply dial.  raft
+goes from 4078 to 5182 distinct states and the hc example at depth 12
+from 7518 to 23787: each dial that follows a reply in hc's loop is now
+such a point.  Gate: proc_gate midstep reconn and nbaccept.
+
 A `poll` or `epoll_wait` that returns at once and asks only for
 `POLLOUT` (or `EPOLLOUT`) stops after an earlier send of the step, as
 a write does, when the peer could reset the connection first.  Only a

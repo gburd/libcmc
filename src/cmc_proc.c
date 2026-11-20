@@ -2620,6 +2620,8 @@ fd_may_change(Node *nd, int fd)
 }
 
 static int rst_may_come(Node *nd, int fd);
+static int dial_may_change(Node *nd, const __u64 *a);
+static int backlog_may_change(Node *nd, int fd);
 
 /* Would write call nr of node nd, mid-step, answer differently had
  * another node or the network acted first?  A write fails only once an
@@ -2632,12 +2634,71 @@ static int rst_may_come(Node *nd, int fd);
  * carries bytes; a crashed peer restarts (its new kernel answers with
  * an RST).  Before the node's first call with an
  * effect in this step, each of those was already offered where the
- * node last waited (see fd_may_change()), so only a later write parks. */
+ * node last waited (see fd_may_change()), so only a later write parks.
+ * A blocking connect and a non-blocking accept park the same way
+ * (dial_may_change(), backlog_may_change()). */
 static int
 peerwait(Node *nd, long nr, const __u64 *a)
 {
+	if (nr == SYS_connect) return dial_may_change(nd, a);
+	if (nr == SYS_accept || nr == SYS_accept4) return backlog_may_change(nd, (int) a[0]);
 	if (nr != SYS_write && nr != SYS_sendto && nr != SYS_writev && nr != SYS_sendmsg) return 0;
 	return rst_may_come(nd, (int) a[0]);
+}
+
+/* Does node nd have bytes or a FIN unread at live node p, on any
+ * connection between them?  Then p may yet react to what nd did in
+ * this step: exit, dial nd, close. */
+static int
+owes_peer(const Node *nd, int p)
+{
+	if (p < 0 || p >= M.nodes || !N[p].alive) return 0;
+	for (int c = 0; c < MAXCONNS; c++)
+		for (int e = 0; conns[c].used && e < 2; e++)
+			if (conns[c].node[e] == nd->id && conns[c].node[1 - e] == p &&
+				!conns[c].closed[1 - e] && conn_head(c, 1 - e) >= 0)
+				return 1;
+	return 0;
+}
+
+/* Could some live node still react to what node nd sent in this step
+ * (owes_peer())?  Its reaction, or a chain of them through other nodes,
+ * may then come before nd's next call. */
+static int
+owes_any(const Node *nd)
+{
+	for (int p = 0; p < M.nodes; p++)
+		if (p != nd->id && owes_peer(nd, p)) return 1;
+	return 0;
+}
+
+/* Would a blocking connect a of node nd, mid-step, answer differently
+ * had others acted first: the live node it dials may exit (ECONNREFUSED)
+ * in reaction to what nd sent it in this step?  As for a write
+ * (peerwait()), only the dialled node's own reaction counts, not one
+ * relayed through a third node.  A non-blocking connect's outcome is
+ * the search's already (A_CONNECT). */
+static int
+dial_may_change(Node *nd, const __u64 *a)
+{
+	int fd = (int) a[0];
+	struct { unsigned short fam; unsigned short port; } sa;
+	if (!nd->step_effect || node_multi(nd) || fd < 500 || fd >= nd->next_fd) return 0;
+	int cs = cfd_slot(nd, fd);
+	if (cs >= 0 ? nd->cnonblock[cs] : (*fd_flags(nd, fd) & FD_NB) != 0) return 0;
+	if (cr_read(nd->pid, a[1], &sa, sizeof sa) != sizeof sa) return 0;
+	int peer = ((sa.port >> 8) | ((sa.port & 0xff) << 8)) - BASE;
+	return owes_peer(nd, peer);
+}
+
+/* Would a non-blocking accept of node nd on its listener fd, with
+ * nothing waiting, mid-step, find a dial had others acted first: a node
+ * reacting to what nd sent in this step may dial it? */
+static int
+backlog_may_change(Node *nd, int fd)
+{
+	if (!nd->step_effect || node_multi(nd) || fd != nd->listener_fd || !nd->ls_nonblock || nd->npend) return 0;
+	return owes_any(nd);
 }
 
 /* Could an RST reach node nd's connection fd before its next call,
