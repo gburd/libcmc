@@ -428,7 +428,9 @@ expect "fsfail: past the bytes budget is refused"   3 "past the model's \[files\
 expect "fsfail: O_DIRECT is refused"                3 "which are not modelled (O_DIRECT" $(ffm odirect)
 expect "fsfail: mmap of a modelled file is refused" 3 "maps modelled file fd" $(ffm mmap)
 expect "fsfail: link is refused"                    3 "is not modelled (links" $(ffm link)
-expect "fsfail: an xattr read is refused"           3 "on modelled file fd 501 is not modelled" $(ffm xattr)
+if xattr_skip xattr; then echo "skip fsfail: xattr (the sandbox answers it before the checker)"
+else expect "fsfail: an xattr read is refused"      3 "on modelled file fd 501 is not modelled" $(ffm xattr)
+fi
 expect "fsfail: a rename out of the model is refused" 3 "between a modelled and an unmodelled path" $(ffm cross)
 # threadpos: worlds with a multi-threaded node are never merged, since a
 # thread's record cannot tell apart two iterations of one loop (loop), a
