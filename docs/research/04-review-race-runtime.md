@@ -277,6 +277,13 @@ full.
   atomic's clock after a later plain store by another thread, which C11
   says ends the sequence.  It can hide a race only in a program whose
   atomics another schedule does not expose; no fixture found one.
+- C library routines other than the memory, string and format writers
+  the runtime defines (`memccpy`, `qsort`, `fread`, `strtok` and the
+  like) are not seen, and a format's `%s` arguments are not recorded as
+  reads.  gcc expands a `strcpy` or `memcpy` of a short constant into
+  plain stores it does not instrument, even at `-O0` and with
+  `-fno-builtin`; clang instruments them.  Stock libtsan with gcc misses
+  the same race.
 - Other system calls that write program memory (`ppoll`, `epoll_pwait`,
   `getsockopt`, `accept`'s address, `clock_gettime`) are not recorded.
   Their buffers are rarely shared between threads, but an access to

@@ -588,6 +588,12 @@ for v in "" -chk; do
 	expect "memcopy$v: an unlocked memset is a data race"  1 "data race on node 0" --model-file "$OUT/mc-set$v.model"
 	expect "memcopy$v: an unlocked memmove is a data race" 1 "data race on node 0" --model-file "$OUT/mc-move$v.model"
 	expect "memcopy$v: a memcpy under the mutex holds"     0 "No error has been found" --model-file "$OUT/mc-cpylock$v.model"
+	# the C library's string and format writers (passed on 2.2's first cut)
+	for m in scpy sncpy scat spcpy spr snpr vsnpr; do
+		printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nsane = "node[0].phase < 2 or node[0].value == 1"\n' \
+			"$B/proc/memcopy$v-tsan" "$m" > "$OUT/mc-$m$v.model"
+		expect "memcopy$v: an unlocked $m is a data race" 1 "data race on node 0" --model-file "$OUT/mc-$m$v.model"
+	done
 done
 # syncedge: the review of the race runtime (docs/research/04-review-
 # race-runtime.md).  Each of these passed on 2.1.0.  rwread: two readers

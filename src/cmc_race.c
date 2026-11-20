@@ -41,7 +41,8 @@
  *
  * Limits.  Code not compiled with the instrumentation (other libraries,
  * the C library) is not checked, apart from their calls to memcpy,
- * memset and memmove, which this file defines.  A synchronisation edge the
+ * memset and memmove and the string and format writers, which this file
+ * defines.  A synchronisation edge the
  * runtime does not model (a pipe, a signal, a raw futex) is missing, so
  * accesses it orders are reported as a race: a false alarm, never a
  * missed race.
@@ -61,7 +62,9 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <stdarg.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -429,6 +432,10 @@ __tsan_vptr_update(void **p, void *v)
  */
 static void *(*libc_memmove) (void *, const void *, size_t);
 static void *(*libc_memset) (void *, int, size_t);
+static int	(*libc_vsprintf) (char *, const char *, va_list);
+static int	(*libc_vsnprintf) (char *, size_t, const char *, va_list);
+static int	(*libc_vsprintf_chk) (char *, int, size_t, const char *, va_list);
+static int	(*libc_vsnprintf_chk) (char *, size_t, int, size_t, const char *, va_list);
 
 static void
 mem_lookup(void)
@@ -437,6 +444,10 @@ mem_lookup(void)
 	in_runtime++;
 	*(void **) &libc_memmove = dlsym(RTLD_NEXT, "memmove");
 	*(void **) &libc_memset = dlsym(RTLD_NEXT, "memset");
+	*(void **) &libc_vsprintf = dlsym(RTLD_NEXT, "vsprintf");
+	*(void **) &libc_vsnprintf = dlsym(RTLD_NEXT, "vsnprintf");
+	*(void **) &libc_vsprintf_chk = dlsym(RTLD_NEXT, "__vsprintf_chk");
+	*(void **) &libc_vsnprintf_chk = dlsym(RTLD_NEXT, "__vsnprintf_chk");
 	in_runtime--;
 }
 
@@ -553,6 +564,230 @@ __memset_chk(void *d, int c, size_t n, size_t room)
 {
 	chk(n, room);
 	return mem_set(d, c, n, PC());
+}
+
+/*
+ * The C library's string writers: strcpy, strncpy, strcat and stpcpy,
+ * and their fortified forms.  Like memcpy, gcc and clang leave them as
+ * calls the instrumentation does not see, so each is defined here: it
+ * records the bytes it reads and writes, then copies with copy_bytes
+ * and set_bytes.  strlen and strnlen measure first; they only read, and
+ * the read is recorded as part of the copy.  Note that gcc expands a
+ * strcpy of a short constant string inline into plain stores, with no
+ * __tsan_write calls (-fsanitize=thread does not instrument them), so
+ * neither this runtime nor gcc's own libtsan sees those; clang
+ * instruments them.
+ */
+static char *
+str_copy(char *d, const char *s, uintptr_t pc)
+{
+	size_t		n = strlen(s) + 1;
+
+	mem_copy(d, s, n, pc);
+	return d + n - 1;
+}
+
+static char *
+str_ncopy(char *d, const char *s, size_t n, uintptr_t pc)
+{
+	size_t		k = strnlen(s, n);
+
+	access_range(s, k < n ? k + 1 : k, 0, 0, pc);
+	access_range(d, n, 1, 0, pc);
+	copy_bytes(d, s, k);
+	set_bytes(d + k, 0, n - k);
+	return d;
+}
+
+static size_t
+cat_len(const char *d, const char *s)
+{
+	return strlen(d) + strlen(s) + 1;
+}
+
+static char *
+str_cat(char *d, const char *s, uintptr_t pc)
+{
+	size_t		dl = strlen(d);
+
+	access_range(d, dl, 0, 0, pc);
+	str_copy(d + dl, s, pc);
+	return d;
+}
+
+char	   *__strcpy_chk(char *d, const char *s, size_t room);
+char	   *__stpcpy_chk(char *d, const char *s, size_t room);
+char	   *__strncpy_chk(char *d, const char *s, size_t n, size_t room);
+char	   *__strcat_chk(char *d, const char *s, size_t room);
+
+char *
+strcpy(char *restrict d, const char *restrict s)
+{
+	str_copy(d, s, PC());
+	return d;
+}
+
+char *
+stpcpy(char *restrict d, const char *restrict s)
+{
+	return str_copy(d, s, PC());
+}
+
+char *
+strncpy(char *restrict d, const char *restrict s, size_t n)
+{
+	return str_ncopy(d, s, n, PC());
+}
+
+char *
+strcat(char *restrict d, const char *restrict s)
+{
+	return str_cat(d, s, PC());
+}
+
+char *
+__strcpy_chk(char *d, const char *s, size_t room)
+{
+	chk(strlen(s) + 1, room);
+	str_copy(d, s, PC());
+	return d;
+}
+
+char *
+__stpcpy_chk(char *d, const char *s, size_t room)
+{
+	chk(strlen(s) + 1, room);
+	return str_copy(d, s, PC());
+}
+
+char *
+__strncpy_chk(char *d, const char *s, size_t n, size_t room)
+{
+	chk(n, room);
+	return str_ncopy(d, s, n, PC());
+}
+
+char *
+__strcat_chk(char *d, const char *s, size_t room)
+{
+	chk(cat_len(d, s), room);
+	return str_cat(d, s, PC());
+}
+
+/*
+ * The formatting writers: sprintf, snprintf, vsprintf, vsnprintf and
+ * their fortified forms.  Each formats with the C library's own v-form
+ * (looked up by mem_lookup), then records the bytes it wrote: the
+ * output and its terminating zero, cut at the buffer's size for the
+ * bounded forms.  The arguments a format reads (a %s string) are not
+ * recorded.  Before the lookup (a constructor that formats) nothing is
+ * recorded, and the formatting goes to the C library all the same.
+ */
+static int
+fmt_done(char *d, size_t room, int r, uintptr_t pc)
+{
+	if (r >= 0 && room > 0)
+		access_range(d, (size_t) r < room ? (size_t) r + 1 : room, 1, 0, pc);
+	return r;
+}
+
+static int
+fmt_v(char *d, size_t n, int bounded, const char *f, va_list ap)
+{
+	if (libc_vsnprintf == NULL)
+		mem_lookup();
+	if (!bounded)
+		return libc_vsprintf(d, f, ap);
+	return libc_vsnprintf(d, n, f, ap);
+}
+
+int
+vsprintf(char *restrict d, const char *restrict f, va_list ap)
+{
+	return fmt_done(d, SIZE_MAX, fmt_v(d, 0, 0, f, ap), PC());
+}
+
+int
+vsnprintf(char *restrict d, size_t n, const char *restrict f, va_list ap)
+{
+	return fmt_done(d, n, fmt_v(d, n, 1, f, ap), PC());
+}
+
+int
+sprintf(char *restrict d, const char *restrict f, ...)
+{
+	va_list		ap;
+	int			r;
+
+	va_start(ap, f);
+	r = fmt_done(d, SIZE_MAX, fmt_v(d, 0, 0, f, ap), PC());
+	va_end(ap);
+	return r;
+}
+
+int
+snprintf(char *restrict d, size_t n, const char *restrict f, ...)
+{
+	va_list		ap;
+	int			r;
+
+	va_start(ap, f);
+	r = fmt_done(d, n, fmt_v(d, n, 1, f, ap), PC());
+	va_end(ap);
+	return r;
+}
+
+int			__vsprintf_chk(char *d, int flag, size_t room, const char *f, va_list ap);
+int			__vsnprintf_chk(char *d, size_t n, int flag, size_t room, const char *f, va_list ap);
+int			__sprintf_chk(char *d, int flag, size_t room, const char *f, ...);
+int			__snprintf_chk(char *d, size_t n, int flag, size_t room, const char *f, ...);
+
+/* the fortified forms format with the C library's own fortified v-form,
+ * which keeps its checks (a buffer too small, %n in writable memory) */
+static int
+fmt_chk(char *d, size_t n, int flag, size_t room, const char *f, va_list ap)
+{
+	if (libc_vsnprintf_chk == NULL)
+		mem_lookup();
+	if (n == SIZE_MAX)
+		return libc_vsprintf_chk(d, flag, room, f, ap);
+	return libc_vsnprintf_chk(d, n, flag, room, f, ap);
+}
+
+int
+__vsprintf_chk(char *d, int flag, size_t room, const char *f, va_list ap)
+{
+	return fmt_done(d, room, fmt_chk(d, SIZE_MAX, flag, room, f, ap), PC());
+}
+
+int
+__vsnprintf_chk(char *d, size_t n, int flag, size_t room, const char *f, va_list ap)
+{
+	return fmt_done(d, n, fmt_chk(d, n, flag, room, f, ap), PC());
+}
+
+int
+__sprintf_chk(char *d, int flag, size_t room, const char *f, ...)
+{
+	va_list		ap;
+	int			r;
+
+	va_start(ap, f);
+	r = fmt_done(d, room, fmt_chk(d, SIZE_MAX, flag, room, f, ap), PC());
+	va_end(ap);
+	return r;
+}
+
+int
+__snprintf_chk(char *d, size_t n, int flag, size_t room, const char *f, ...)
+{
+	va_list		ap;
+	int			r;
+
+	va_start(ap, f);
+	r = fmt_done(d, n, fmt_chk(d, n, flag, room, f, ap), PC());
+	va_end(ap);
+	return r;
 }
 
 /* ---- atomics -------------------------------------------------------- */

@@ -140,6 +140,16 @@ uninstrumented libraries, which now count as accesses.  Gate: proc_gate
 rows memcopy and memcopy-chk (memcpy, memset and memmove race
 unlocked, a locked memcpy holds) and race_rt.
 
+The race runtime also sees the C library's string and format writers:
+`strcpy`, `strncpy`, `strcat`, `stpcpy`, `sprintf`, `snprintf`,
+`vsprintf` and `vsnprintf`, with their fortified `__*_chk` forms.  An
+unlocked `strcpy` or `snprintf` into a buffer another thread read
+passed.  gcc expands a `strcpy` or `memcpy` of a short constant into
+plain stores it does not instrument (at any optimisation level, and
+with `-fno-builtin`), so that race stays unseen with gcc; cmc(7) now
+says so and recommends clang.  Gate: proc_gate memcopy rows scpy
+through vsnpr, plain and fortified.
+
 A review of the race runtime (docs/research/04-review-race-runtime.md)
 found it passing programs that have a data race or a reachable failure.
 It added happens-before edges POSIX and C11 do not promise: from one

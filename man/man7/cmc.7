@@ -397,7 +397,16 @@ cc -O1 -fno-pie -fsanitize=thread -c prog.c
 cc -no-pie -o prog prog.o libcmc-race.a -lpthread
 .Ed
 .Pp
-gcc and clang emit the same calls.
+gcc and clang emit the same kinds of calls, with one gap in gcc: it
+expands a
+.Fn strcpy
+or
+.Fn memcpy
+of a short constant into plain stores that it does not instrument, at
+any optimisation level and with
+.Fl fno-builtin ,
+so neither this runtime nor gcc's own sees a race on them.
+clang instruments those stores; prefer it for a multi-threaded node.
 The runtime keeps a vector clock per thread and per synchronisation
 object, with happens-before edges from thread creation and join (a
 thread may end by returning,
@@ -456,8 +465,28 @@ and their fortified forms
 .Fn __memmove_chk
 and
 .Fn __memset_chk ,
-in the executable, so each such call records the bytes it reads and
-writes, whichever form the compiler left and from whichever library.
+and the string and format writers
+.Fn strcpy ,
+.Fn strncpy ,
+.Fn strcat ,
+.Fn stpcpy ,
+.Fn sprintf ,
+.Fn snprintf ,
+.Fn vsprintf
+and
+.Fn vsnprintf
+with their
+.Fn __*_chk
+forms, in the executable, so each such call records the bytes it reads
+and writes, whichever form the compiler left and from whichever library.
+A format's arguments (the string a
+.Li %s
+copies) are not recorded as reads, and other C library routines that
+write program memory
+.Po Fn memccpy , Fn qsort , Fn fread , Fn strtok
+and the like
+.Pc
+are not seen.
 So do the calls that move bytes between the program's memory and a
 descriptor
 .Po
