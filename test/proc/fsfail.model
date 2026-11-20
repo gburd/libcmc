@@ -1,0 +1,15 @@
+# A model file for test/proc/fsfail.c (the gate sets args): an acked
+# value survives a crash and a restart, with one write or fsync failing.
+[target]
+nodes = 1
+args = rewrite
+[environment]
+client_write = 5
+crashes = 1
+restarts = 1
+[files]
+dir = /data
+eio = 1
+[invariants]
+acked_durable = "all r in replies : node[0][0] == r.val or node[0][0] < 0"
+acks = "eventually some r in replies : r.val == 5"

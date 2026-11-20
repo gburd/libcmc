@@ -112,6 +112,9 @@ in the kernel, untouched.
 | `lseek`, `fsync`, `fdatasync`, `sync_file_range` on a kernel fd, one thread | exact | the kernel answers | proc_gate files config |
 | `lseek`, `fsync`, `fdatasync`, `ftruncate`, `sync_file_range` on a checker-owned fd | exact | Linux's answer for a socket (`ESPIPE`, `EINVAL`); `fallocate` and `flock` there are refused | proc_gate files sockerr, against a native run |
 | `fsync`, `fdatasync` of fd 193 | exact | succeed: the record is durable when written | proc_gate files durfsync |
+| a modelled file system (`[files] dir`): `open`, `openat`, `creat`, `read`, `pread64`, `write`, `pwrite64`, `lseek`, `ftruncate`, `fsync`, `fdatasync`, `close`, `fstat`, `stat`, `newfstatat`, `statx`, `access`, `mkdir`, `unlink`, `rename`, `renameat` | approximate | contents in the world; a crash keeps each file's and directory's synced contents plus a prefix of its later changes (no reordering within a file, no torn writes); a create or rename is durable after an `fsync` of its directory; single-threaded nodes; 16 files, 4096 bytes a file, 16 unsynced changes a file | proc_gate fslog, fslog-bug, fslog-bug2, fsmodel |
+| `eio`, `enospc` budgets on modelled files | exact | a write or truncation fails and is undone; a failed `fsync` forgets the unsynced changes | proc_gate fsfail rewrite, retry; fsmodel |
+| on a modelled path or fd: `O_DIRECT`, `O_SYNC`, `mmap`, links, xattrs, `rmdir`, `chdir`, `getdents`, a path with `..`, a rename between directories or out of the model, a node past its `bytes` budget, a multi-threaded node | refused | exit 3 | proc_gate fsfail big, odirect, mmap, link, xattr, cross |
 
 ### State, search and verdicts
 

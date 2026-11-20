@@ -1,0 +1,15 @@
+# A model file for test/proc/fslog.c: an acked value survives a crash and
+# a restart, read back from the node's modelled files under /data.
+[target]
+nodes = 1
+[environment]
+client_write = 5
+crashes = 1
+restarts = 1
+[files]
+dir = /data
+[invariants]
+# node[0][0] is the committed value the node reports; it is -1 (no
+# record) while the node is down
+acked_durable = "all r in replies : node[0][0] == r.val or node[0][0] < 0"
+acks = "eventually some r in replies : r.val == 5"
