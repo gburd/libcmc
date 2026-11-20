@@ -173,6 +173,14 @@ outside the directory keep the read-only behaviour.  Gates: proc_gate
 rows fslog (a missing directory fsync and a missing fdatasync are each
 caught) and fsfail (EIO, ENOSPC, the bytes budget, and the refusals).
 
+Fixes found by `make coverage`: in the modelled file system a rename
+to a path under a missing directory returned EBUSY, where Linux
+returns ENOENT (gate: fsmodel); and the `cmc --spec` loader accepted
+an action tag without its `]`, action parameters without their `)`,
+and a function variable without its `]`, and read them as something
+else (an untagged action, a guessed parameter list).  Each is now
+refused with exit 3 (gate: spec_gate rows).
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a
