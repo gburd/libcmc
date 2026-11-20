@@ -675,6 +675,52 @@ main(int argc, char **argv)
 		code(syscall(SYS_open_by_handle_at, AT_FDCWD, BAD, O_RDWR));
 	else if (!strcmp(mode, "openhow"))
 		code(syscall(SYS_openat2, AT_FDCWD, "/dev/null", BAD, 24));
+	else if (!strcmp(mode, "manyfds"))
+		for (int i = 0; i < 300; i++)
+			code(socket(AF_INET, SOCK_STREAM, 0));
+	else if (!strcmp(mode, "manyconn"))
+	{
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+
+		(void) ls;
+		for (int i = 0; i < 20; i++)
+			code(connect(socket(AF_INET, SOCK_STREAM, 0), (struct sockaddr *) &me, sizeof me));
+	}
+	else if (!strcmp(mode, "manywatch"))
+	{
+		int			ep = epoll_create1(0);
+		struct epoll_event ev = {EPOLLIN, {0}};
+
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+
+		code(epoll_ctl(ep, EPOLL_CTL_ADD, ls, &ev));
+		for (int i = 0; i < 16; i++)
+		{
+			int			c = socket(AF_INET, SOCK_STREAM, 0);
+
+			code(connect(c, (struct sockaddr *) &me, sizeof me));
+			code(epoll_ctl(ep, EPOLL_CTL_ADD, c, &ev));
+		}
+		code(epoll_wait(ep, &ev, 1, 0));
+	}
+	else if (!strncmp(mode, "early", 5))
+	{
+		/* a non-blocking connect not yet complete, then a shutdown, or a
+		 * blocking read, write or connect */
+		struct sockaddr_in a = addr(BASE + 1);
+		int			s = socket(AF_INET, SOCK_STREAM, 0);
+		char		b = 'x';
+
+		fcntl(s, F_SETFL, O_NONBLOCK);
+		code(connect(s, (struct sockaddr *) &a, sizeof a));	/* EINPROGRESS */
+		if (!strcmp(mode, "earlyshut")) code(shutdown(s, SHUT_WR));
+		fcntl(s, F_SETFL, 0);
+		if (!strcmp(mode, "earlyread")) code(read(s, &b, 1));
+		if (!strcmp(mode, "earlywrite")) code(write(s, &b, 1));
+		if (!strcmp(mode, "earlydial")) code(connect(s, (struct sockaddr *) &a, sizeof a));
+	}
 	else if (!strcmp(mode, "notconnpipe"))
 	{
 		/* the same write with SIGPIPE at its default: the node dies */

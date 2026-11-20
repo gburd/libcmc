@@ -245,7 +245,7 @@ opts(int ls)
 /* the errors of the socket calls: the wrong kind of fd, a closed one,
  * a bad address or length, and a socket in the wrong state */
 static void
-errs(int c, int s)
+errs(int c, int s, int ls)
 {
 	struct sockaddr_in sa;
 	socklen_t	l = sizeof sa;
@@ -286,6 +286,23 @@ errs(int c, int s)
 		code(readv(gone, &iov, 1));	/* EBADF */
 		code(recvfrom(gone, b, sizeof b, 0, NULL, NULL));	/* EBADF */
 		code(syscall(SYS_readv, c, BAD, 1));	/* EFAULT */
+	}
+	{
+		/* accept4's SOCK_CLOEXEC is the accepted fd's FD_CLOEXEC, and
+		 * without it the fd has none */
+		struct sockaddr_in me;
+		socklen_t	ml = sizeof me;
+		int			k = socket(AF_INET, SOCK_STREAM, 0);
+
+		getpeername(c, (struct sockaddr *) &me, &ml);
+		code(connect(k, (struct sockaddr *) &me, sizeof me));
+		int			x = accept4(ls, NULL, NULL, SOCK_CLOEXEC);
+
+		code(fcntl(x, F_GETFD) == FD_CLOEXEC ? 0 : -1);
+		k = socket(AF_INET, SOCK_STREAM, 0);
+		code(connect(k, (struct sockaddr *) &me, sizeof me));
+		x = accept4(ls, NULL, NULL, 0);
+		code(fcntl(x, F_GETFD) == 0 ? 0 : -1);
 	}
 	int			d = dup(c);
 
@@ -332,7 +349,7 @@ main(int argc, char **argv)
 	else if (!strcmp(mode, "dup"))
 		dups(c, s);
 	else if (!strcmp(mode, "errs"))
-		errs(c, s);
+		errs(c, s, ls);
 	emit(1);
 	return 0;
 }

@@ -917,6 +917,13 @@ scm manyriov 3 "reads into 40 iovec entries"
 scm flocksock 3 "system call 73 on checker-owned fd 500 is not modelled"
 scm byhandle 3 "opens a file by handle for writing"
 scm openhow 3 "openat2 passes an open_how the checker cannot read"
+scm manyfds 1 "opens more than 256 checker-owned fds"
+scm manyconn 1 "more than 16 connections wait at node 0"
+scm manywatch 1 "epoll instance watches more than 16 fds"
+scm earlyshut 3 "shutdown of a socket whose non-blocking connect has not completed is not modelled"
+scm earlyread 3 "a blocking read of a socket whose non-blocking connect has not completed"
+scm earlywrite 3 "a blocking write to a socket whose non-blocking connect has not completed"
+scm earlydial 3 "a blocking connect on a socket whose non-blocking connect has not completed"
 
 echo "-- a libpq-style client: non-blocking connect, POLLOUT, SO_ERROR"
 # nbconnect.c makes the socket calls libpq's connectDBStart() and
