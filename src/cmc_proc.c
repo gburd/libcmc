@@ -16,17 +16,17 @@
  * Search: stateless replay over action sequences.  To explore a
  * sequence, relaunch all nodes, drive to quiescence, apply the
  * sequence's actions (re-driving to quiescence after each), then
- * snapshot.  An action is ACCEPT, DELIVER, EOF, TIMEOUT, CRASH or DROP
- * (enum_actions).  Connections are routed by the port a node dials (node
- * i listens on 127.0.0.1:20000+i), so any topology the nodes set up
- * works; each connection is a FIFO channel, as TCP is.  BFS gives the
- * shortest counterexample; simulation takes seeded random walks.
+ * snapshot.  An action is ACCEPT, DELIVER, EOF, TIMEOUT, EXPIRE, CRASH,
+ * DROP and the rest (enum_actions).  Connections are routed by the port a
+ * node dials (node i listens on 127.0.0.1:20000+i), so any topology the
+ * nodes set up works; each connection is a FIFO channel, as TCP is.  BFS
+ * gives the shortest counterexample; simulation takes seeded random walks.
  *
  * Verdicts are honest (docs/steering/project.md).  The fingerprint holds
  * everything the future depends on: node states, open connections,
- * channels in order, pending connects, replies, budgets left, the
- * clock.  A search stopped by a depth, state or time limit is
- * INCOMPLETE, never a pass.  A model-file key the loader does not
+ * channels in order, pending connects, replies, budgets left, every
+ * node clock and deadline.  A search stopped by a depth, state or time
+ * limit is INCOMPLETE, never a pass.  A model-file key the loader does not
  * implement, a cap the run exceeds, a write longer than one message, a
  * node silent in an unmodelled call, a missing preload, or a replay that
  * diverges is an error, never ignored or truncated.
@@ -126,7 +126,7 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
  * threads the per-thread term dominates, so the bound scales by it.
  * One restart per node also fits the trailing MAXNODES * (MAXNODES + 1)
  * term alongside the per-node crashes. */
-#define MAXACT (MAXNODES * MAXTHREAD * (MAXPOLL + MAXNODES + 4) + MAXNODES * (MAXNODES + 1))
+#define MAXACT (MAXNODES * MAXTHREAD * (MAXPOLL + MAXNODES + 4) + MAXNODES * (MAXNODES + 1) + MAXNODES * 2 * MAXNODES)
 #define MAXINV 8
 #define MAXFIELD 16				/* named byte offsets in [fields] */
 
@@ -141,6 +141,7 @@ static struct
 	int			nodes;
 	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
 	int			timeouts, crashes, drops, restarts, short_writes, partitions;
+	int			drift;			/* per thousand: how far two node clocks may diverge per fired deadline */
 	int			max_write;		/* largest single write a node may make (<= MSGLEN) */
 	char		args[512];		/* extra argv after the node id, space-separated (e.g. flags) */
 	long		depth;			/* -1 = unbounded */
@@ -234,6 +235,8 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.client_write = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "timeouts"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.timeouts = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "drift"))
+		{ if (int_value(path, ln, k, v, 0, 500, &x)) goto bad; M.drift = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "crashes"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.crashes = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "drops"))
@@ -661,6 +664,10 @@ typedef struct {
 	 * msghdr, whose msg_namelen and msg_flags the answer sets (0 else) */
 	int vecread, niov; uint64_t iovb[MAXRIOV]; uint64_t iovl[MAXRIOV]; uint64_t block_msg;
 	uint64_t futex_addr;		/* BK_FUTEX: the futex word this thread waits on */
+	/* a finite timeout of the call this thread is parked in (a kind
+	 * timed_kind() accepts): has_dl, and the deadline dl on its node's
+	 * clock */
+	int has_dl; unsigned long long dl;
 	/* the thread's latest notification: the call, its arguments, the
 	 * address of its syscall instruction and, in a node with more than one
 	 * thread, its stack pointer there.  A parked thread makes no other
@@ -735,10 +742,18 @@ static int g_unchecked_node, g_weak_seen, g_try_seen;
  * not yet carried out, whose answer depends on whether a non-blocking
  * connect's handshake has completed (see connwait()).  BK_SHORTW is a
  * write, not yet carried out, that the search may cut short (see
- * shortwait()). */
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10 };
+ * shortwait()).  BK_SLEEP is a pure wait on the node's clock (see
+ * sleep_call()). */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10, BK_SLEEP = 11 };
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
+
+/* Can a thread parked in kind carry a deadline (Thread.has_dl)? */
+static int
+timed_kind(int kind)
+{
+	return kind == BK_POLL || kind == BK_SLEEP || kind == BK_FUTEX;
+}
 
 /* Find the thread slot for tid on node nd, allocating one on first sight
  * (the main thread's first call, or a birth).  Returns the slot, or NULL
@@ -1048,13 +1063,17 @@ rst_path(int a, int b)
 		die(3, "node %d resets a connection to node %d across a cut link; an RST held back by a partition is not modelled", a, b);
 }
 
-/* M5b: the logical clock the checker owns.  It starts at a base and
- * advances by LEASE_TICK only when the checker fires a timeout, so a
- * target's clock_gettime/gettimeofday reads are a pure function of how
- * many timeouts have fired -- stateless replay stays deterministic. */
+/* The logical clocks the checker owns, one per node (a node's clock
+ * outlives a crash of its process, as a machine's does).  Every clock
+ * starts at a base.  A budgeted TIMEOUT advances them all by CLK_TICK;
+ * a node's own deadline firing (A_EXPIRE) advances its clock to the
+ * deadline and the others by about as much, within the model's drift
+ * (fire_deadline()).  A target's clock_gettime/gettimeofday reads are a
+ * pure function of the actions taken, so stateless replay stays
+ * deterministic. */
 #define CLK_BASE 1000000000ULL		/* 1e9 ns = 1 s, an arbitrary epoch */
-#define CLK_TICK 1000000000ULL		/* each fired timeout advances 1 s */
-static unsigned long long logical_ns;
+#define CLK_TICK 1000000000ULL		/* each fired TIMEOUT advances 1 s */
+static unsigned long long g_clk[MAXNODES];
 
 static struct seccomp_notif_sizes g_sz;
 
@@ -1101,6 +1120,30 @@ cr_fail(int id, const char *what)
 	die(3, "node %d: %s at an address it does not own; EFAULT on this path is not modelled", id, what);
 }
 
+/* Read the struct timespec at addr in node nd into *ns.  Returns 1, 0
+ * when it is not a valid duration (EINVAL on Linux), or -1 when it
+ * cannot be read (EFAULT). */
+static int
+read_timespec(const Node *nd, uint64_t addr, unsigned long long *ns)
+{
+	struct { long long sec, nsec; } ts;
+	if (cr_read(nd->pid, addr, &ts, sizeof ts) != sizeof ts) return -1;
+	if (ts.sec < 0 || ts.nsec < 0 || ts.nsec >= 1000000000LL) return 0;
+	/* a deadline past a century is as good as never; keep the sum finite */
+	if (ts.sec > 3153600000LL) ts.sec = 3153600000LL;
+	*ns = (unsigned long long) ts.sec * 1000000000ULL + (unsigned long long) ts.nsec;
+	return 1;
+}
+
+/* Give thread th, about to park, a deadline tmo_ns from now on its node's
+ * clock when finite is set, else none.  Firing it is A_EXPIRE. */
+static void
+set_deadline(const Node *nd, Thread *th, int finite, unsigned long long tmo_ns)
+{
+	th->has_dl = finite;
+	th->dl = finite ? g_clk[nd->id] + tmo_ns : 0;
+}
+
 static int
 is_pie(const char *b)
 { int fd=open(b,O_RDONLY); unsigned char e[18]={0}; if(fd<0)return -1;	/* GCOVR_EXCL_LINE: the binary was found and opened a moment ago */
@@ -1125,6 +1168,8 @@ install_filter(void)
 		OWN(SYS_poll), OWN(SYS_ppoll), OWN(SYS_fcntl), OWN(SYS_eventfd2),
 		OWN(SYS_epoll_create1), OWN(SYS_epoll_create), OWN(SYS_epoll_ctl),
 		OWN(SYS_epoll_wait), OWN(SYS_epoll_pwait),
+		OWN(SYS_nanosleep), OWN(SYS_clock_nanosleep), OWN(SYS_select), OWN(SYS_pselect6),
+		OWN(SYS_setitimer), OWN(SYS_alarm), OWN(SYS_timer_create), OWN(SYS_timerfd_create),
 		OWN(SYS_clone), OWN(SYS_clone3), OWN(SYS_futex), OWN(SYS_exit),
 		OWN(SYS_sched_yield),
 		OWN(SYS_fork), OWN(SYS_vfork),
@@ -2497,6 +2542,53 @@ sock_dup(Node *nd, long nr, const __u64 *a)
 	g_resp->val = to;
 }
 
+/* nanosleep, clock_nanosleep, and select or pselect6 with no descriptor:
+ * a pure wait.  A zero wait (or an absolute one already past) returns at
+ * once; any other parks the thread as BK_SLEEP with a deadline on its
+ * node's clock, which A_EXPIRE fires (sleep_expire()).  Every clock id a
+ * node can name reads the one node clock, so sleeping on any of them is
+ * the same wait.  select or pselect6 on descriptors is refused: poll is
+ * the modelled readiness call.  Returns 1 if the thread parked, and 0 if
+ * g_resp holds the answer. */
+static int
+sleep_call(Node *nd, Thread *th, long nr, const __u64 *a)
+{
+	unsigned long long ns = 0; int ok;
+	if (nr == SYS_select || nr == SYS_pselect6)
+	{
+		if ((int) a[0] > 0 && (a[1] || a[2] || a[3]))
+			die(3, "node %d: select or pselect6 on descriptors is not modelled (use poll)", nd->id);
+		if (!a[4]) die(3, "node %d: select or pselect6 with no descriptor and no timeout (a wait forever) is not modelled", nd->id);
+		if (nr == SYS_pselect6) ok = read_timespec(nd, a[4], &ns);
+		else
+		{
+			/* select's timeout is a struct timeval, which Linux counts down */
+			struct { long long sec, usec; } tv;
+			ok = cr_read(nd->pid, a[4], &tv, sizeof tv) == sizeof tv ? 1 : -1;
+			if (ok > 0 && (tv.sec < 0 || tv.usec < 0 || tv.usec >= 1000000LL)) ok = 0;
+			if (ok > 0) ns = (unsigned long long) tv.sec * 1000000000ULL + (unsigned long long) tv.usec * 1000ULL;
+		}
+	}
+	else
+	{
+		uint64_t req = nr == SYS_nanosleep ? a[0] : a[2];
+		if (nr == SYS_clock_nanosleep && a[0] != CLOCK_REALTIME && a[0] != CLOCK_MONOTONIC && a[0] != CLOCK_BOOTTIME)
+			die(3, "node %d: clock_nanosleep on clock %d is not modelled (only REALTIME, MONOTONIC and BOOTTIME)", nd->id, (int) a[0]);
+		ok = read_timespec(nd, req, &ns);
+		/* TIMER_ABSTIME: ns is a reading of the node clock to wait for */
+		if (ok > 0 && nr == SYS_clock_nanosleep && (a[1] & TIMER_ABSTIME))
+			ns = ns > g_clk[nd->id] ? ns - g_clk[nd->id] : 0;
+	}
+	if (ok < 0) { g_resp->error = -EFAULT; return 0; }
+	if (ok == 0) { g_resp->error = -EINVAL; return 0; }
+	if (ns == 0) { g_resp->val = 0; return 0; }
+	th->block_kind = BK_SLEEP; th->block_id = g_req->id;
+	/* select and pselect6 count their timeout down, to zero on expiry */
+	th->block_bufaddr = nr == SYS_select || nr == SYS_pselect6 ? a[4] : 0;
+	set_deadline(nd, th, 1, ns);
+	return 1;
+}
+
 /* Carry out notification g_req of thread th on node nd.  Returns 1 if the
  * call parked (a deferred recv, accept, poll or futex wait) or ended the
  * node, and 0 if g_resp holds its answer. */
@@ -2546,7 +2638,7 @@ serve(Node *nd, Thread *th)
 		{
 			/* answer with the logical clock (a[1] = struct timespec*) */
 			struct { long long sec, nsec; } ts;
-			ts.sec = logical_ns / 1000000000ULL; ts.nsec = logical_ns % 1000000000ULL;
+			ts.sec = g_clk[nd->id] / 1000000000ULL; ts.nsec = g_clk[nd->id] % 1000000000ULL;
 			if (cr_write(nd->pid, a[1], &ts, sizeof ts) != sizeof ts) { g_resp->error = -EFAULT; break; }
 			g_resp->val = 0; break;
 		}
@@ -2554,7 +2646,7 @@ serve(Node *nd, Thread *th)
 		{
 			/* gettimeofday(tv, tz): the buffer is the FIRST argument */
 			struct { long long sec, usec; } tv;
-			tv.sec = logical_ns / 1000000000ULL; tv.usec = (logical_ns % 1000000000ULL) / 1000;
+			tv.sec = g_clk[nd->id] / 1000000000ULL; tv.usec = (g_clk[nd->id] % 1000000000ULL) / 1000;
 			/* a NULL tv is allowed and writes nothing */
 			if (a[0] && cr_write(nd->pid, a[0], &tv, sizeof tv) != sizeof tv) { g_resp->error = -EFAULT; break; }
 			g_resp->val = 0; break;
@@ -3163,11 +3255,10 @@ serve(Node *nd, Thread *th)
 			if (e->nit > MAXPOLL) die(1, "node %d: epoll instance watches %d fds; the limit is %d", nd->id, e->nit, MAXPOLL);
 			/* epoll_wait's timeout is a[3] (ms); epoll_pwait's too (a[4] is the
 			 * sigmask).  A 0 timeout returns at once with whatever is ready,
-			 * and a negative one blocks.  A positive timeout would return 0
-			 * when it expires, which the search never offers, so it is
-			 * refused. */
-			if ((int) a[3] > 0) die(3, "node %d: epoll_wait with a %d ms timeout is not modelled (only 0 or -1)", nd->id, (int) a[3]);
+			 * a negative one blocks, and a positive one is a deadline on the
+			 * node's clock (A_EXPIRE). */
 			int zero_timeout = (a[3] == 0);
+			long long tmo_ms = (int) a[3];
 			struct __attribute__((packed)) { uint32_t events; uint64_t data; } out[MAXPOLL];
 			int ready = 0;
 			for (int i = 0; i < e->nit && ready < maxevents; i++)
@@ -3194,6 +3285,7 @@ serve(Node *nd, Thread *th)
 			th->block_kind = BK_POLL; th->block_id = g_req->id;
 			th->block_pollarr = arr; th->pollfd_n = e->nit;
 			th->epoll_fd = epfd; th->poll_maxevents = maxevents;
+			set_deadline(nd, th, tmo_ms > 0, (unsigned long long) tmo_ms * 1000000ULL);
 			for (int i = 0; i < e->nit; i++)
 			{ th->pollfds[i] = e->fd[i]; th->pollevents[i] = e->events[i]; th->polldata[i] = e->data[i]; }
 			return 1;				/* do NOT answer */
@@ -3212,21 +3304,22 @@ serve(Node *nd, Thread *th)
 			{ g_resp->error = -EFAULT; break; }
 			/* poll's timeout is a[2] (ms, negative = block forever); ppoll's
 			 * is a struct timespec* at a[2] (NULL = block forever).  A zero
-			 * timeout returns at once; a finite positive one would return 0
-			 * on expiry, which the search never offers, so it is refused. */
-			int zero_timeout;
+			 * timeout returns at once, and a finite positive one is a
+			 * deadline on the node's clock (A_EXPIRE). */
+			int zero_timeout = 0, finite = 0;
+			unsigned long long tmo_ns = 0;
 			if (nr == SYS_poll)
 			{
-				if ((int) a[2] > 0) die(3, "node %d: poll with a %d ms timeout is not modelled (only 0 or -1)", nd->id, (int) a[2]);
 				zero_timeout = (a[2] == 0);
+				finite = ((int) a[2] > 0);
+				if (finite) tmo_ns = (unsigned long long) (int) a[2] * 1000000ULL;
 			}
-			else if (a[2] == 0) zero_timeout = 0;
-			else
+			else if (a[2] != 0)
 			{
-				struct { long long sec, nsec; } ts;
-				if (cr_read(nd->pid, a[2], &ts, sizeof ts) != sizeof ts) { g_resp->error = -EFAULT; break; }
-				if (ts.sec != 0 || ts.nsec != 0) die(3, "node %d: ppoll with a finite timeout is not modelled (only zero or NULL)", nd->id);
-				zero_timeout = 1;
+				int t = read_timespec(nd, a[2], &tmo_ns);
+				if (t < 0) { g_resp->error = -EFAULT; break; }
+				if (t == 0) { g_resp->error = -EINVAL; break; }
+				zero_timeout = (tmo_ns == 0); finite = !zero_timeout;
 			}
 			int ready = 0;
 			for (int i = 0; i < nfds; i++)
@@ -3248,9 +3341,18 @@ serve(Node *nd, Thread *th)
 			 * ready and answer the poll. */
 			th->block_kind = BK_POLL; th->block_id = g_req->id;
 			th->block_pollarr = arr; th->pollfd_n = nfds; th->epoll_fd = -1;
+			set_deadline(nd, th, finite, tmo_ns);
 			for (int i = 0; i < nfds; i++) { th->pollfds[i] = pfs[i].fd; th->pollevents[i] = pfs[i].events; }
 			return 1;				/* do NOT answer */
 		}
+		case SYS_setitimer: case SYS_alarm: case SYS_timer_create: case SYS_timerfd_create:
+			/* timers the kernel would run on the real clock: a signal or a
+			 * readable fd at a real-time moment no replay reproduces */
+			die(3, "node %d: system call %ld arms a real-time timer (setitimer, alarm, timer_create, timerfd), which is not modelled", nd->id, nr);
+			return 1;
+		case SYS_nanosleep: case SYS_clock_nanosleep: case SYS_select: case SYS_pselect6:
+			if (sleep_call(nd, th, nr, a)) return 1;	/* parked: do NOT answer */
+			break;
 		case SYS_process_vm_readv: case SYS_process_vm_writev:
 		case SYS_shmget: case SYS_shmat: case SYS_msgget: case SYS_semget: case SYS_mq_open:
 			/* another process's memory, SysV shared memory, message queues
@@ -3342,9 +3444,19 @@ serve(Node *nd, Thread *th)
 			int cmd = op & FUTEX_CMD_MASK;
 			if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET)
 			{
-				/* a timed wait could return ETIMEDOUT, which the search never
-				 * offers, so it is refused rather than treated as untimed */
-				if (a[3]) die(3, "node %d: a futex wait with a timeout is not modelled", nd->id);
+				/* a timed wait is a deadline on the node clock, fired as
+				 * ETIMEDOUT (A_EXPIRE).  FUTEX_WAIT's timeout is relative;
+				 * FUTEX_WAIT_BITSET's is absolute, on either clock, and every
+				 * clock reads the node clock. */
+				unsigned long long tmo = 0;
+				if (a[3])
+				{
+					int t = read_timespec(nd, a[3], &tmo);
+					if (t < 0) { g_resp->error = -EFAULT; break; }
+					if (t == 0) { g_resp->error = -EINVAL; break; }
+					if (cmd == FUTEX_WAIT_BITSET) tmo = tmo > g_clk[nd->id] ? tmo - g_clk[nd->id] : 0;
+					if (tmo == 0) { g_resp->error = -ETIMEDOUT; break; }
+				}
 				/* honour the kernel's atomic compare: FUTEX_WAIT sleeps only
 				 * if *uaddr == val, else it returns EAGAIN at once.  Reading
 				 * *uaddr and matching that keeps us from parking a thread the
@@ -3354,6 +3466,7 @@ serve(Node *nd, Thread *th)
 				if (cr_read(nd->pid, uaddr, &cur, sizeof cur) != sizeof cur) { g_resp->error = -EFAULT; break; }
 				if (cur != (uint32_t) a[2]) { g_resp->error = -EAGAIN; g_resp->val = 0; break; }
 				th->block_kind = BK_FUTEX; th->block_id = g_req->id; th->futex_addr = uaddr;
+				set_deadline(nd, th, a[3] != 0, tmo);
 				return 1;			/* do NOT answer: a wake will */
 			}
 			if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET)
@@ -4004,7 +4117,7 @@ fd_class(const Node *nd, int fd, unsigned char *r)
  * address randomisation), and a held answer: the call, its result, and
  * the bytes it wrote into the thread's memory, after a fixed-width head.
  * Returns the number of bytes written, or -1 if out is too small. */
-#define THREC (16 + MAXPOLL * 12)		/* fixed width of one thread's record, before a held answer's bytes */
+#define THREC (25 + MAXPOLL * 12)		/* fixed width of one thread's record, before a held answer's bytes */
 #define THREC_MAX (THREC + 76 + 18 + MSGLEN)	/* the widest record: a head, the call, a held answer and its bytes */
 static int
 encode_threads(const Node *nd, unsigned char *out, int cap)
@@ -4046,6 +4159,16 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 				if (th->epoll_fd >= 0)
 					for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->polldata[k] >> (8 * b));
 			}
+		}
+		/* a pending deadline, as the time left on the node's clock: two
+		 * worlds whose clocks differ by the same amount as their deadlines
+		 * have the same future, apart from what the clock reads (which the
+		 * world records too) */
+		if (timed_kind(th->block_kind))
+		{
+			unsigned long long left = th->has_dl && th->dl > g_clk[nd->id] ? th->dl - g_clk[nd->id] : 0;
+			r[p++] = (unsigned char) th->has_dl;
+			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (left >> (8 * b));
 		}
 		if (p > THREC) die(1, "thread record overflow on node %d", nd->id);	/* GCOVR_EXCL_LINE: a record's fields are bounded by THREC */
 		p = THREC;
@@ -4258,7 +4381,7 @@ world_fp(uint64_t fp[2])
 	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts); PUT(bud.short_writes);
 	PUT(bud.partitions);
 	for (int i = 0; i < M.nodes; i++) for (int j = 0; j < M.nodes; j++) PUT(g_cut[i][j]);
-	PUT8(logical_ns);
+	for (int i = 0; i < M.nodes; i++) PUT8(g_clk[i]);
 #undef PUT8
 #undef PUT
 	g_world_len = n;
@@ -4269,16 +4392,17 @@ static void
 reset_world(void)
 {
 	memset(bag, 0, sizeof bag); memset(conns, 0, sizeof conns);
-	nrep = 0; logical_ns = CLK_BASE; g_fault_node = -1; g_race_node = -1;
+	nrep = 0; g_fault_node = -1; g_race_node = -1;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
 	bud.restarts = M.restarts; bud.short_writes = M.short_writes; bud.partitions = M.partitions;
 	memset(g_cut, 0, sizeof g_cut);
+	for (int i = 0; i < MAXNODES; i++) g_clk[i] = CLK_BASE;
 }
 
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL, A_EXPIRE };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -4321,6 +4445,80 @@ add_act(Act *out, int *c, int kind, int node, int peer, int thr, int arg)
 	if (*c >= MAXACT) die(1, "more than %d actions enabled at one point", MAXACT);
 	out[*c].kind = kind; out[*c].node = node; out[*c].peer = peer; out[*c].thr = thr; out[*c].arg = arg;
 	(*c)++;
+}
+
+/* The thread of node d whose deadline comes first, or -1 when none of
+ * its parked threads has one.  Ties go to the lowest slot. */
+static int
+first_deadline(int d)
+{
+	const Node *nd = &N[d]; int best = -1;
+	if (!nd->alive) return -1;
+	for (int ti = 0; ti < nd->nth; ti++)
+	{
+		const Thread *th = &nd->th[ti];
+		if (!th->inuse || !th->has_dl || !timed_kind(th->block_kind)) continue;
+		if (best < 0 || th->dl < nd->th[best].dl) best = ti;
+	}
+	return best;
+}
+
+/* x * num / den for the drift rates, without overflowing 64 bits for
+ * deadlines up to a century; rounded up when up is set */
+static unsigned long long
+scale_ns(unsigned long long x, unsigned num, unsigned den, int up)
+{
+	unsigned long long q = x / den, r = x % den;
+	unsigned long long lo = r * num;
+	return q * num + lo / den + (up && lo % den ? 1 : 0);
+}
+
+/* How far node j's clock moves while node d's moves by D, when the
+ * deadline of node d fires with drift variant v (A_EXPIRE's arg): -1
+ * moves every clock by D; 2j + 0 moves node j's at the slowest rate the
+ * drift allows against d's, and 2j + 1 at the fastest. */
+static unsigned long long
+drift_advance(int d, int j, unsigned long long D, int v)
+{
+	if (j == d || v < 0 || v / 2 != j) return D;
+	unsigned slow = (unsigned) (1000 - M.drift);
+	return (v & 1) ? scale_ns(D, 1000, slow, 0) : scale_ns(D, slow, 1000, 1);
+}
+
+/* May node d's first deadline fire with drift variant v?  Only if no
+ * other node would pass a deadline of its own on the way: that deadline
+ * fires first, as its own action.  Deadlines fire in the order the
+ * clocks reach them, never one state per tick. */
+static int
+expire_ok(int d, unsigned long long D, int v)
+{
+	for (int j = 0; j < M.nodes; j++)
+	{
+		int tj = j == d ? -1 : first_deadline(j);
+		if (tj < 0) continue;
+		unsigned long long dl = N[j].th[tj].dl, left = dl > g_clk[j] ? dl - g_clk[j] : 0;
+		if (drift_advance(d, j, D, v) > left) return 0;
+	}
+	return 1;
+}
+
+/* Offer A_EXPIRE for the first deadline of each node: with every clock
+ * moving alike, and, when the model allows drift, with one other node's
+ * clock moving at the slowest or fastest rate it allows. */
+static void
+enum_expire(Act *out, int *c)
+{
+	for (int d = 0; d < M.nodes; d++)
+	{
+		int ti = first_deadline(d);
+		if (ti < 0) continue;
+		unsigned long long dl = N[d].th[ti].dl, D = dl > g_clk[d] ? dl - g_clk[d] : 0;
+		if (expire_ok(d, D, -1)) add_act(out, c, A_EXPIRE, d, -1, ti, -1);
+		if (M.drift == 0 || D == 0) continue;
+		for (int j = 0; j < M.nodes; j++)
+			for (int s = 0; j != d && s < 2; s++)
+				if (expire_ok(d, D, 2 * j + s)) add_act(out, c, A_EXPIRE, d, -1, ti, 2 * j + s);
+	}
 }
 
 static int
@@ -4401,7 +4599,7 @@ enum_actions(Act *out)
 					{
 						/* a polled fd that is none of this node's connections,
 						 * eventfds or its listener is a kernel fd the model does
-						 * not track (a self-pipe, a timerfd).  It is never treated
+						 * not track (a self-pipe).  It is never treated
 						 * as the listener, so a wake is not offered for it; a loop
 						 * that only ever becomes ready through such an fd makes no
 						 * progress, which the no-progress check reports. */
@@ -4410,6 +4608,7 @@ enum_actions(Act *out)
 				if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
 				continue;
 			}
+			if (th->block_kind == BK_SLEEP) continue;	/* only its deadline wakes it (A_EXPIRE) */
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
 			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED ||
 				th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW)
@@ -4429,6 +4628,7 @@ enum_actions(Act *out)
 			if (bud.timeouts > 0) ADD(A_TIMEOUT, d, p, ti);
 		}
 	}
+	enum_expire(out, &c);
 	if (bud.crashes > 0)
 		for (int d = 0; d < M.nodes; d++)
 			if (N[d].alive) ADD(A_CRASH, d, -1, -1);
@@ -4574,6 +4774,38 @@ complete_connect(int conn)
 		if (nd->th[ti].inuse && nd->th[ti].block_kind == BK_POLL) poll_recheck(nd, &nd->th[ti]);
 }
 
+/* A_EXPIRE: node d's first deadline, on thread th, comes due.  Node d's
+ * clock moves to the deadline, and every other clock by as much as
+ * drift variant v says (drift_advance()).  The thread's call returns
+ * as Linux returns it on expiry: poll and epoll_wait with 0 and nothing
+ * ready, a sleep with 0, and select and pselect6 with 0 and their
+ * timeout counted down to zero (a timeval and a timespec are both two
+ * zero 64-bit words). */
+static void
+fire_deadline(int d, Thread *th, int v)
+{
+	Node *nd = &N[d];
+	unsigned long long D = th->dl > g_clk[d] ? th->dl - g_clk[d] : 0;
+	for (int j = 0; j < M.nodes; j++) g_clk[j] += drift_advance(d, j, D, v);
+	th->has_dl = 0;
+	Thread *old = cap_begin(th);
+	if (th->block_kind == BK_POLL && th->epoll_fd < 0)
+	{
+		struct pollfd pfs[MAXPOLL];
+		for (int k = 0; k < th->pollfd_n; k++)
+		{ pfs[k].fd = th->pollfds[k]; pfs[k].events = th->pollevents[k]; pfs[k].revents = 0; }
+		size_t want = (size_t) th->pollfd_n * sizeof pfs[0];
+		if (cr_write(nd->pid, th->block_pollarr, pfs, want) != want) cr_fail(nd->id, "poll returns revents");
+	}
+	else if (th->block_kind == BK_SLEEP && th->block_bufaddr)
+	{
+		static const struct { long long sec, usec; } zero;
+		if (cr_write(nd->pid, th->block_bufaddr, &zero, sizeof zero) != sizeof zero) cr_fail(nd->id, "select returns the time left");
+	}
+	answer(nd, th, th->block_kind == BK_FUTEX ? -ETIMEDOUT : 0);
+	g_cap = old;
+}
+
 /* Reset connection conn (a DROP): discard every queued message in both
  * directions, mark it reset, and tell both ends at once.  A node parked
  * in recv on it gets ECONNRESET; a node parked in poll on it is woken so
@@ -4659,7 +4891,7 @@ apply(const Act *a)
 		{
 			static const unsigned char t = 'T';
 			bud.timeouts--;
-			logical_ns += CLK_TICK;			/* time advances only here */
+			for (int i = 0; i < M.nodes; i++) g_clk[i] += CLK_TICK;
 			if (th->block_kind == BK_ACCEPT)
 			{
 				/* answer the accept() with a timer connection; the node's
@@ -4714,6 +4946,7 @@ apply(const Act *a)
 					!connwait(nd, nd->th[ti].nr, (const __u64 *) nd->th[ti].args))
 					run_connwait(nd, &nd->th[ti]);
 			break;
+		case A_EXPIRE: fire_deadline(a->node, th, a->arg); break;
 	}
 	settle();
 }
@@ -4835,7 +5068,7 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal", "expire"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);
 	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
@@ -4844,6 +5077,9 @@ act_name(const Act *a, char *b, size_t n)
 	else if (a->kind == A_SHORT) snprintf(b, n, "short n%d t%d (%d bytes)", a->node, a->thr, a->arg);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
+	else if (a->kind == A_EXPIRE && a->arg < 0) snprintf(b, n, "expire n%d t%d", a->node, a->thr);
+	else if (a->kind == A_EXPIRE)
+		snprintf(b, n, "expire n%d t%d, n%d clock %s", a->node, a->thr, a->arg / 2, (a->arg & 1) ? "fast" : "slow");
 	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);
 	else if (a->kind == A_WAKE && a->peer == POLL_LISTENER) snprintf(b, n, "wake n%d listener", a->node);
 	else if (a->kind == A_WAKE && a->peer < POLL_LISTENER) snprintf(b, n, "wake n%d eventfd%d", a->node, POLL_LISTENER - 1 - a->peer);

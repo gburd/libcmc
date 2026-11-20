@@ -283,13 +283,6 @@ main(int argc, char **argv)
 
 		code(epoll_wait(ep, &out, 0, 0));
 	}
-	else if (!strcmp(mode, "epolltimeout"))
-	{
-		int			ep = epoll_create1(0);
-		struct epoll_event out;
-
-		code(epoll_wait(ep, &out, 1, 5));
-	}
 	else if (!strcmp(mode, "epollnotep"))
 	{
 		int			e = eventfd(0, 0);
@@ -310,19 +303,6 @@ main(int argc, char **argv)
 
 		memset(p, 0, sizeof p);
 		code(poll(p, 80, 0));
-	}
-	else if (!strcmp(mode, "ppolltimeout"))
-	{
-		struct timespec t = {0, 1000};
-
-		code(ppoll(NULL, 0, &t, NULL));
-	}
-	else if (!strcmp(mode, "futextimeout"))
-	{
-		static uint32_t w;
-		struct timespec t = {1, 0};
-
-		code(syscall(SYS_futex, &w, FUTEX_WAIT_PRIVATE, 0, &t, NULL, 0));
 	}
 	else if (!strcmp(mode, "bigwrite"))
 	{
@@ -533,12 +513,6 @@ main(int argc, char **argv)
 		static uint32_t w1, w2;
 
 		code(syscall(SYS_futex, &w1, FUTEX_REQUEUE_PRIVATE, 1, 1, &w2, 0));
-	}
-	else if (!strcmp(mode, "ppollsec"))
-	{
-		struct timespec t = {1, 0};
-
-		code(ppoll(NULL, 0, &t, NULL));
 	}
 	else if (!strcmp(mode, "notconnpipe"))
 	{

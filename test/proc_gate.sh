@@ -28,10 +28,10 @@ if [ "$(uname -s)" != Linux ] || [ "$(uname -m)" != x86_64 ]; then
 fi
 
 fail=0
-for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded unmodelled crossrpc twoconn; do
+for f in repl elect lease durlog idle fifo chain bigmsg clocks accept_timeout quorum pollloop guarded unmodelled crossrpc twoconn leasedrift; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
-for f in repl elect lease durlog quorum pollloop; do
+for f in repl elect lease durlog quorum pollloop leasedrift; do
 	$CC -O1 -no-pie -w -DBUG -o "$B/proc/$f-bug" "$T/$f.c" || { echo "proc_gate: $f.c -DBUG does not build"; fail=1; }
 done
 # epoll backend (davros eval ask 9): an event loop built on epoll, with a
@@ -53,6 +53,7 @@ $CC -O1 -no-pie -w -DNEGFD -o "$B/proc/noprogress-stuck" "$HERE/test/proc/noprog
 # the two-threaded fixture needs pthreads (clone/clone3 + futex)
 $CC -O1 -no-pie -w -o "$B/proc/twothread" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/twothread-bug" "$HERE/test/proc/twothread.c" -lpthread || { echo "proc_gate: twothread.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/sleeps" "$T/sleeps.c" -lpthread || { echo "proc_gate: sleeps.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/twothread_join" "$HERE/test/proc/twothread_join.c" -lpthread || { echo "proc_gate: twothread_join.c does not build"; fail=1; }
 for f in racewake raceemit raceborn; do
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
@@ -78,7 +79,7 @@ tsan() {
 		echo "proc_gate: $src does not build with the race runtime"; fail=1
 	fi
 }
-for f in twothread twothread_join racewake raceemit raceborn durack memrace syncpoint kernelfd; do
+for f in twothread twothread_join racewake raceemit raceborn durack memrace syncpoint kernelfd timedwait; do
 	tsan "$f-tsan" "$T/$f.c"
 done
 tsan raceemit-bug-tsan "$T/raceemit.c" -DBUG
@@ -218,6 +219,46 @@ expect "a state bound is INCOMPLETE"       2 "max states" $(runx "$HERE/examples
 expect "an over-long write is an error"    1 "limit is 64" $(run bigmsg bigmsg)
 expect "the counterexample is named"       1 "crash n0" $(run durlog durlog-bug)
 expect "a server idle in accept() can time out" 1 "never_fires is violated" $(run accept_timeout accept_timeout)
+# finite timeouts on per-node clocks with bounded drift (2.2): a lease
+# held for L(1 - rho) on the holder's clock ends before the granter's
+# wait of L(1 + rho) for drift 50; L(1 + rho) is caught only through
+# drift (it holds on equal clocks), and the correct margin gives way once
+# the clocks may drift further than it allows for
+expect "leasedrift: L(1 - rho) holds under drift 50"   0 "No error has been found" $(run leasedrift leasedrift)
+expect "leasedrift: L(1 + rho) caught, node 0 slow"    1 "n0 clock slow" $(run leasedrift leasedrift-bug)
+sed 's/^drift = 50 .*/drift = 0/' "$T/leasedrift.model" > "$OUT/ld0.model"
+expect "leasedrift: L(1 + rho) holds on equal clocks"  0 "No error has been found" --model-file "$OUT/ld0.model" --binary "$B/proc/leasedrift-bug"
+sed 's/^drift = 50 .*/drift = 200/' "$T/leasedrift.model" > "$OUT/ld200.model"
+expect "leasedrift: drift 200 beats the margin"        1 "one_holder is violated" --model-file "$OUT/ld200.model" --binary "$B/proc/leasedrift"
+# each call with a finite timeout returns as Linux returns it on expiry
+# (0, nothing ready, select's timeval counted down, ETIMEDOUT from a
+# futex wait or pthread_cond_timedwait) and the node's clock
+# reads exactly the 7 ms timeout later; natively the record is the same
+# but for the clock, which moves at least that far
+for m in poll ppoll epoll select pselect nanosleep clock_nanosleep abstime futex futexabs condtimed; do
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[invariants]\nlinux = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 0 and node[0][3] == 7)"\nreached = "eventually node[0][0] == 1"\n' \
+		"$B/proc/sleeps" "$m" > "$OUT/sl-$m.model"
+	expect_by 60 "sleeps $m: a finite timeout fires on the node clock" 0 "No error has been found" --model-file "$OUT/sl-$m.model"
+done
+# a timed condition wait with a second thread signalling: the signal and
+# the timeout can each come first, and the run is complete (race runtime)
+for g in 1 2; do
+	printf '[target]\nbinary = %s\nnodes = 1\n[invariants]\nnever%d = "node[0][1] != %d"\n' "$B/proc/timedwait-tsan" $g $g > "$OUT/tw$g.model"
+done
+expect_by 120 "timedwait: the signal can win"  1 "never1 is violated" --model-file "$OUT/tw1.model"
+expect_by 120 "timedwait: the timeout can win" 1 "never2 is violated" --model-file "$OUT/tw2.model"
+printf '[target]\nbinary = %s\nnodes = 1\n[invariants]\nsome = "node[0][0] != 1 or node[0][1] == 1 or node[0][1] == 2"\n' "$B/proc/timedwait-tsan" > "$OUT/tw.model"
+expect_by 120 "timedwait: both outcomes, nothing else"  0 "No error has been found" --model-file "$OUT/tw.model"
+printf '[target]\nbinary = %s\nnodes = 1\nargs = selectfd\n[invariants]\nany = "node[0][0] < 9"\n' "$B/proc/sleeps" > "$OUT/sl-selectfd.model"
+expect_by 60 "sleeps: select on descriptors is refused" 3 "select or pselect6 on descriptors is not modelled" --model-file "$OUT/sl-selectfd.model"
+sed 's/selectfd/selectforever/' "$OUT/sl-selectfd.model" > "$OUT/sl-selectforever.model"
+expect_by 60 "sleeps: select with no timeout is refused" 3 "no descriptor and no timeout" --model-file "$OUT/sl-selectforever.model"
+sed 's/selectfd/clockcpu/' "$OUT/sl-selectfd.model" > "$OUT/sl-clockcpu.model"
+expect_by 60 "sleeps: a sleep on a CPU-time clock is refused" 3 "is not modelled (only REALTIME, MONOTONIC and BOOTTIME)" --model-file "$OUT/sl-clockcpu.model"
+for m in setitimer alarm timer_create timerfd; do
+	sed "s/selectfd/$m/" "$OUT/sl-selectfd.model" > "$OUT/sl-$m.model"
+	expect_by 60 "sleeps: $m is refused" 3 "arms a real-time timer" --model-file "$OUT/sl-$m.model"
+done
 
 echo "-- the loader refuses what it does not implement"
 M=$OUT/m.model
@@ -744,19 +785,15 @@ scm sendtoaddr 3 "sendto flags 0 or a destination address are not modelled"
 scm fcntldup 1 "fcntl cmd 0 on virtual fd 500 has no model"
 scm epollop 1 "epoll_ctl op 99 has no model"
 scm futexrequeue 1 "futex op 3 has no model"
-scm ppollsec 3 "ppoll with a finite timeout is not modelled"
 scm efdwrite4 1 "writes 4 bytes to an eventfd"
 scm efdread4 1 "reads 4 bytes from an eventfd"
 scm efdflags 3 "eventfd flags 0x2 are not modelled"
 scm manyefd 1 "opens more than 8 eventfds"
 scm manyepoll 1 "opens more than 4 epoll instances"
 scm epollmax 1 "maxevents is 0"
-scm epolltimeout 3 "epoll_wait with a 5 ms timeout is not modelled"
 scm epollnotep 1 "epoll_ctl on fd 500, which is no epoll instance"
 scm epollwaitnotep 1 "epoll_wait on fd 500, which is no epoll instance"
 scm manypoll 1 "polls 80 fds; the limit is 16"
-scm ppolltimeout 3 "ppoll with a finite timeout is not modelled"
-scm futextimeout 3 "a futex wait with a timeout is not modelled"
 scm bigwrite 1 "writes 4096 bytes in one call"
 printf '[target]\nbinary = %s\nnodes = 2\nargs = notconnpipe\n[invariants]\nnever = "node[0][0] < 1"\nkilled = "eventually node[0][0] < 1"\n' "$B/proc/syscorner" > "$SC/r-notconnpipe.model"
 expect_by 60 "syscorner notconnpipe: SIGPIPE ends the writer" 0 "No error has been found" --model-file "$SC/r-notconnpipe.model"
@@ -979,7 +1016,8 @@ CMC_PRELOAD=$OUT/no-such-preload.so expect "a missing preload is an error" 3 "pr
 
 # constructs the engine answered wrongly (soundness plan 3.4, 3.6): a
 # write from an unmapped buffer gets EFAULT, not a zero-filled success,
-# and a finite poll timeout, EPOLLET and EFD_SEMAPHORE are refused
+# and EPOLLET and EFD_SEMAPHORE are refused; a finite poll timeout, once
+# refused, now fires (2.2)
 for m in none badptr pollto epollet semaphore longrec partrec refused rstwrite rstignore rsthandler fork writev sendmsg peek nbaccept udp; do
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nuntouched = "node[0][0] != 1"\n' "$B/proc/unmodelled" "$m" > "$OUT/u-$m.model"
 done
@@ -1009,7 +1047,7 @@ done
 # 3.9: a root that enables no action explored nothing, so a safety-only
 # model of it is not a pass
 expect "noprogress: a root with no action is not a pass" 2 "no action was ever enabled" --model-file "$OUT/u-none.model"
-expect "unmodelled: a finite poll timeout is refused"    3 "timeout is not modelled" --model-file "$OUT/u-pollto.model"
+expect "unmodelled: a finite poll timeout fires"        1 "untouched is violated" --model-file "$OUT/u-pollto.model"
 expect "unmodelled: EPOLLET is refused"                  3 "are not modelled" --model-file "$OUT/u-epollet.model"
 expect "unmodelled: EFD_SEMAPHORE is refused"            3 "EFD_SEMAPHORE" --model-file "$OUT/u-semaphore.model"
 # a node that forks is two processes the model cannot tell apart

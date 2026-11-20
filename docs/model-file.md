@@ -42,6 +42,7 @@ drops    = 1               # messages the network may lose
 restarts = 1               # a crashed node may be relaunched
 short_writes = 1           # sends a full send buffer may cut short
 partitions = 1             # directed links the network may cut
+drift    = 50              # node clocks may run 50 per thousand apart
 depth    = 40              # bound the search to this many actions
 
 [invariants]
@@ -80,8 +81,20 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   is logged in `replies`, with the sender as `.src` and the second byte
   as `.val`.  Absent: no client.
 - `timeouts`: a node blocked reading a connection may get the one byte
-  `T` instead of a message, and the logical clock advances one second.
-  This is how a heartbeat timeout or a lease expiry happens.
+  `T` instead of a message, and every node's clock advances one second.
+  This is how a heartbeat timeout or a lease expiry happens in a program
+  that blocks with no timeout of its own.
+- `drift = R`: how far, in parts per thousand (0 to 500, default 0),
+  the nodes' clocks may run apart.  Each node has its own clock, and a
+  finite timeout (`poll`, `epoll_wait`, `nanosleep`, a timed condition
+  wait and the rest listed in cmc(7)) is a deadline on it that the
+  search fires when it comes due, needing no budget.  When one fires and
+  that node's clock moves by D, each other node's clock moves by D, or
+  one of them moves by D(1 - R/1000) or D/(1 - R/1000).  Only these
+  extreme rates are explored, one node off the common rate at a time;
+  rates in between, two nodes off at once, and message delay are not,
+  so a bug that needs them can be missed.  `test/proc/leasedrift.c` is a
+  lease whose safety depends on this bound.
 - `crashes`: a node dies at any quiescent point.  Its state becomes what
   it last reported on descriptor 193 (durable); what it reported on
   descriptor 3 is lost.  A crashed host sends no FIN, so a peer reading
@@ -193,9 +206,9 @@ Every node runs under `cmc-preload.so`, which makes its run a pure
 function of the actions the checker chose.  `malloc` and the aligned
 allocators (`posix_memalign`, `aligned_alloc`, `memalign`) carve from a
 fixed-address arena, so an allocation lands at the same address every
-run; `clock_gettime`, `gettimeofday` and `time` read the logical clock
-(it advances only when a timeout fires); `getrandom` returns a fixed
-pattern.  A target that reads the wall clock or an ASLR'd heap address
+run; `clock_gettime`, `gettimeofday` and `time` read the node's logical
+clock (it advances only when a timeout or a deadline fires); `getrandom`
+returns a fixed pattern.  A target that reads the wall clock or an ASLR'd heap address
 would break replay; routed through the preload, it does not.  The arena
 is 64 MiB by default; set `CMC_ARENA_MB` to the size in MiB a larger
 target needs.
