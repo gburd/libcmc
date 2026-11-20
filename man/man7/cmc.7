@@ -396,9 +396,15 @@ instead of a message; a node idle in
 accepts a synthetic timer connection and reads
 .Ql T
 from it.
-Either way the logical clock advances one second.
+Either way every node's clock advances one second.
 This is how a server that waits for a request, or for a peer to connect,
 detects that it has waited long enough -- an election timeout.
+.It EXPIRE
+A node is parked in a call with a finite timeout, and no deadline of
+any node comes before it: the timeout fires
+.Pq Ql expire n1 t0 .
+See
+.Sx CLOCKS AND DEADLINES .
 .It CRASH
 Crash budget is left: a live node dies.
 A crash can fall between any two calls that reach outside the process,
@@ -477,14 +483,76 @@ every
 .Fn eventfd
 counter, every epoll instance's interest list, every connection's
 messages in order, the connections waiting
-to be accepted, the ghost log of client replies, the budgets left and
-the logical clock.
+to be accepted, the ghost log of client replies, the budgets left,
+each node's clock, and each pending deadline as the time left on its
+node's clock.
 Its 128-bit fingerprint, checked against the full encoding, dedups
 states, except a world with a multi-threaded node, which is never merged.
 The search is stateless: to expand a world the checker starts every
 node again and replays the actions that reached it.
 Breadth-first search gives a shortest counterexample; simulation takes
 seeded random walks and is never a pass.
+.Ss Clocks and deadlines
+Each node has its own clock, which every clock id it reads
+.Po
+.Dv CLOCK_MONOTONIC ,
+.Dv CLOCK_REALTIME ,
+.Fn gettimeofday ,
+.Fn time
+.Pc
+returns; all clocks start at the same reading, and a node's clock
+outlives a crash of its process.
+A finite timeout on
+.Fn poll ,
+.Fn ppoll ,
+.Fn epoll_wait ,
+.Fn select
+and
+.Fn pselect
+with no descriptor,
+.Fn nanosleep ,
+.Fn clock_nanosleep
+.Pq relative or Dv TIMER_ABSTIME ,
+or a futex wait
+.Pq as in Fn pthread_cond_timedwait
+is a deadline on the node's clock.
+EXPIRE fires the earliest deadline of a node: its clock moves to the
+deadline, and the call returns as Linux returns it on expiry (0 with
+nothing ready, or
+.Er ETIMEDOUT
+from a futex).
+Time passes only at EXPIRE and TIMEOUT, never one state per tick: an
+EXPIRE is offered only when no other node would pass a deadline of its
+own on the way, so deadlines fire in the order the clocks reach them.
+.Pp
+With
+.Cm drift No = Ar R
+in the model file, the clocks may run at different rates.
+When a node's deadline fires and its clock moves by D, each other
+node's clock moves by D, or one other node's moves by D(1 - R/1000)
+(slow) or D/(1 - R/1000) (fast), the trace saying which
+.Pq Ql expire n1 t0, n0 clock slow .
+What this covers exactly: any interval between two fired deadlines in
+which one node's clock runs at an extreme rate against the others.
+What it approximates: rates in between, two nodes off the reference
+in one interval, and rates that change inside an interval are not
+explored, so a bug that needs them may be missed.
+Messages take no time on any clock, so a bug that needs a delivery
+delay is not seen either, and
+.Dv CLOCK_REALTIME
+never steps.
+.Fn setitimer ,
+.Fn alarm ,
+.Fn timer_create
+and
+.Fn timerfd_create
+arm a timer on the real clock, and end the check
+.Pq exit 3 ,
+as do
+.Fn select
+or
+.Fn pselect
+on descriptors and a sleep on a CPU-time clock.
 .Ss Cores and worlds
 A
 .Em core

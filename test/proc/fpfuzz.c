@@ -122,6 +122,7 @@ park(Node *nd, Thread *t)
 		case 2:
 			t->block_kind = BK_FUTEX;
 			t->futex_addr = 0x7000 + 8 * (uint64_t) pick(4);
+			if (pick(2)) { t->has_dl = 1; t->dl = g_clk[nd->id] + 1000000ULL * (uint64_t) (1 + pick(5)); }
 			break;
 		default:
 			t->block_kind = BK_POLL;
@@ -132,6 +133,7 @@ park(Node *nd, Thread *t)
 				t->pollfds[k] = nd->nc > 0 && pick(2) ? nd->cfd[pick(nd->nc)] : nd->listener_fd;
 				t->pollevents[k] = pick(2) ? POLLIN : POLLIN | POLLOUT;
 			}
+			if (pick(2)) { t->has_dl = 1; t->dl = g_clk[nd->id] + 1000000ULL * (uint64_t) (1 + pick(5)); }
 			break;
 	}
 }
@@ -147,7 +149,7 @@ gen_world(void)
 	bud.timeouts = pick(3);
 	bud.crashes = pick(2);
 	bud.drops = pick(2);
-	logical_ns += CLK_TICK * (uint64_t) pick(3);
+	for (int i = 0; i < M.nodes; i++) g_clk[i] += CLK_TICK * (uint64_t) pick(3);
 	for (int i = 0; i < M.nodes; i++)
 	{
 		Node	   *nd = &N[i];
@@ -443,7 +445,19 @@ m_budget(void)
 static int
 m_clock(void)
 {
-	logical_ns += CLK_TICK;
+	g_clk[some_node() - N] += CLK_TICK;
+	return 1;
+}
+
+/* a pending deadline comes sooner on the same clock */
+static int
+m_deadline(void)
+{
+	Thread	   *t = some_thread(some_node());
+
+	if (!t->has_dl)
+		return 0;
+	t->dl -= 1000;
 	return 1;
 }
 
@@ -564,13 +578,13 @@ m_thread_count(void)
 static int (*const mutations[]) (void) = {
 	m_canon, m_durable, m_read_off, m_alive, m_block_kind, m_want,
 	m_recv_conn, m_futex, m_poll_fd, m_poll_events, m_woke, m_msg_byte,
-	m_msg_drop, m_conn_flag, m_nonblock, m_pend, m_efd, m_budget, m_clock,
+	m_msg_drop, m_conn_flag, m_nonblock, m_pend, m_efd, m_budget, m_clock, m_deadline,
 	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned, m_efd_cloexec, m_plain,
 };
 static const char *const mutation_names[] = {
 	"canon", "durable", "read_off", "alive", "block_kind", "want",
 	"recv_conn", "futex", "poll_fd", "poll_events", "woke", "msg_byte",
-	"msg_drop", "conn_flag", "nonblock", "pend", "efd", "budget", "clock",
+	"msg_drop", "conn_flag", "nonblock", "pend", "efd", "budget", "clock", "deadline",
 	"reply", "newborn", "thread_count", "position", "held", "cloned", "efd_cloexec", "plain",
 };
 

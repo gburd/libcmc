@@ -1,0 +1,11 @@
+# test/proc/leasedrift.c: a lease held for L(1 - rho) on the holder's
+# clock, and waited out for L(1 + rho) and a millisecond on the
+# granter's.  Each node has its own
+# clock, and the two may drift apart by up to `drift` per thousand.
+[target]
+nodes = 2
+[environment]
+drift = 50           # below the protocol's rho of 100 per thousand
+[invariants]
+# the holder still serves (node 0 byte 0) after the granter's wait ended
+one_holder = "not (node[0][0] == 1 and node[1][0] == 1)"

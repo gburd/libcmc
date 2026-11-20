@@ -66,7 +66,11 @@ in the kernel, untouched.
 | construct | status | limit | gate |
 |---|---|---|---|
 | `poll`, `ppoll` with no or zero timeout | exact | readiness of a channel or listener is a search choice (WAKE), never automatic; `POLLOUT` is ready on a connection and an eventfd, never on the listener or an epoll instance, and with `POLLHUP` on a socket never dialled; a closed fd is `POLLNVAL` at once | proc_gate pollloop, noprogress, syscorner poll, pollclosed |
-| a finite `poll`, `ppoll`, `epoll_wait` timeout | refused | exit 3 | proc_gate "a finite poll timeout is refused" |
+| a finite `poll`, `ppoll`, `epoll_wait` timeout | exact | a deadline on the node clock; EXPIRE returns 0 with nothing ready and moves the clock to the deadline | proc_gate sleeps poll, ppoll, epoll, "a finite poll timeout fires", leasedrift |
+| `nanosleep`, `clock_nanosleep` (relative or `TIMER_ABSTIME`), `select` and `pselect` with no descriptor | exact | a deadline on the node clock; `select` and `pselect` return their timeout counted down to zero; select on descriptors, select with no timeout and a sleep on a CPU-time clock are exit 3 | proc_gate sleeps nanosleep, clock_nanosleep, abstime, select, pselect, and the three refusal rows |
+| deadlines of several nodes | exact in order | EXPIRE fires a node's earliest deadline only when no other node passes a deadline first; time never advances one state per tick | proc_gate leasedrift |
+| clock drift between nodes (`drift = R`) | approximate | per fired deadline, one node's clock at the slowest or fastest rate R allows against the others; rates in between, two nodes off at once and message delay are not explored | proc_gate leasedrift (L(1 + rho) caught only with drift, the right margin fails at drift 200) |
+| `setitimer`, `alarm`, `timer_create`, `timerfd_create` | refused | exit 3 (a timer on the real clock) | proc_gate sleeps setitimer, alarm, timer_create, timerfd |
 | `epoll_create`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` | exact for level-triggered `EPOLLIN`, `EPOLLOUT` | interest list up to 16 fds | proc_gate epollloop |
 | `EPOLLET`, `EPOLLONESHOT`, other epoll flags | refused | exit 3 | proc_gate "EPOLLET is refused" |
 | `eventfd2` | exact without `EFD_SEMAPHORE` | `EFD_NONBLOCK` honoured | proc_gate pollloop |
@@ -76,7 +80,7 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `clock_gettime`, `gettimeofday`, `time` | approximate | a logical clock that advances one second per fired timeout | proc_gate idle, clocks, lease |
+| `clock_gettime`, `gettimeofday`, `time` | approximate | the node's own logical clock, every clock id alike: it moves only at EXPIRE and one second per budgeted TIMEOUT; `CLOCK_REALTIME` never steps | proc_gate idle, clocks, lease, sleeps |
 | `getrandom` | approximate | a fixed pattern (zero bytes), not a search choice | proc_gate clocks |
 | `malloc` and the aligned allocators | exact enough | a fixed-address arena (64 MiB by default); `free` is a no-op | proc_gate "the preload allocator checks sizes and copies exactly" |
 | address layout | exact | nodes run without ASLR, so a replay lays memory out alike | proc_gate fingerprint |
@@ -95,7 +99,7 @@ in the kernel, untouched.
 | memory accesses between two choice points, without the race runtime | INCOMPLETE | a multi-threaded node cannot pass, and an unmet `eventually` is INCOMPLETE | proc_gate memrace, twothread |
 | an atomic weaker than `seq_cst` | INCOMPLETE | the search runs a sequentially consistent machine; a pass that used one is INCOMPLETE | proc_gate memrace relaxedadd |
 | `lseek`, `fsync`, `fdatasync`, `sync_file_range` on a kernel fd in a node with more than one thread | refused | exit 3 before it runs, like any call on a kernel fd | proc_gate files lseek |
-| a timed futex wait | refused | exit 3 | (code; no fixture yet) |
+| a timed futex wait (`pthread_cond_timedwait`) | exact | a deadline on the node clock, fired as `ETIMEDOUT`; with a second thread, the wake and the timeout each come first | proc_gate sleeps futex, futexabs, condtimed, timedwait |
 | `fork`, `vfork`, `clone` without `CLONE_THREAD` | refused | exit 3, before the child exists | proc_gate "a fork is refused" |
 | a `FUTEX_WAKE` of a strict subset of several waiters | refused | exit 1 | (code; no fixture yet) |
 

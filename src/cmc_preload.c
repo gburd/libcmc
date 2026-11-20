@@ -12,8 +12,9 @@
  *     64 MiB by default; CMC_ARENA_MB overrides it for a larger target.
  *   - clock_gettime, gettimeofday, time and getrandom through a real
  *     syscall.  glibc serves the clock from the vDSO, which seccomp never
- *     sees; as syscalls, the checker answers them with its logical clock
- *     (it advances only when the search fires a timeout) and a fixed
+ *     sees; as syscalls, the checker answers them with the node's logical
+ *     clock (it advances only when the search fires a timeout or a
+ *     deadline) and a fixed
  *     random pattern, so a replay reproduces the same times.
  *
  * Its constructor announces it to the checker with a clock_gettime on
@@ -240,7 +241,8 @@ memalign(size_t alignment, size_t size)
  * M5b -- absolute-time and randomness shims.  glibc serves clock_gettime
  * and gettimeofday from the vDSO, so seccomp never sees them; forcing
  * them through a real syscall() makes them visible to the checker, which
- * answers with a LOGICAL clock it advances only at timeout events (so
+ * answers with the node's LOGICAL clock, which it advances only at
+ * timeout and deadline events (so
  * stateless replay stays deterministic).  getrandom is routed the same
  * way so the value a target reads is engine-chosen, not real entropy.
  * These override the libc symbols because this .so is LD_PRELOAD'd first.

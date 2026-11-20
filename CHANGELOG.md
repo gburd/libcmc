@@ -18,6 +18,27 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+Finite timeouts and per-node clocks.  Each node has its own clock, and
+a finite timeout on `poll`, `ppoll`, `epoll_wait`, `select` and
+`pselect` with no descriptor, `nanosleep`, `clock_nanosleep` and a
+futex wait (`pthread_cond_timedwait`, in a node with one thread or
+several) is a deadline on it.  A new action, EXPIRE, fires a node's
+earliest deadline, offered only when no other node would pass a
+deadline of its own first, so deadlines fire in order and not one
+state per tick.  The model file's `drift = R` lets one node's clock
+run up to R per thousand slow or fast against the others between two
+fired deadlines; only those extreme rates are explored (cmc(7), Clocks
+and deadlines).  Before, these timeouts ended the check with exit 3.
+`setitimer`, `alarm`, `timer_create` and `timerfd_create` used to reach
+the real kernel unchecked, where a real-time signal or a ready timerfd
+broke replay; they now end the check with exit 3.  A budgeted TIMEOUT
+still moves every clock by one second.  Gates: proc_gate rows
+leasedrift (a lease of L(1 - rho) holds under drift 50, L(1 + rho) is
+caught only with the holder's clock slow, the correct margin fails at
+drift 200), sleeps (one row per call, three select and clock refusals,
+four timer refusals), timedwait (signal and timeout each win), and
+unmodelled pollto (now fires).
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a
