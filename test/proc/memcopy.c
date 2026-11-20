@@ -9,7 +9,8 @@
  * The mode, from the target args: a worker fills a shared buffer with
  * memcpy (cpy), memset (set) or memmove (move), while main reads the
  * buffer's first byte with a plain load.  Nothing orders the two, so
- * each is a data race.  In cpylock both hold a mutex: no race.  The
+ * each is a data race.  A mode with "lock" appended (cpylock, scpylock,
+ * and so on) holds a mutex on both sides: no race.  The
  * string and format modes fill it the same way with strcpy (scpy),
  * strncpy (sncpy), strcat (scat), stpcpy (spcpy), sprintf (spr),
  * snprintf (snpr) and vsnprintf (vsnpr).  Their source is a writable
@@ -109,9 +110,19 @@ main(int argc, char **argv)
 	pthread_t	t;
 	int			seen;
 
+	static char m[32];
+	size_t		n;
+
 	if (argc > 2)
 		mode = argv[2];
-	locked = strcmp(mode, "cpylock") == 0;
+	/* a mode ending in "lock" is the same fill under the mutex */
+	n = strlen(mode);
+	locked = n > 4 && n < sizeof m && strcmp(mode + n - 4, "lock") == 0;
+	if (locked)
+	{
+		memcpy(m, mode, n - 4);
+		mode = m;
+	}
 	emit(0, 0);
 	pthread_create(&t, NULL, worker, NULL);
 	if (locked)

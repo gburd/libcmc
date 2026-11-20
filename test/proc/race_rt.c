@@ -721,6 +721,54 @@ mem_entry_points(char *d)
 	check(WIFSIGNALED(st), "a fortified copy past its room fails as the C library's does");
 }
 
+/* vsprintf and vsnprintf through a va_list, as a caller's wrapper does */
+static int
+vfmt(char *d, size_t n, int bounded, const char *f, ...)
+{
+	va_list		ap;
+	int			r;
+
+	va_start(ap, f);
+	r = bounded ? vsnprintf(d, n, f, ap) : vsprintf(d, f, ap);
+	va_end(ap);
+	return r;
+}
+
+static int
+vfmt_chk(char *d, size_t n, int bounded, const char *f, ...)
+{
+	va_list		ap;
+	int			r;
+
+	va_start(ap, f);
+	r = bounded ? __vsnprintf_chk(d, n, 1, 64, f, ap) : __vsprintf_chk(d, 1, 64, f, ap);
+	va_end(ap);
+	return r;
+}
+
+/* the string and format writers copy and format as the C library does,
+ * plain and fortified, including a strncpy that pads and an snprintf
+ * cut short; one thread's calls never race */
+static void
+str_entry_points(void)
+{
+	char		d[64];
+
+	check(strncpy(d, "abc", 6) == d && memcmp(d, "abc\0\0\0", 6) == 0, "strncpy copies and pads");
+	check(strncpy(d, "abcdef", 3) == d && memcmp(d, "abc", 3) == 0, "strncpy stops at n");
+	check(__strncpy_chk(d, "xy", 4, sizeof d) == d && memcmp(d, "xy\0\0", 4) == 0, "__strncpy_chk copies");
+	check(sprintf(d, "%d-%s", 7, "q") == 3 && strcmp(d, "7-q") == 0, "sprintf formats");
+	check(snprintf(d, 3, "%s", "hello") == 5 && strcmp(d, "he") == 0, "snprintf cuts short");
+	check(snprintf(d, 0, "%s", "hello") == 5, "snprintf of no room writes nothing");
+	check(vfmt(d, 0, 0, "%s", "va") == 2 && strcmp(d, "va") == 0, "vsprintf formats");
+	check(vfmt(d, 2, 1, "%s", "va") == 2 && strcmp(d, "v") == 0, "vsnprintf cuts short");
+	check(__sprintf_chk(d, 1, sizeof d, "%s", "c1") == 2 && strcmp(d, "c1") == 0, "__sprintf_chk formats");
+	check(__snprintf_chk(d, 2, 1, sizeof d, "%s", "c2") == 2 && strcmp(d, "c") == 0, "__snprintf_chk cuts short");
+	check(vfmt_chk(d, 0, 0, "%s", "c3") == 2 && strcmp(d, "c3") == 0, "__vsprintf_chk formats");
+	check(vfmt_chk(d, 2, 1, "%s", "c4") == 2 && strcmp(d, "c") == 0, "__vsnprintf_chk cuts short");
+	check(nreport == 0, "one thread's string writes never race");
+}
+
 /* a length the compiler cannot see, so it makes the calls, not moves */
 static volatile size_t four = sizeof(int);
 static void w_cpy(void) { memcpy(&x, &y, four); }
@@ -775,6 +823,7 @@ entry_points(void)
 	check(nreport == 0, "one thread's accesses never race");
 	mem_entry_points(dst);
 	check(nreport == 0, "one thread's copies never race");
+	str_entry_points();
 }
 
 /* every atomic entry point, at every size, with seq_cst: no weak report */

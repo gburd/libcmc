@@ -1564,7 +1564,7 @@ static int conn_head(int conn, int to) { return conn < 0 ? -1 : conn_next(conn, 
 static int
 head_pinned(Node *nd, int fd)
 {
-	int cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	int cs = cfd_slot(nd, fd);
 	int h = cs >= 0 ? conn_head(nd->cconn[cs], nd->cend[cs]) : -1;
 	return h >= 0 && bag[h].pinned;
 }
@@ -2701,7 +2701,7 @@ dial_may_change(Node *nd, const __u64 *a)
 {
 	int fd = (int) a[0];
 	struct { unsigned short fam; unsigned short port; } sa;
-	if (!nd->step_effect || node_multi(nd) || fd < 500 || fd >= nd->next_fd) return 0;
+	if (!nd->step_effect || node_multi(nd) || fd < 500 || wrong_kind(nd, SYS_connect, fd)) return 0;
 	int cs = cfd_slot(nd, fd);
 	if (cs >= 0 ? nd->cnonblock[cs] : (*fd_flags(nd, fd) & FD_NB) != 0) return 0;
 	if (cr_read(nd->pid, a[1], &sa, sizeof sa) != sizeof sa) return 0;
@@ -5336,7 +5336,7 @@ syn_stuck(int c)
 {
 	const Conn *cn = &conns[c];
 	int a = cn->node[0], b = cn->node[1];
-	if (!cn->used || !cn->connecting || a < 0 || !N[a].alive || cn->closed[0]) return 0;
+	if (!cn->used || !cn->connecting || !N[a].alive || cn->closed[0]) return 0;
 	/* a call parked on the handshake (BK_CONNWAIT) is the dialler mid-
 	 * step, where no time passes: its deadline competes once the call
 	 * has run (a poll then has its own deadline) */

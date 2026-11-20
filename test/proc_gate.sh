@@ -648,6 +648,10 @@ for v in "" -chk; do
 		printf '[target]\nbinary = %s\nnodes = 1\nargs = %s\n[fields]\nphase = 0\nvalue = 1\n[invariants]\nsane = "node[0].phase < 2 or node[0].value == 1"\n' \
 			"$B/proc/memcopy$v-tsan" "$m" > "$OUT/mc-$m$v.model"
 		expect "memcopy$v: an unlocked $m is a data race" 1 "data race on node 0" --model-file "$OUT/mc-$m$v.model"
+		# under the mutex the node runs to its end (and its writes are
+		# counted, which a race report's kill cuts short)
+		sed "s/^args = $m/args = ${m}lock/" "$OUT/mc-$m$v.model" > "$OUT/mc-${m}lock$v.model"
+		expect "memcopy$v: $m under the mutex holds" 0 "No error has been found" --model-file "$OUT/mc-${m}lock$v.model"
 	done
 done
 # syncedge: the review of the race runtime (docs/research/04-review-
@@ -1091,6 +1095,19 @@ ik nbrest "the rest of a part-read message is readable at once" 0 "No error has 
 	"timeouts = 0" 'linux = "node[1][0] != 1"
 reached = "eventually node[1][0] == 4"'
 
+# the same fixtures under the other budgets that reach these choices
+# (a drop, a crash and restart, clock drift), pinned by their counts
+cvr() {	# cvr BINARY MODE ENV NEEDLE DESC
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%b\n[invariants]\nany = "node[0][0] < 9"\n' \
+		"$B/proc/$1" "$2" "$3" > "$OUT/cv-$1-$2.model"
+	expect_by 120 "$1 $2: $5" 0 "$4" --model-file "$OUT/cv-$1-$2.model"
+}
+cvr midstep rstout 'drops = 1' "12 distinct states" "with a drop"
+cvr midstep rstout 'crashes = 1\nrestarts = 1' "41 distinct states" "with a crash and restart"
+cvr midstep reconn 'crashes = 1\nrestarts = 1' "70 distinct states" "with a crash and restart"
+cvr midstep nbaccept 'drops = 1' "26 distinct states" "with a drop"
+cvr inkernel nbrest 'crashes = 1' "22 distinct states" "with a crash"
+
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes
 # and heal it later; bytes, FINs and handshakes on it wait.  The counts
@@ -1136,12 +1153,21 @@ for m in block nb; do
 	sd $m crashref$m "and is never refused" 0 "No error has been found" \
 		"crashes = 1" 'norefuse = "node[1][0] != 3 and node[1][0] != 4"'
 done
+sd block crashrs "a dial to a crashed host that restarts" 0 "28 distinct states" \
+	"crashes = 1
+restarts = 1" 'any = "node[1][0] < 9"'
+sd nb crashrsnb "a non-blocking dial to a crashed host that restarts" 0 "44 distinct states" \
+	"crashes = 1
+restarts = 1" 'any = "node[1][0] < 9"'
 # a poll's own deadline on the handshake: one shorter than the dial's
 # fires first (the dial cannot fail), a longer one does not
 sd nbpoll pollfirst "a poll timeout shorter than the dial's comes first" 0 "No error has been found" \
 	"partitions = 1" 'not1 = "node[1][0] != 1"'
 sd nbpoll2 dialfirst "the dial's deadline before a longer poll timeout" 1 "not1 is violated" \
 	"partitions = 1" 'not1 = "node[1][0] != 1"'
+sd nb drift "a dial's deadline with clock drift" 1 "notimeout is violated" \
+	"partitions = 1
+drift = 100" 'notimeout = "node[1][0] != 1"'
 sd exit exit "a host whose process exited refuses at once" 0 "No error has been found" \
 	"timeouts = 0" 'linux = "node[1][0] == 0 or node[1][0] == 3"
 reached = "eventually node[1][0] == 3"'
