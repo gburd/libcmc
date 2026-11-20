@@ -169,6 +169,27 @@ expect "paxos2: its bug does NOT refine (agreement)" 1 "abstract invariant agree
 expect "mono: C1 passes the by-two bug (the gap)" 0 "No error has been found" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind"
 expect "mono: C2 passes the by-one impl"          0 "No error has been found" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps
 expect "mono: C2 catches the by-two step"         1 "no matching abstract action" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps
+# a binding that fails to evaluate ends the check (exit 3), in each
+# search and at each level; and C2 under --simulate still catches the
+# by-two step
+printf '[fields]\ncval = 0\n[map]\nc = "node[0].cval / 0"\n' > "$OUT/mono-div0.bind"
+for o in "" "--refine-steps" "--simulate --seed 1 --walks 20" "--simulate --seed 1 --walks 20 --refine-steps"; do
+	# shellcheck disable=SC2086
+	expect "a binding that fails to evaluate${o:+ ($o)}" 3 "refinement: divide by zero" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-div0.bind" $o
+done
+# a binding over the reply log: repl acks 5 from node 0 once, which a
+# spec with one ack step refines and a spec without any does not
+printf 'module rr\nvar n : 0 .. 1\ninit n == 0\naction ack():\n  when n == 0\n  n%s = 1\ninvariant small: n <= 1\n' "'" > "$OUT/rr.cml"
+sed 's/^module rr$/module rr0/; s/^invariant small: n <= 1$/invariant none: n == 0/' "$OUT/rr.cml" > "$OUT/rr0.cml"
+printf '[map]\nn = "count r in replies : r.src == 0 and r.val == 5"\n' > "$OUT/rr.bind"
+expect "a binding over replies refines one ack" 0 "No error has been found" $(run repl repl) --refine "$OUT/rr.cml" --bind "$OUT/rr.bind" --refine-steps
+expect "a binding over replies sees the ack"    1 "abstract invariant none is violated" $(run repl repl) --refine "$OUT/rr0.cml" --bind "$OUT/rr.bind"
+# a binding reads a byte past the nodes or past a node's record as -1
+printf '[fields]\ncval = 0\n[map]\nc = "node[0].cval + node[5][0] + node[0][40] + 2"\n' > "$OUT/mono-past.bind"
+expect "a binding reads past the record as -1" 0 "No error has been found" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-past.bind" --refine-steps
+printf '[fields]\ncval = 0\n[map]\nc = "node[0].cval + node[5][0] + node[0][40] + 1"\n' > "$OUT/mono-out.bind"
+expect "a bound value outside the spec's domain" 3 "c = -1 is outside its domain" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-out.bind" --refine-steps
+expect "mono: C2 under --simulate catches the by-two step" 1 "no matching abstract action" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps --simulate --seed 1 --walks 20
 expect "C2 refuses a partly-bound spec"           3 "needs every spec variable bound" $(runx "$HERE/examples/spec/paxos-refine.model" paxos) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --refine-steps
 expect "raft: election safety holds"        0 "No error has been found" $(runx "$HERE/examples/raft/raft.model" raft)
 expect "raft: double vote -> two leaders"   1 "election_safety is violated" $(runx "$HERE/examples/raft/raft.model" raft-bug)
@@ -442,6 +463,7 @@ ffm() {	# ffm MODE [sed script]: fsfail.model with args = MODE
 }
 expect "fsfail: rewrite after EIO holds"            0 "No error has been found" $(ffm rewrite)
 expect "fsfail: an fsync retried after EIO loses"   1 "acked_durable is violated" $(ffm retry)
+expect "fsfail: the counterexample names the failed call" 1 "fail n0 t0 (EIO)" $(ffm retry)
 expect "fsfail: the loss needs the EIO"             0 "No error has been found" $(ffm retry 's/^eio = 1/eio = 0/')
 expect "fsfail: rewrite after ENOSPC holds"         0 "No error has been found" $(ffm rewrite 's/^eio = 1/enospc = 1/')
 expect "fsfail: past the bytes budget is refused"   3 "past the model's \[files\] bytes" $(ffm big)
@@ -452,6 +474,39 @@ if xattr_skip xattr; then echo "skip fsfail: xattr (the sandbox answers it befor
 else expect "fsfail: an xattr read is refused"      3 "on modelled file fd 501 is not modelled" $(ffm xattr)
 fi
 expect "fsfail: a rename out of the model is refused" 3 "between a modelled and an unmodelled path" $(ffm cross)
+expect "fsfail: a rename with flags is refused"     3 "is not modelled (links" $(ffm noreplace)
+expect "fsfail: unlinkat of a directory is refused" 3 "is not modelled (links" $(ffm rmdir)
+expect "fsfail: a rename of a directory is refused" 3 "is not modelled (a rename between directories, or of a directory)" $(ffm dirmv)
+expect "fsfail: too many unsynced writes are refused" 3 "passes a limit of the file model" $(ffm ops)
+expect "fsfail: a .. in a modelled path is refused" 3 "has a .. part, which is not modelled" $(ffm dotdot)
+expect "fsfail: a name past the model's limit is refused" 3 "has a name longer than 31 bytes" $(ffm longname)
+expect "fsfail: a path relative to a modelled dirfd is refused" 3 "relative to modelled directory fd" $(ffm dirrel)
+expect "fsfail: poll of a modelled file is refused" 3 "polls modelled file fd" $(ffm pollfile)
+expect "fsfail: too many ways to crash are refused" 3 "could leave its modelled files in more than 256 ways" $(ffm ways)
+# fsfail calls: every file call the model answers, natively in an empty
+# directory and then under cmc on a modelled one, must give the same
+# answers (one record, reached in every run; the properties split it
+# into tens, since each holds at most 255 bytes)
+CD=$OUT/ffcalls
+[ -d "$CD" ] && find "$CD" -mindepth 1 -user "$(id -u)" -delete
+mkdir -p "$CD"
+(timeout 30 "$B/proc/fsfail" 0 calls "$CD" 3>"$OUT/ffcalls.state" > /dev/null 2>&1)
+native=$(od -An -tu1 "$OUT/ffcalls.state" | tr -s ' \n' ' ' | sed 's/^ //; s/ $//')
+# shellcheck disable=SC2086
+set -- $native
+if [ $# -gt 40 ] && [ "$1" = $(($# - 1)) ]; then
+	shift
+	inv="" k=0
+	for c in "$@"; do
+		inv="$inv and node[0][$k] == $c"; k=$((k + 1))
+		if [ $((k % 10)) = 0 ] || [ $k = $# ]; then echo "c$k = \"eventually node[0][0] >= 0$inv\""; inv=""; fi
+	done > "$OUT/ffcalls.inv"
+	printf '[target]\nbinary = %s\nnodes = 1\nargs = calls %s\n[files]\ndir = %s\n[invariants]\n' \
+		"$B/proc/fsfail" "$CD" "$CD" > "$OUT/ffcalls.model"
+	cat "$OUT/ffcalls.inv" >> "$OUT/ffcalls.model"
+	echo 'any = "node[0][0] <= 255"' >> "$OUT/ffcalls.model"
+	expect_by 60 "fsfail: the modelled file calls give Linux's answers" 0 "No error has been found" --model-file "$OUT/ffcalls.model"
+else echo "FAIL fsfail calls: the native run gave '$native'"; fail=1; fi
 # threadpos: worlds with a multi-threaded node are never merged, since a
 # thread's record cannot tell apart two iterations of one loop (loop), a
 # thread born on the stack of one already joined (seq), or memory that
@@ -701,8 +756,16 @@ mf nodes 3 "nodes = \"9\": expected an integer from 1 to 8" "[target]\nnodes = 9
 mf maxwrite 3 "max_write = \"0\"" "[target]\nnodes = 2\nmax_write = 0\n"
 mf state 3 "state = disk is not supported" "[target]\nnodes = 2\nstate = disk\n"
 mf statecanon 0 "No error has been found" "[target]\nnodes = 2\nstate = canon\nmax_write = 64\n[environment]\nclient_write = 5\n[invariants]\nok = \"node[0][0] < 9\" # a comment\n"
-for k in client_write timeouts crashes drops restarts depth; do
+for k in client_write timeouts crashes drops restarts depth drift short_writes partitions; do
 	mf "env-$k" 3 "$k = \"x\": expected an integer" "[target]\nnodes = 2\n[environment]\n$k = x\n"
+done
+for k in eio enospc bytes; do
+	mf "files-$k" 3 "$k = \"x\": expected an integer" "[target]\nnodes = 2\n[files]\ndir = /data\n$k = x\n"
+done
+mf filesnodir 3 "eio and enospc need a dir" "${H}[files]\nenospc = 1\n[invariants]\nok = \"node[0][0] < 9\"\n"
+mf filesslash 0 "No error has been found" "${H}[files]\ndir = /data//\n[invariants]\nok = \"node[0][0] < 9\"\n"
+for d in data / /a/./b /a//b "/$(printf '%300s' '' | tr ' ' 'd')"; do
+	mf "filesdir-$(echo "$d" | tr -c 'a-z\n' '_' | cut -c1-8)" 3 "dir must be an absolute directory" "[target]\nnodes = 2\n[files]\ndir = $d\n"
 done
 mf depthok 2 "depth bound reached" "$H""depth = 2\n[invariants]\nok = \"node[0][0] < 9\"\n"
 mf fieldlong 3 "field name too long" "[target]\nnodes = 2\n[fields]\n$(printf '%40s' '' | tr ' ' 'f') = 1\n"
@@ -765,6 +828,12 @@ for bad in "count  in nodes : 1 == 1" "node[0]. == 0" "r == 0" "all b in node[1]
 	k=$((k + 1))
 done
 mf badword 3 "cannot parse" "${H}[invariants]\nb = \"node_x == 0\"\n"
+L32=$(printf '%32s' '' | tr ' ' 'v')
+for bad in "count $L32 in nodes : 1 == 1" "node == 0" "node[0].$L32 == 0" "node[0 - 1][0] == 0" \
+	"all r in replies : q == 0"; do
+	mf "bad$k" 3 "cannot parse" "${H}[fields]\nval = 0\n[invariants]\nb = \"$bad\"\n"
+	k=$((k + 1))
+done
 mf invexprlong 3 "invariant name or expression too long" "${H}[invariants]\nx = \"$(printf '%300s' '' | tr ' ' 'x')\"\n"
 mf evtab 0 "No error has been found" "${H}[invariants]\nok = \"eventually	node[1][0] == 5\"\n"
 printf '[target]\nnodes = 2\n[environment]\nclient_write = 5\n[invariants]\nok = "node[0][0] < 9"' > "$MF/nonewline.model"
@@ -793,7 +862,8 @@ echo "-- the corners of the calls the checker answers itself"
 # each mode below that covers one of these failed.
 SC=$OUT/syscorner
 mkdir -p "$SC"
-for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf selfdial fileops; do
+for m in badbuf eventfd epoll poll clock futex nbepoll wrongfd notconn pollclosed robuf selfdial fileops \
+	sleeperr pollmore kernelsock; do
 	(cd "$SC" && timeout 30 "$B/proc/syscorner" 0 "$m" 3>"$SC/$m.state" > /dev/null 2>&1)
 	# shellcheck disable=SC2046
 	set -- $(od -An -tu1 "$SC/$m.state" | tr -s ' \n' ' ')
@@ -840,6 +910,27 @@ scm bigwrite 1 "writes 4096 bytes in one call"
 printf '[target]\nbinary = %s\nnodes = 2\nargs = notconnpipe\n[invariants]\nnever = "node[0][0] < 1"\nkilled = "eventually node[0][0] < 1"\n' "$B/proc/syscorner" > "$SC/r-notconnpipe.model"
 expect_by 60 "syscorner notconnpipe: SIGPIPE ends the writer" 0 "No error has been found" --model-file "$SC/r-notconnpipe.model"
 scm connect 3 "connects to port 20099, which is no node's"
+scm shutlisten 3 "shutdown of a listening socket is not modelled"
+scm duplisten 3 "which is not a connection, is not modelled"
+scm dupopen 3 "which is open or the kernel's, is not modelled"
+scm namefresh 3 "getsockname on a socket not connected is not modelled"
+scm setopt 3 "setsockopt level 1 option 12 is not modelled"
+scm getopt 3 "getsockopt level 1 option 12 is not modelled"
+scm efdwritev 3 "a vector write to an eventfd is not modelled"
+scm efdreadv 3 "a vector read of an eventfd is not modelled"
+scm sendname 3 "sendmsg with a destination address or ancillary data is not modelled"
+scm recvflags 3 "recvmsg flags 0x2 or ancillary data are not modelled"
+scm manyriov 3 "reads into 40 iovec entries"
+scm flocksock 3 "system call 73 on checker-owned fd 500 is not modelled"
+scm byhandle 3 "opens a file by handle for writing"
+scm openhow 3 "openat2 passes an open_how the checker cannot read"
+scm manyfds 1 "opens more than 256 checker-owned fds"
+scm manyconn 1 "more than 16 connections wait at node 0"
+scm manywatch 1 "epoll instance watches more than 16 fds"
+scm earlyshut 3 "shutdown of a socket whose non-blocking connect has not completed is not modelled"
+scm earlyread 3 "a blocking read of a socket whose non-blocking connect has not completed"
+scm earlywrite 3 "a blocking write to a socket whose non-blocking connect has not completed"
+scm earlydial 3 "a blocking connect on a socket whose non-blocking connect has not completed"
 
 echo "-- a libpq-style client: non-blocking connect, POLLOUT, SO_ERROR"
 # nbconnect.c makes the socket calls libpq's connectDBStart() and
@@ -893,7 +984,7 @@ echo "-- the socket calls past read and write"
 # record and no other.  On 2.1.0 each of these calls on a checker-owned
 # socket ended the check (exit 3).
 $CC -O1 -no-pie -w -o "$B/proc/sockapi" "$T/sockapi.c" || { echo "proc_gate: sockapi.c does not build"; fail=1; }
-for m in iov shut dup opts; do
+for m in iov shut dup opts errs; do
 	(cd "$NB" && timeout 30 "$B/proc/sockapi" 0 "$m" 3>"$NB/sa-$m.state" > /dev/null 2>&1)
 	if ! record_model "$B/proc/sockapi" "$m" "$NB/sa-$m.state" "timeouts = 0" "$NB/sa-$m.model"; then
 		echo "FAIL sockapi $m: the native run left no record"; fail=1; continue
@@ -911,7 +1002,14 @@ $CC -O1 -no-pie -w -DBUG -o "$B/proc/shortw-bug" "$T/shortw.c" || { echo "proc_g
 sed 's/short_writes = 2/short_writes = 0/' "$T/shortw.model" > "$OUT/shortw0.model"
 expect_by 120 "shortw: a writer that resends holds"            0 "No error has been found" $(run shortw shortw)
 expect_by 120 "shortw: a writer that ignores the count is caught" 1 "whole is violated" $(run shortw shortw-bug)
+expect_by 120 "shortw: the counterexample names the full buffer" 1 "full n0 t0 (EAGAIN)" $(run shortw shortw-bug)
 expect_by 120 "shortw: the bug needs a full buffer"           0 "No error has been found" $(runx "$OUT/shortw0.model" shortw-bug)
+# the same with the body sent by writev and by sendmsg, in two pieces
+for h in writev sendmsg; do
+	sed "s/^nodes = 2/nodes = 2\nargs = $h/" "$T/shortw.model" > "$OUT/shortw-$h.model"
+	expect_by 120 "shortw $h: a writer that resends holds"       0 "No error has been found" $(runx "$OUT/shortw-$h.model" shortw)
+	expect_by 120 "shortw $h: one that ignores the count is caught" 1 "whole is violated" $(runx "$OUT/shortw-$h.model" shortw-bug)
+done
 
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes
@@ -921,6 +1019,11 @@ echo "-- partitions: a cut link holds segments back until it heals"
 sed 's/^\[environment\]/[environment]\npartitions = 1/' "$T/repl.model" > "$OUT/repl-cut.model"
 expect_by 300 "partitions: repl holds with a cut link"     0 "28 distinct states" $(runx "$OUT/repl-cut.model" repl)
 expect_by 300 "partitions: repl's bug is still caught"     1 "agree_on_ack is violated" $(runx "$OUT/repl-cut.model" repl-bug)
+# a poll loop's wake waits for a cut link to heal: more worlds (5
+# without partitions), the same verdicts
+sed '/^\[invariants\]/i [environment]\npartitions = 1\n' "$T/pollloop.model" > "$OUT/pollloop-cut.model"
+expect_by 300 "partitions: pollloop holds with a cut link"  0 "20 distinct states" $(runx "$OUT/pollloop-cut.model" pollloop)
+expect_by 300 "partitions: pollloop's bug is still caught"  1 "stored_ok is violated" $(runx "$OUT/pollloop-cut.model" pollloop-bug)
 $CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpsem.c does not build"; fail=1; }
 printf '[target]\nbinary = %s\nnodes = 2\nargs = rstdata\n[environment]\npartitions = 1\n[invariants]\nx = "1 == 1"\n' "$B/proc/tcpsem" > "$OUT/rstcut.model"
 expect_by 120 "partitions: an RST across a cut link is refused" 3 "an RST held back by a partition is not modelled" --model-file "$OUT/rstcut.model"
@@ -1055,12 +1158,19 @@ expect "an option it cannot honour is an error" 3 "not supported with --model-fi
 $CC -O1 -w -fPIE -pie -o "$B/proc/repl-pie" "$T/repl.c" 2>/dev/null &&
 	expect "a PIE binary is an error"      3 "non-PIE" --model-file "$T/repl.model" --binary "$B/proc/repl-pie"
 CMC_PRELOAD=$OUT/no-such-preload.so expect "a missing preload is an error" 3 "preload" $(run lease lease-bug)
+# with no CMC_PRELOAD, a cmc with no preload beside it or in ../lib/libcmc
+mkdir -p "$OUT/lone/bin" && cp "$CMC" "$OUT/lone/bin/cmc"
+env -u CMC_PRELOAD "$OUT/lone/bin/cmc" --model-file "$T/lease.model" --binary "$B/proc/lease-bug" > "$OUT/lone.txt" 2>&1
+rc=$?
+if [ "$rc" = 3 ] && grep -q "cannot find cmc-preload.so beside this program" "$OUT/lone.txt"; then
+	echo "ok   no preload beside cmc is an error -> exit 3"
+else echo "FAIL no preload beside cmc is an error -> exit $rc"; sed 's/^/     /' "$OUT/lone.txt" | head -5; fail=1; fi
 
 # constructs the engine answered wrongly (soundness plan 3.4, 3.6): a
 # write from an unmapped buffer gets EFAULT, not a zero-filled success,
 # and EPOLLET and EFD_SEMAPHORE are refused; a finite poll timeout, once
 # refused, now fires (2.2)
-for m in none badptr pollto epollet semaphore longrec partrec refused rstwrite rstignore rsthandler fork writev sendmsg peek nbaccept udp; do
+for m in none badptr pollto epollet semaphore longrec partrec refused rstwrite rstignore rsthandler rstblock fork writev sendmsg peek nbaccept udp; do
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nuntouched = "node[0][0] != 1"\n' "$B/proc/unmodelled" "$m" > "$OUT/u-$m.model"
 done
 printf 'faulted = "eventually node[0][0] == 2"\n' >> "$OUT/u-badptr.model"
@@ -1113,6 +1223,7 @@ expect "rst: the default SIGPIPE ends the writer"          0 "No error has been 
 (trap '' PIPE; fail=0; expect "rst: a node does not inherit an ignored SIGPIPE" 0 "No error has been found" --model-file "$OUT/u-rstwrite.model"; exit $fail) || fail=1
 expect "rst: an ignored SIGPIPE leaves EPIPE"              0 "No error has been found" --model-file "$OUT/u-rstignore.model"
 expect "rst: a SIGPIPE handler is refused"                 3 "SIGPIPE handler" --model-file "$OUT/u-rsthandler.model"
+expect "rst: a blocked SIGPIPE is refused"                 3 "with SIGPIPE blocked" --model-file "$OUT/u-rstblock.model"
 expect "unmodelled: an over-long state record is refused" 3 "longer than the 64" --model-file "$OUT/u-longrec.model"
 expect "unmodelled: a partial state record is refused"    3 "partial volatile state record" --model-file "$OUT/u-partrec.model"
 

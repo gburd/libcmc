@@ -45,14 +45,6 @@ repl_val(void *ctx, int r)
 	return observed;
 }
 
-static int
-node_len(void *ctx, int node)
-{
-	(void) ctx;
-	(void) node;
-	return 1;
-}
-
 int
 main(int argc, char **argv)
 {
@@ -78,7 +70,6 @@ main(int argc, char **argv)
 
 	obs.nnodes = 2;
 	obs.node_byte = node_byte;
-	obs.node_len = node_len;
 	obs.repl_src = repl_src;
 	obs.repl_val = repl_val;
 	cmc_refine_reset();

@@ -111,12 +111,15 @@ dir_apply(FsEnt *ent, int *n, const FsOp *o)
 	(*n)--;
 }
 
+/* Each link takes a fresh inode, which the link keeps referenced, so a
+ * directory names fewer inodes, now or on disk, than there are. */
+_Static_assert(FS_MAXENT >= FS_MAXINO - 1, "a directory can hold every inode");
+
 /* Change directory d now (its current entries) and record the change
  * for the disk, which sees it at the next fsync of d. */
 static int
 dir_change(FsIno *d, const FsOp *o)
 {
-	if (o->kind == 'L' && d->nent >= FS_MAXENT) return FS_LIMIT;
 	if (add_op(d, o)) return FS_LIMIT;
 	dir_apply(d->ent, &d->nent, o);
 	return 0;
@@ -396,6 +399,7 @@ fs_rename(Fs *fs, const char *from, const char *to)
 
 	if (n < 0) return n;
 	if (m < 0 && m != -ENOENT) return m;
+	if (m == -ENOENT && d2 < 0) return -ENOENT;	/* a missing directory on the way to to */
 	if (d1 < 0 || d2 < 0) return -EBUSY;
 	if (d1 != d2 || fs->ino[n].isdir) return FS_NOTMOD;
 	if (m == n) return 0;

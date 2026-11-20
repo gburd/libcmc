@@ -25,7 +25,6 @@ typedef struct {
 	int nnodes;
 	/* byte k of node i's observed canonical state, or -1 if out of range */
 	long (*node_byte)(void *ctx, int i, int k);
-	int  (*node_len)(void *ctx, int i);
 	/* the reply log */
 	int  nrepl;
 	long (*repl_src)(void *ctx, int r);
