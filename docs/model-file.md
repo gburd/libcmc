@@ -41,6 +41,7 @@ crashes  = 1               # node crashes
 drops    = 1               # messages the network may lose
 restarts = 1               # a crashed node may be relaunched
 short_writes = 1           # sends a full send buffer may cut short
+partitions = 1             # directed links the network may cut
 depth    = 40              # bound the search to this many actions
 
 [invariants]
@@ -106,6 +107,24 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   load reaches, but never hides one.  Only those four counts are
   offered, not every count.  A blocking send is never cut short (Linux
   blocks it instead).
+- `partitions`: the network may cut a directed link from one node to
+  another, once per unit of budget, and may heal any cut link at any
+  later point (healing is not budgeted).  A cut link holds back every
+  segment from the first node to the second: bytes and FINs queued
+  toward the second node are not delivered, a connection either node
+  dialled across it is not accepted, and a non-blocking connect across
+  it does not complete, until the link heals.  Nothing is lost: TCP
+  retransmits, so the bytes wait, in order.  A cut from a to b with b
+  to a up is an asymmetric partition.  Two things a cut would hold back
+  are not modelled and end the check (exit 3): an RST that would cross
+  a cut link (a close with bytes unread, a write to a closed peer, an
+  exited listener's backlog, a restart), and a blocking connect across
+  one, which Linux times out after its retries.  The client is never
+  cut off.  Note that the search already delays any delivery for as
+  long as it likes, and the clock moves only by budgeted timeouts, so
+  a cut adds no safety violation on its own; it shows its effect with
+  timeouts (a node that times out while the bytes wait) and in a
+  counterexample that reads the way the failure happens.
 - `restarts`: a crashed node is relaunched as a fresh process.  The
   surviving durable record (what it last reported on descriptor 193) is
   handed back to it: the new process's first read of descriptor 193

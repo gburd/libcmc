@@ -140,7 +140,7 @@ static struct
 	char		binary[4096];	/* [target] binary, resolved against the file's directory */
 	int			nodes;
 	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
-	int			timeouts, crashes, drops, restarts, short_writes;
+	int			timeouts, crashes, drops, restarts, short_writes, partitions;
 	int			max_write;		/* largest single write a node may make (<= MSGLEN) */
 	char		args[512];		/* extra argv after the node id, space-separated (e.g. flags) */
 	long		depth;			/* -1 = unbounded */
@@ -240,6 +240,8 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.drops = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "short_writes"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.short_writes = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "partitions"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.partitions = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "restarts"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.restarts = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
@@ -1020,8 +1022,29 @@ static Msg bag[MAXMSG];
 static unsigned char rep_src[MAXREP], rep_val[MAXREP]; static int nrep;
 
 /* environment budgets left on this path; part of the fingerprint */
-typedef struct { int timeouts, crashes, drops, restarts, short_writes; } Budget;
+typedef struct { int timeouts, crashes, drops, restarts, short_writes, partitions; } Budget;
 static Budget bud;
+/* The network's cut links: cut[a][b] holds back every segment from node
+ * a to node b (bytes, FINs and handshakes wait, as TCP retransmits
+ * them) until the link heals.  Part of the world. */
+static unsigned char g_cut[MAXNODES][MAXNODES];
+/* may a segment travel from node a to node b now?  The client (-1)
+ * and a node's connection to itself are never cut */
+static int link_up(int a, int b) { return a < 0 || b < 0 || !g_cut[a][b]; }
+/* may a segment reach end `to` of connection conn: the link from the
+ * other end's node to this one is up */
+#define CONN_UP(conn, to) link_up(conns[conn].node[1 - (to)], conns[conn].node[to])
+/* An RST from node a to node b is about to be reported at b at once.
+ * The model has an RST arrive with no delay; across a cut link it
+ * would wait, and holding it back is not modelled, so the check ends
+ * rather than answering as if the link were up. */
+static void die(int code, const char *fmt, ...);
+static void
+rst_path(int a, int b)
+{
+	if (!link_up(a, b))
+		die(3, "node %d resets a connection to node %d across a cut link; an RST held back by a partition is not modelled", a, b);
+}
 
 /* M5b: the logical clock the checker owns.  It starts at a base and
  * advances by LEASE_TICK only when the checker fires a timeout, so a
@@ -1743,6 +1766,7 @@ end_close(int conn, int e, int dead)
 		if (conn_has_data(conn, e))
 		{
 			conn_discard_to(conn, e);
+			rst_path(cn->node[e], cn->node[1 - e]);
 			cn->reset = 1; cn->err[1 - e] = reset_errno(conn, 1 - e);
 			rst_notify(conn, 1 - e);
 		}
@@ -2693,6 +2717,9 @@ serve(Node *nd, Thread *th)
 				 * ENOTCONN and a write with EPIPE, as on Linux after a
 				 * refusal, until it is dialled again */
 				int c = conn_new(nd->id, peer);
+				rst_path(peer, nd->id);
+				if (!link_up(nd->id, peer))
+					die(3, "node %d dials node %d across a cut link; a blocking connect that times out is not modelled", nd->id, peer);
 				conns[c].closed[1] = conns[c].gone[1] = 1; conns[c].refused = 1;
 				conns[c].lport = local_port(nd, fd);
 				cfd_set(nd, fd, peer, c, 0);
@@ -2819,7 +2846,7 @@ serve(Node *nd, Thread *th)
 				 * the data with an RST, and this end, which had its FIN, gets
 				 * EPIPE on its next call.  shortcut: the RST arrives at once,
 				 * not a round trip later. */
-				if (!cn->gone[1 - e]) { cn->reset = 1; cn->err[e] = reset_errno(c, e); }
+				if (!cn->gone[1 - e]) { rst_path(nd->id, cn->node[1 - e]); rst_path(cn->node[1 - e], nd->id); cn->reset = 1; cn->err[e] = reset_errno(c, e); }
 				g_resp->val = len; break;
 			}
 			unsigned char buf[MSGLEN] = {0};
@@ -2850,6 +2877,7 @@ serve(Node *nd, Thread *th)
 			{
 				/* the peer shut both sides: its stack answers the bytes
 				 * with an RST, as Linux's does in FIN_WAIT */
+				rst_path(nd->id, cn->node[1 - e]); rst_path(cn->node[1 - e], nd->id);
 				int er[2] = {reset_errno(c, 0), reset_errno(c, 1)};
 				conn_discard(c);
 				cn->reset = 1; cn->err[0] = er[0]; cn->err[1] = er[1];
@@ -3677,6 +3705,7 @@ node_gone(Node *nd)
 		{
 			/* the kernel of an exited listener resets the dials still in
 			 * its backlog; a crashed host answers nothing */
+			rst_path(nd->id, cn->node[0]);
 			cn->reset = 1; cn->err[0] = reset_errno(c, 0);
 			rst_notify(c, 0);
 		}
@@ -4224,6 +4253,8 @@ world_fp(uint64_t fp[2])
 	PUT(nrep);
 	for (int i = 0; i < nrep; i++) { PUT(rep_src[i]); PUT(rep_val[i]); }
 	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts); PUT(bud.short_writes);
+	PUT(bud.partitions);
+	for (int i = 0; i < M.nodes; i++) for (int j = 0; j < M.nodes; j++) PUT(g_cut[i][j]);
 	PUT8(logical_ns);
 #undef PUT8
 #undef PUT
@@ -4237,13 +4268,14 @@ reset_world(void)
 	memset(bag, 0, sizeof bag); memset(conns, 0, sizeof conns);
 	nrep = 0; logical_ns = CLK_BASE; g_fault_node = -1; g_race_node = -1;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
-	bud.restarts = M.restarts; bud.short_writes = M.short_writes;
+	bud.restarts = M.restarts; bud.short_writes = M.short_writes; bud.partitions = M.partitions;
+	memset(g_cut, 0, sizeof g_cut);
 }
 
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -4320,7 +4352,7 @@ enum_actions(Act *out)
 			if (th->block_kind == BK_ACCEPT)
 			{
 				for (int s = -1; s < M.nodes; s++)
-					if (pend_from(nd, s)) ADD(A_ACCEPT, d, s, ti);
+					if (pend_from(nd, s) && link_up(s, d) && link_up(d, s)) ADD(A_ACCEPT, d, s, ti);
 				/* a server idle in accept() can have its election timer fire:
 				 * the timeout arrives as a synthetic timer connection it
 				 * accepts and reads a 'T' from (peer = TIMER_PEER) */
@@ -4346,7 +4378,8 @@ enum_actions(Act *out)
 						saw_chan = 1;
 						/* readable: a queued byte or FIN, a pending reset, or
 						 * a peer whose node is gone (the EOF a peer notices) */
-						if (conn_head(ci, e) >= 0 || (ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
+						if ((conn_head(ci, e) >= 0 && CONN_UP(ci, e)) ||
+							(ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
 							peer_lost(ci, e))
 							ADD2(A_WAKE, d, peer, ti, k);
 					}
@@ -4356,7 +4389,10 @@ enum_actions(Act *out)
 					}
 					else if (fd == nd->listener_fd)
 					{
-						if (nd->npend > 0) ADD(A_WAKE, d, POLL_LISTENER, ti);
+						int up = 0;
+						for (int q = 0; q < nd->npend; q++)
+							up |= link_up(conns[nd->pend[q]].node[0], d) && link_up(d, conns[nd->pend[q]].node[0]);
+						if (up) ADD(A_WAKE, d, POLL_LISTENER, ti);
 					}
 					else
 					{
@@ -4384,7 +4420,8 @@ enum_actions(Act *out)
 				continue;
 			}
 			int p = th->block_peer;
-			if (conn_head(th->block_conn, th->block_end) >= 0) ADD(A_DELIVER, d, p, ti);
+			if (conn_head(th->block_conn, th->block_end) >= 0 && CONN_UP(th->block_conn, th->block_end))
+				ADD(A_DELIVER, d, p, ti);
 			else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, p, ti);
 			if (bud.timeouts > 0) ADD(A_TIMEOUT, d, p, ti);
 		}
@@ -4403,9 +4440,20 @@ enum_actions(Act *out)
 			if (!cn->used || cn->reset || cn->node[0] < 0) continue;
 			if (conn_has_data(ci, 0) || conn_has_data(ci, 1)) ADD2(A_DROP, cn->node[1], cn->node[0], -1, ci);
 		}
+	/* the network cuts a directed link between two nodes (budgeted),
+	 * or heals one it cut, and the segments held on it may move again */
+	for (int x = 0; x < M.nodes; x++)
+		for (int y = 0; y < M.nodes; y++)
+		{
+			if (x == y) continue;
+			if (g_cut[x][y]) ADD(A_HEAL, x, y, -1);
+			else if (bud.partitions > 0) ADD(A_CUT, x, y, -1);
+		}
 	/* a non-blocking dial's handshake completes (CONNECT) */
 	for (int ci = 0; ci < MAXCONNS; ci++)
-		if (conns[ci].used && conns[ci].connecting) ADD2(A_CONNECT, conns[ci].node[0], conns[ci].node[1], -1, ci);
+		if (conns[ci].used && conns[ci].connecting && link_up(conns[ci].node[0], conns[ci].node[1]) &&
+			link_up(conns[ci].node[1], conns[ci].node[0]))
+			ADD2(A_CONNECT, conns[ci].node[0], conns[ci].node[1], -1, ci);
 	if (bud.restarts > 0)
 		for (int d = 0; d < M.nodes; d++)
 			if (!N[d].alive && N[d].crashed) ADD(A_RESTART, d, -1, -1);
@@ -4560,6 +4608,8 @@ break_peer_links(int node)
 		/* a dial still handshaking reaches whichever process listens
 		 * when it completes */
 		if (!cn->used || cn->reset || cn->connecting) continue;
+		if (cn->node[0] == node) rst_path(node, cn->node[1]);
+		if (cn->node[1] == node) rst_path(node, cn->node[0]);
 		if (cn->node[0] == node || cn->node[1] == node) reset_conn(c);
 	}
 }
@@ -4637,6 +4687,8 @@ apply(const Act *a)
 			else if (th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW) run_connwait(nd, th);
 			else run_held(nd, th);
 			break;
+		case A_CUT: bud.partitions--; g_cut[a->node][a->peer] = 1; break;
+		case A_HEAL: g_cut[a->node][a->peer] = 0; break;
 		case A_SHORT:
 			bud.short_writes--;
 			g_short = a->arg;
@@ -4780,10 +4832,11 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);
 	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
+	else if (a->kind == A_CUT || a->kind == A_HEAL) snprintf(b, n, "%s n%d->n%d", k[a->kind], a->node, a->peer);
 	else if (a->kind == A_SHORT && a->arg == 0) snprintf(b, n, "full n%d t%d (EAGAIN)", a->node, a->thr);
 	else if (a->kind == A_SHORT) snprintf(b, n, "short n%d t%d (%d bytes)", a->node, a->thr, a->arg);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
@@ -5018,6 +5071,7 @@ cmc_proc_main(const CmcProcOptions *po)
 	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d, restarts %d",
 		   M.client_write, M.timeouts, M.crashes, M.drops, M.restarts);
 	if (M.short_writes) printf(", short_writes %d", M.short_writes);
+	if (M.partitions) printf(", partitions %d", M.partitions);
 	if (depth >= 0) printf(", depth %ld", depth);
 	printf("\n");
 	fflush(stdout);

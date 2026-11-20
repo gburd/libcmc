@@ -473,6 +473,14 @@ m_budget(void)
 	return 1;
 }
 
+/* a cut link of the network */
+static int
+m_cut(void)
+{
+	g_cut[pick(3)][pick(3)] ^= 1;
+	return 1;
+}
+
 static int
 m_clock(void)
 {
@@ -598,13 +606,13 @@ static int (*const mutations[]) (void) = {
 	m_canon, m_durable, m_read_off, m_alive, m_block_kind, m_want,
 	m_recv_conn, m_futex, m_poll_fd, m_poll_events, m_woke, m_msg_byte,
 	m_msg_drop, m_conn_flag, m_nonblock, m_pend, m_efd, m_budget, m_clock,
-	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned, m_efd_cloexec, m_plain, m_sockopt, m_dup,
+	m_reply, m_newborn, m_thread_count, m_position, m_held, m_cloned, m_efd_cloexec, m_plain, m_sockopt, m_dup, m_cut,
 };
 static const char *const mutation_names[] = {
 	"canon", "durable", "read_off", "alive", "block_kind", "want",
 	"recv_conn", "futex", "poll_fd", "poll_events", "woke", "msg_byte",
 	"msg_drop", "conn_flag", "nonblock", "pend", "efd", "budget", "clock",
-	"reply", "newborn", "thread_count", "position", "held", "cloned", "efd_cloexec", "plain", "sockopt", "dup",
+	"reply", "newborn", "thread_count", "position", "held", "cloned", "efd_cloexec", "plain", "sockopt", "dup", "cut",
 };
 
 /* ---- changes the encoding must hide ------------------------------- */

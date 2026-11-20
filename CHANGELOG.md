@@ -50,6 +50,15 @@ but one), and the buffer then stays full, with no `POLLOUT`, until the
 peer reads.  On 2.1.0 every send succeeded whole, so a writer that
 ignored a short count passed.  Gate: proc_gate shortw.
 
+Network partitions, `[environment] partitions = N`: the search may cut
+a directed link between two nodes (asymmetric partitions included) and
+heal it later.  A cut link holds back its bytes, FINs and handshakes,
+in order, as TCP's retransmission does; nothing is lost.  An RST that
+would cross a cut link, and a blocking connect across one, are refused.
+The search already delays any delivery as long as it likes, so a cut
+alone adds no safety violation; it matters with timeouts.  Gate:
+proc_gate partitions rows.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

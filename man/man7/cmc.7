@@ -479,6 +479,15 @@ or sends only 1, half, or all but one of its bytes, and the send
 buffer is full until the peer reads.
 Any buffer can fill this way, which no real load needs; the search
 finds more, never less.
+.It CUT(a, b)
+Partition budget is left: the link from node a to node b is cut.
+Bytes, FINs and handshakes from a to b wait, in order, until it heals;
+the link from b to a is not affected.
+An RST that would cross a cut link, and a blocking
+.Fn connect
+across one, are refused.
+.It HEAL(a, b)
+The link from a to b is cut: it heals, and what waited may move.
 .It RESTART
 Restart budget is left and a node has crashed: it is relaunched as a
 fresh process.
