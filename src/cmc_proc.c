@@ -693,6 +693,8 @@ typedef struct {
 	 * registered for pollfds[k] (epoll_event.data), returned verbatim. */
 	int epoll_fd; int poll_maxevents; uint64_t polldata[MAXPOLL];
 	int poll_woke_fd;			/* -1, or the channel fd a poll wake marked ready: its next read delivers (not EAGAIN) */
+	int poll_now;				/* BK_POLL: a poll that would return at once, parked so peers may act first (see peer_wait) */
+	int now;					/* the parked call is being carried out by RUN: answer it, do not park it again */
 	/* a readv or recvmsg: niov entries of the iovec array the bytes are
 	 * scattered over (0 for a read into one buffer), and recvmsg's
 	 * msghdr, whose msg_namelen and msg_flags the answer sets (0 else) */
@@ -760,6 +762,10 @@ typedef struct {
 	 * write or truncation, 's' for an fsync; 0 for none) */
 	Fs fs;
 	FsUndo undo; int undo_kind;
+	/* the node has, since it last parked where other nodes may act, made
+	 * a call on a connection whose answer or effect another node's action
+	 * could have changed (see peer_wait) */
+	int step_effect;
 } Node;
 
 static Node N[MAXNODES];
@@ -784,8 +790,10 @@ static int g_unchecked_node, g_weak_seen, g_try_seen;
  * write, not yet carried out, that the search may cut short (see
  * shortwait()).  BK_SLEEP is a pure wait on the node's clock (see
  * sleep_call()).  BK_SYNWAIT is a blocking connect, not yet carried
- * out, across a cut link (see SYN_TIMEOUT). */
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10, BK_SLEEP = 11, BK_SYNWAIT = 12 };
+ * out, across a cut link (see SYN_TIMEOUT).  BK_NBREAD is a non-blocking
+ * read and BK_PEERWAIT a write, not yet carried out, whose answer
+ * another node may change first (see peer_wait). */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10, BK_SLEEP = 11, BK_SYNWAIT = 12, BK_NBREAD = 13, BK_PEERWAIT = 14 };
 /* Linux's blocking connect gives up after tcp_syn_retries (6 by
  * default) retransmissions of its SYN, from a 1 s timeout doubling each
  * time: 1 + 2 + ... + 64 = 127 s, then ETIMEDOUT. */
@@ -2564,6 +2572,91 @@ fd_connecting(Node *nd, int fd)
 	return cs >= 0 && nd->cconn[cs] >= 0 && conns[nd->cconn[cs]].connecting;
 }
 
+/* Could another node, or the network, change what end e of connection
+ * c shows this node before its next call: bytes, a FIN or an RST that
+ * may arrive (some are queued toward it, or its peer is a live node
+ * whose end is open and may still send or close), or a DROP?  A peer
+ * that is the client, gone, or closed sends nothing more; a connection
+ * reset, refused or still handshaking has its answer already. */
+static int
+may_change(int c, int e)
+{
+	if (c < 0) return 0;
+	const Conn *cn = &conns[c];
+	if (cn->reset || cn->refused || cn->connecting) return 0;
+	if (conn_head(c, e) >= 0) return 1;
+	if (bud.drops > 0 && (conn_has_data(c, 0) || conn_has_data(c, 1))) return 1;
+	int p = cn->node[1 - e];
+	return p >= 0 && N[p].alive && !cn->closed[1 - e];
+}
+
+/* Is the answer to a call of node nd on fd one another node's action
+ * could change, with the node mid-step?  Queued bytes could arrive
+ * first whenever; anything else only if the node made a call with an
+ * effect on a connection earlier in this step (step_effect): before
+ * that call, every action of the others was already ordered before the
+ * node's own (the search tried it where the node last waited), since
+ * the computation in between is the node's alone and commutes with
+ * theirs. */
+static int
+fd_may_change(Node *nd, int fd)
+{
+	int cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	if (cs < 0 || nd->cconn[cs] < 0) return 0;
+	int c = nd->cconn[cs], e = nd->cend[cs];
+	if (conns[c].reset || conns[c].refused || conns[c].connecting) return 0;
+	return conn_head(c, e) >= 0 || (nd->step_effect && may_change(c, e));
+}
+
+/* Would write call nr of node nd, mid-step, answer differently had
+ * another node or the network acted first?  A write fails only once an
+ * RST has arrived; bytes arriving toward the writer change nothing, a
+ * peer's FIN leaves the next write succeeding (the RST that answers it
+ * is the writer's own doing, already modelled), and a host that loses
+ * power sends nothing.  So the actions that matter are: the peer, a
+ * live node with its end open, closes or exits while bytes the writer
+ * sent it are unread there (an RST); a DROP resets a connection that
+ * carries bytes; a crashed peer restarts (its new kernel answers with
+ * an RST).  Before the node's first call with an
+ * effect in this step, each of those was already offered where the
+ * node last waited (see fd_may_change()), so only a later write parks. */
+static int
+peerwait(Node *nd, long nr, const __u64 *a)
+{
+	if (!nd->step_effect || node_multi(nd)) return 0;
+	if (nr != SYS_write && nr != SYS_sendto && nr != SYS_writev && nr != SYS_sendmsg) return 0;
+	int fd = (int) a[0], cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	if (cs < 0 || nd->cconn[cs] < 0) return 0;
+	int c = nd->cconn[cs], e = nd->cend[cs], p = nd->cpeer[cs];
+	const Conn *cn = &conns[c];
+	if (cn->reset || cn->refused || cn->connecting || cn->err[e]) return 0;
+	if (bud.drops > 0 && (conn_has_data(c, 0) || conn_has_data(c, 1))) return 1;
+	if (p < 0) return 0;
+	if (N[p].alive) return !cn->closed[1 - e] && conn_has_data(c, 1 - e);
+	return bud.restarts > 0 && N[p].crashed;
+}
+
+/* Does call nr, carried out, depend on or affect what other nodes do:
+ * a call on a connection (its bytes, a FIN, an RST or a dial reach a
+ * peer, or its answer says what has arrived), or a poll?  An action of
+ * another node does not commute with such a call, so after it the
+ * node's next such call is a point where the others may act first. */
+static int
+has_effect(long nr, const __u64 *a)
+{
+	if (nr == SYS_poll || nr == SYS_ppoll || nr == SYS_epoll_wait || nr == SYS_epoll_pwait) return 1;
+	if ((int) a[0] < 500) return 0;
+	switch (nr)
+	{
+		case SYS_write: case SYS_sendto: case SYS_writev: case SYS_sendmsg:
+		case SYS_close: case SYS_shutdown: case SYS_connect:
+		case SYS_read: case SYS_recvfrom: case SYS_readv: case SYS_recvmsg:
+			return 1;
+		default:
+			return 0;
+	}
+}
+
 /* Does call nr of node nd observe a socket whose non-blocking connect
  * has not completed?  On Linux the handshake completes on its own time
  * (on loopback, before connect() even returns), so such a call may see
@@ -2618,6 +2711,26 @@ run_connwait(Node *nd, Thread *th)
 	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
 	th->block_kind = 0;
 	carry_out(nd, th);
+}
+
+/* RUN a thread parked in BK_NBREAD, BK_PEERWAIT or a poll that would
+ * return at once (poll_now): carry its call out
+ * now, with what has arrived so far, as Linux would have answered it had
+ * no other node acted first.  A write may still be cut short. */
+static void
+run_now(Node *nd, Thread *th)
+{
+	int kind = th->block_kind;
+	th->now = 1;
+	memset(g_req, 0, g_sz.seccomp_notif);
+	g_req->id = th->block_id; g_req->pid = (__u32) th->tid;
+	g_req->data.nr = (int) th->nr; g_req->data.instruction_pointer = th->ip;
+	memcpy(g_req->data.args, th->args, sizeof th->args);
+	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
+	th->block_kind = 0; th->poll_now = 0;
+	if (kind == BK_PEERWAIT && shortwait(nd, th->nr, (const __u64 *) th->args)) th->block_kind = BK_SHORTW;
+	else carry_out(nd, th);
+	th->now = 0;
 }
 
 /* Would write call nr of node nd, on a non-blocking connection a peer
@@ -2735,6 +2848,11 @@ try_pending_for(Node *nd)
 		th->block_kind = BK_CONNWAIT; th->block_id = g_req->id;
 		return 1;
 	}
+	if (peerwait(nd, nr, a))
+	{
+		th->block_kind = BK_PEERWAIT; th->block_id = g_req->id;
+		return 1;
+	}
 	if (shortwait(nd, nr, a))
 	{
 		th->block_kind = BK_SHORTW; th->block_id = g_req->id;
@@ -2757,6 +2875,7 @@ carry_out(Node *nd, Thread *th)
 	int parked = serve(nd, th);
 	g_cap = NULL;
 	if (parked) return 1;
+	if (has_effect(nr, a)) nd->step_effect = 1;
 	if (mfs_hold(nd)) { hold = 1; th->sp = stack_pointer(nd, th); }
 	if (!hold)
 	{
@@ -3636,14 +3755,25 @@ serve(Node *nd, Thread *th)
 				put_read(nd, th, &t, k);
 				g_resp->val = k; break;
 			}
-			/* A non-blocking channel read with nothing deliverable returns
-			 * EAGAIN immediately: the search has not just woken this fd, so
-			 * no message is ready.  This is sound only because the loop's
-			 * next poll() defers (BK_POLL), handing control back to the
-			 * search; EAGAIN never lets a node bypass delivery. */
+			/* A non-blocking channel read the search has not just woken.
+			 * Whether bytes have arrived is the search's choice, as for a
+			 * blocking read: when some could have (fd_may_change()), the
+			 * read parks (BK_NBREAD) where the others may act first, and
+			 * the search either delivers to it (the bytes arrived) or
+			 * runs it (RUN: nothing arrived yet, EAGAIN).  Otherwise, or
+			 * once RUN carries it out (th->now), it is EAGAIN at once. */
 			int cs = cfd_slot(nd, fd);
 			if (cs >= 0 && nd->cnonblock[cs] && (th->poll_woke_fd < 0 || cfd_slot(nd, th->poll_woke_fd) != cs))
-			{ g_resp->error = -EAGAIN; g_resp->val = 0; break; }
+			{
+				if (!th->now && !node_multi(nd) && fd_may_change(nd, fd))
+				{
+					th->block_kind = BK_NBREAD; th->block_id = g_req->id;
+					th->block_want = rwant; th->block_peer = peer;
+					th->block_conn = c; th->block_end = e;
+					return 1;
+				}
+				g_resp->error = -EAGAIN; g_resp->val = 0; break;
+			}
 			th->poll_woke_fd = -1;	/* the wake is spent; this read defers */
 			/* Always DEFER a blocking channel recv: whether it is satisfied
 			 * by a message or by a timeout is an environment choice the
@@ -3801,7 +3931,13 @@ serve(Node *nd, Thread *th)
 				short rev = fd >= 500 && fd_kind(nd, fd) == K_NONE ? 0 : local_ready(nd, fd, e->events[i]);
 				if (rev) { out[ready].events = (uint16_t) rev; out[ready].data = e->data[i]; ready++; }
 			}
-			if (ready > 0 || zero_timeout)
+			/* as for poll(): park an answer-at-once that a peer could change */
+			int now_park = 0;
+			for (int i = 0; (ready > 0 || zero_timeout) && !th->now && !node_multi(nd) && i < e->nit; i++)
+				if ((e->events[i] & POLLIN) && !(local_ready(nd, e->fd[i], e->events[i]) & POLLIN) &&
+					fd_may_change(nd, e->fd[i]))
+					now_park = 1;
+			if (!now_park && (ready > 0 || zero_timeout))
 			{
 				size_t want = (size_t) ready * sizeof out[0];
 				size_t got = ready > 0 ? cr_write(nd->pid, arr, out, want) : 0;
@@ -3817,7 +3953,8 @@ serve(Node *nd, Thread *th)
 			th->block_kind = BK_POLL; th->block_id = g_req->id;
 			th->block_pollarr = arr; th->pollfd_n = e->nit;
 			th->epoll_fd = epfd; th->poll_maxevents = maxevents;
-			set_deadline(nd, th, tmo_ms > 0, (unsigned long long) tmo_ms * 1000000ULL);
+			th->poll_now = now_park;
+			set_deadline(nd, th, tmo_ms > 0 && !now_park, (unsigned long long) tmo_ms * 1000000ULL);
 			for (int i = 0; i < e->nit; i++)
 			{ th->pollfds[i] = e->fd[i]; th->pollevents[i] = e->events[i]; th->polldata[i] = e->data[i]; }
 			return 1;				/* do NOT answer */
@@ -3865,7 +4002,14 @@ serve(Node *nd, Thread *th)
 				pfs[i].revents = local_ready(nd, fd, pfs[i].events);
 				if (pfs[i].revents) ready++;
 			}
-			if (ready > 0 || zero_timeout)
+			/* A poll that would return at once, with a polled channel not
+			 * yet readable that another node could make readable first,
+			 * parks (poll_now) so the search may act first: WAKE it with
+			 * that channel ready too, or RUN it to answer as it stands. */
+			int now_park = 0;
+			for (int i = 0; (ready > 0 || zero_timeout) && !th->now && !node_multi(nd) && i < nfds; i++)
+				if ((pfs[i].events & POLLIN) && !(pfs[i].revents & POLLIN) && fd_may_change(nd, pfs[i].fd)) now_park = 1;
+			if (!now_park && (ready > 0 || zero_timeout))
 			{
 				if (cr_write(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]) != (size_t) nfds * sizeof pfs[0])
 				{ g_resp->error = -EFAULT; break; }
@@ -3876,7 +4020,8 @@ serve(Node *nd, Thread *th)
 			 * ready and answer the poll. */
 			th->block_kind = BK_POLL; th->block_id = g_req->id;
 			th->block_pollarr = arr; th->pollfd_n = nfds; th->epoll_fd = -1;
-			set_deadline(nd, th, finite, tmo_ns);
+			th->poll_now = now_park;
+			set_deadline(nd, th, finite && !now_park, tmo_ns);
 			for (int i = 0; i < nfds; i++) { th->pollfds[i] = pfs[i].fd; th->pollevents[i] = pfs[i].events; }
 			return 1;				/* do NOT answer */
 		}
@@ -4194,7 +4339,7 @@ answer(Node *nd, Thread *th, long val)
 	memset(g_ans, 0, g_sz.seccomp_notif_resp); g_ans->id = th->block_id;
 	if (val < 0) g_ans->error = (int) val; else g_ans->val = val;
 	ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_ans);
-	th->block_kind = 0;
+	th->block_kind = 0; th->poll_now = 0;
 }
 
 /* A_RUN: send thread th its held answer, so it runs to its next visible
@@ -4439,6 +4584,7 @@ relaunch(Node *nd)
  * unread.  A node with a thread neither parked nor exited is still
  * running between syscalls, so a lull is waited out, not taken for
  * quiescence. */
+static int held_mid(const Node *nd);
 static void
 drive_node(Node *nd)
 {
@@ -4447,7 +4593,14 @@ drive_node(Node *nd)
 	for (;;)
 	{
 		reap(nd);
-		if (!node_has_running(nd)) return;
+		if (!node_has_running(nd))
+		{
+			/* parked where the others may act: what they do next is
+			 * offered before the node's next call (not at a crash
+			 * point, where only RUN and CRASH are) */
+			if (!held_mid(nd)) nd->step_effect = 0;
+			return;
+		}
 		for (int i = 0; i < M.nodes; i++)
 			if (idle[i] && &N[i] != nd && node_has_running(&N[i])) return;
 		if (try_pending_for(nd)) continue;
@@ -4498,13 +4651,40 @@ drive_node(Node *nd)
  * invariant is checked there, and its only actions are to run the node
  * on and to crash it. */
 static int
+held_mid(const Node *nd)
+{
+	if (!nd->alive || node_multi(nd)) return 0;
+	for (int t = 0; t < nd->nth; t++)
+		if (nd->th[t].inuse && nd->th[t].block_kind == BK_DONE) return 1;
+	return 0;
+}
+
+static int
 midstep_node(void)
 {
 	for (int i = 0; i < M.nodes; i++)
-		if (N[i].alive && !node_multi(&N[i]))
-			for (int t = 0; t < N[i].nth; t++)
-				if (N[i].th[t].inuse && N[i].th[t].block_kind == BK_DONE) return i;
+		if (held_mid(&N[i])) return i;
 	return -1;
+}
+
+/* Is some node stopped inside a step: held at a crash point, or parked
+ * at a call another node may answer first (BK_NBREAD, BK_PEERWAIT, a
+ * poll that would return at once)?  Its state hook may lag the calls it
+ * has made, so such a world is not judged by the invariants and never
+ * merged; other nodes act there as anywhere. */
+static int
+mid_world(void)
+{
+	if (midstep_node() >= 0) return 1;
+	for (int i = 0; i < M.nodes; i++)
+		for (int t = 0; N[i].alive && t < N[i].nth; t++)
+		{
+			const Thread *th = &N[i].th[t];
+			if (th->inuse && (th->block_kind == BK_NBREAD || th->block_kind == BK_PEERWAIT ||
+							  (th->block_kind == BK_POLL && th->poll_now)))
+				return 1;
+		}
+	return 0;
 }
 
 static int
@@ -4681,7 +4861,7 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 		r[p++] = (unsigned char) (th->block_kind ? th->block_kind : 3);
 		if (th->poll_woke_fd >= 0) { r[p++] = 1; fd_class(nd, th->poll_woke_fd, r + p); p += 2; }
 		else r[p++] = 0;
-		if (th->block_kind == BK_RECV)
+		if (th->block_kind == BK_RECV || th->block_kind == BK_NBREAD)
 		{
 			/* the connection read, by its open-order slot (not the peer:
 			 * two connections to one peer have different queues) */
@@ -5254,7 +5434,8 @@ enum_actions(Act *out)
 						 * progress, which the no-progress check reports. */
 					}
 				}
-				if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
+				if (th->poll_now) ADD(A_RUN, d, -1, ti);	/* answered as it stands */
+				else if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
 				continue;
 			}
 			if (th->block_kind == BK_SLEEP) continue;	/* only its deadline wakes it (A_EXPIRE) */
@@ -5265,8 +5446,17 @@ enum_actions(Act *out)
 				continue;
 			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
+			if (th->block_kind == BK_NBREAD)
+			{
+				/* nothing has arrived yet (RUN: EAGAIN), or something has */
+				ADD(A_RUN, d, -1, ti);
+				if (conn_head(th->block_conn, th->block_end) >= 0 && CONN_UP(th->block_conn, th->block_end))
+					ADD(A_DELIVER, d, th->block_peer, ti);
+				else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, th->block_peer, ti);
+				continue;
+			}
 			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED ||
-				th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW)
+				th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW || th->block_kind == BK_PEERWAIT)
 			{
 				ADD(A_RUN, d, -1, ti);
 				if (th->block_kind == BK_SHORTW)
@@ -5331,6 +5521,7 @@ enum_actions(Act *out)
  * epoll_event written back, carrying the user data the loop registered
  * for the ready fd -- that data is how the loop routes to the fd's
  * handler, so it is returned verbatim. */
+static int poll_answer(Node *nd, Thread *th, int hit);
 static void
 poll_wake(Node *nd, Thread *th, int target, int at)
 {
@@ -5347,6 +5538,15 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 	}
 	if (hit < 0) die(1, "poll wake on node %d found no polled fd for target %d", nd->id, target);
 	Thread *old = cap_begin(th);
+	if (th->poll_now)
+	{
+		/* a poll that would have returned at once: the answer is what was
+		 * ready then, with the woken fd readable too */
+		poll_answer(nd, th, hit);
+		th->poll_woke_fd = (target >= -1) ? th->pollfds[hit] : -1;
+		g_cap = old;
+		return;
+	}
 	if (th->epoll_fd >= 0)
 	{
 		/* return one ready struct epoll_event (packed on x86-64) carrying
@@ -5374,12 +5574,12 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 	g_cap = old;
 }
 
-/* A thread of nd parked in poll or epoll_wait on fds of which some are
- * now ready with no search choice (local_ready()), as when a dial's
- * handshake completes: answer it with every such fd, as the call would
- * have been answered had it been made now.  Returns 1 if it answered. */
+/* Answer thread th, parked in poll or epoll_wait, with every polled fd
+ * ready now with no search choice (local_ready()), and fd number hit
+ * (-1: none) readable as well, as poll and epoll_wait report them.
+ * Returns the count answered (0: nothing ready, nothing answered). */
 static int
-poll_recheck(Node *nd, Thread *th)
+poll_answer(Node *nd, Thread *th, int hit)
 {
 	struct pollfd pfs[MAXPOLL];
 	struct __attribute__((packed)) { uint32_t events; uint64_t data; } ev[MAXPOLL];
@@ -5388,19 +5588,32 @@ poll_recheck(Node *nd, Thread *th)
 	{
 		pfs[k].fd = th->pollfds[k]; pfs[k].events = th->pollevents[k];
 		pfs[k].revents = local_ready(nd, th->pollfds[k], th->pollevents[k]);
+		if (k == hit) pfs[k].revents |= (short) (th->pollevents[k] & POLLIN);
 		if (!pfs[k].revents) continue;
-		if (th->epoll_fd < 0 || ready < th->poll_maxevents)
+		if (th->epoll_fd < 0) ready++;
+		else if (ready < th->poll_maxevents)
 		{ ev[ready].events = (uint16_t) pfs[k].revents; ev[ready].data = th->polldata[k]; ready++; }
 	}
 	if (!ready) return 0;
-	Thread *old = cap_begin(th);
 	size_t want = th->epoll_fd >= 0 ? (size_t) ready * sizeof ev[0] : (size_t) th->pollfd_n * sizeof pfs[0];
 	const void *src = th->epoll_fd >= 0 ? (const void *) ev : (const void *) pfs;
 	if (cr_write(nd->pid, th->block_pollarr, src, want) != want) cr_fail(nd->id, "poll returns revents");
-	th->poll_woke_fd = -1;
 	answer(nd, th, ready);
+	return ready;
+}
+
+/* A thread of nd parked in poll or epoll_wait on fds of which some are
+ * now ready with no search choice (local_ready()), as when a dial's
+ * handshake completes: answer it with every such fd, as the call would
+ * have been answered had it been made now.  Returns 1 if it answered. */
+static int
+poll_recheck(Node *nd, Thread *th)
+{
+	Thread *old = cap_begin(th);
+	int ready = poll_answer(nd, th, -1);
+	if (ready) th->poll_woke_fd = -1;
 	g_cap = old;
-	return 1;
+	return ready > 0;
 }
 
 /* A_CONNECT: the handshake of non-blocking dial conn completes.  A live
@@ -5576,6 +5789,9 @@ apply(const Act *a)
 		case A_RUN:
 			if (th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED) run_stopped(nd, th);
 			else if (th->block_kind == BK_SYNWAIT) { th->has_dl = 0; run_connwait(nd, th); }
+			else if (th->block_kind == BK_NBREAD || th->block_kind == BK_PEERWAIT ||
+					 (th->block_kind == BK_POLL && th->poll_now))
+				run_now(nd, th);
 			else if (th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW) run_connwait(nd, th);
 			else run_held(nd, th);
 			break;
@@ -5649,14 +5865,14 @@ run_seq(const int *seq, int seqlen, Act *acts, int *nact)
 	/* the refinement steps are checked at quiescent worlds only; the
 	 * nodes' STEPs between them are part of one step of the spec */
 	if (g_step_refine) cmc_refine_reset();
-	if (g_step_refine && world_settled() && midstep_node() < 0) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
+	if (g_step_refine && world_settled() && !mid_world()) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	for (int s = 0; s < seqlen; s++)
 	{
 		Act a[MAXACT]; int na = enum_actions(a);
 		if (seq[s] < 0 || seq[s] >= na)
 			die(1, "replay diverged at step %d: action %d of %d (is the target deterministic?)", s, seq[s], na);
 		apply(&a[seq[s]]);
-		if (g_step_refine && world_settled() && midstep_node() < 0) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
+		if (g_step_refine && world_settled() && !mid_world()) { g_step_rc = step_refine_here(&g_step_name); if (g_step_rc != -1) return 0; }
 	}
 	*nact = enum_actions(acts);
 	return 0;
@@ -6026,7 +6242,7 @@ cmc_proc_main(const CmcProcOptions *po)
 					continue;
 				}
 				int which = -1; states++;
-				int mid = midstep_node() >= 0;
+				int mid = mid_world();
 				if (g_fault_node >= 0 || g_race_node >= 0)
 				{
 					kill_all();
@@ -6137,9 +6353,9 @@ cmc_proc_main(const CmcProcOptions *po)
 			continue;
 		}
 		replays++;
-		int which = -1; int ok = midstep_node() >= 0 ? 1 : check_invariants(&which);
+		int which = -1; int ok = mid_world() ? 1 : check_invariants(&which);
 		if (which == -2) { kill_all(); free(seq); return 3; }
-		if (ok && po->refine && !po->refine_steps && midstep_node() < 0)
+		if (ok && po->refine && !po->refine_steps && !mid_world())
 		{
 			/* C1: does this reached state refine the abstract model? */
 			const char *inm = NULL; char rerr[256];
@@ -6156,7 +6372,7 @@ cmc_proc_main(const CmcProcOptions *po)
 		int tree = world_threaded();
 		/* a mid-step world is never merged: its state hook lags the calls
 		 * the node has made, so two different histories could share it */
-		int isnew = tree || midstep_node() >= 0 || mark(fp, g_world, g_world_len);
+		int isnew = tree || mid_world() || mark(fp, g_world, g_world_len);
 		if (isnew) { distinct++; ntree += tree; if (e.depth > maxlen) maxlen = e.depth; }
 		/* did this action make progress?  A non-root entry whose reached
 		 * world equals its parent's is a stutter: the action was enabled

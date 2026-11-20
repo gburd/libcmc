@@ -5,6 +5,27 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A non-blocking read, and a `poll` or `epoll_wait` that would return at
+once, can see bytes that have arrived.  They read EAGAIN, or reported
+nothing ready, unless a poll had just woken that fd, and the node ran
+on with no other node acting first, so a program that tries a read
+before waiting never took its fast path (also on 2.1.0).  Now such a
+call stops when bytes are queued, or a peer could send, close or reset
+after the node's last call on a connection earlier in the step; the
+search lets the others act and delivers (or wakes the poll), or runs
+it as it stands.  Such a world is not judged by the invariants and
+never merged.  No example's state count changes.  Gate: proc_gate
+nbread read, poll and epoll.
+
+A peer's RST can arrive between two writes of one step.  A write after
+an earlier send in the step, to a peer that holds unread bytes from
+the writer (so its close or exit sends an RST), or with a DROP or
+RESTART in the budget that could reset the connection, stops so that
+may happen first.  A write to a peer with nothing unread is not
+stopped: nothing the peer does can make that write fail on Linux.
+Stopping every write made paxos and raft time out; the narrow rule
+changes no example's state count.  Gate: proc_gate rstmid.
+
 A crash can fall between any two system calls of a single-threaded node
 that reach outside the process, not only between its steps.  While
 crash budget is left, a node stops after each write or send on a

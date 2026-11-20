@@ -931,6 +931,19 @@ expect_by 120 "shortw: a writer that resends holds"            0 "No error has b
 expect_by 120 "shortw: a writer that ignores the count is caught" 1 "whole is violated" $(run shortw shortw-bug)
 expect_by 120 "shortw: the bug needs a full buffer"           0 "No error has been found" $(runx "$OUT/shortw0.model" shortw-bug)
 
+echo "-- other nodes act between two calls of one step"
+# nbread: a non-blocking read, a zero-timeout poll or epoll_wait right
+# after a send may find the peer's echo there (all three passed: the
+# read was EAGAIN and the poll empty unless a poll had just woken it).
+# rstmid: the peer's RST may arrive between two writes of one step.
+$CC -O1 -no-pie -w -o "$B/proc/nbread" "$T/nbread.c" || { echo "proc_gate: nbread.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/rstmid" "$T/rstmid.c" || { echo "proc_gate: rstmid.c does not build"; fail=1; }
+for m in read poll epoll; do
+	sed "s/^nodes = 2/nodes = 2\nargs = $m/" "$T/nbread.model" > "$OUT/nbread-$m.model"
+	expect_by 120 "nbread $m: the peer's answer can arrive first" 1 "nofast is violated" $(runx "$OUT/nbread-$m.model" nbread)
+done
+expect_by 120 "rstmid: an RST can arrive between two writes"  1 "not1 is violated" $(run rstmid rstmid)
+
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes
 # and heal it later; bytes, FINs and handshakes on it wait.  The counts
@@ -1090,7 +1103,10 @@ done
 printf 'faulted = "eventually node[0][0] == 2"\n' >> "$OUT/u-badptr.model"
 printf 'refused = "eventually node[0][0] == 2"\n[environment]\ntimeouts = 1\n' >> "$OUT/u-refused.model"
 printf 'killed = "node[0][0] != 2"\n' >> "$OUT/u-rstwrite.model"
-printf 'epiped = "eventually node[0][0] == 2"\n' >> "$OUT/u-rstignore.model"
+# rstignore: node 1 may read "x" and close (a FIN) before node 0 sends
+# "y", as on Linux, so node 0 may record 1; the row pins that EPIPE is
+# reachable, not that the other order is not
+printf '[target]\nbinary = %s\nnodes = 2\nargs = rstignore\n[invariants]\nepiped = "eventually node[0][0] == 2"\n' "$B/proc/unmodelled" > "$OUT/u-rstignore.model"
 expect "unmodelled: a bad write buffer gets EFAULT"      0 "No error has been found" --model-file "$OUT/u-badptr.model"
 # Which node steps first between two quiescent points is a search
 # choice (STEP), never the kernel's scheduling.  In dialexit node 1 exits

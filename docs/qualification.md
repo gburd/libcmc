@@ -64,6 +64,7 @@ in the kernel, untouched.
 | an exited listener's backlog | exact | each waiting dial is reset | proc_gate tcpsem backlog |
 | `SIGPIPE` on a write into a reset connection | exact for ignored and default | default kills the node; ignored leaves `EPIPE` | proc_gate rstwrite, rstignore |
 | `SIGPIPE` with a handler, or blocked | refused | exit 3 | proc_gate "a SIGPIPE handler is refused" |
+| a write mid-step, after an earlier send, to a peer that may reset | exact | the write stops so the peer's close, a DROP or a restart may come first; a write to a peer with no unread bytes from the writer is not stopped, since nothing the peer does can make it fail | proc_gate rstmid |
 | a crashed peer | approximate | no FIN; a reader may notice (EOF) once drained, standing for a timeout | proc_gate durlog, restart |
 | a buffer the node does not own | exact | `EFAULT` for fixed-size arguments, and for `poll`, `epoll_wait`, the clock and `getrandom` into read-only memory; a partial transfer is exit 3 | proc_gate "a bad write buffer gets EFAULT", syscorner badbuf, robuf, edges partwrite through partpoll |
 
@@ -71,7 +72,7 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `poll`, `ppoll` with no or zero timeout | exact | readiness of a channel or listener is a search choice (WAKE), never automatic; `POLLOUT` is ready on a connection and an eventfd, never on the listener or an epoll instance, and with `POLLHUP` on a socket never dialled; a closed fd is `POLLNVAL` at once | proc_gate pollloop, noprogress, syscorner poll, pollclosed |
+| `poll`, `ppoll` with no or zero timeout, `epoll_wait` with zero timeout, a non-blocking read | exact | readiness of a channel or listener is a search choice (WAKE), never automatic; a call that would answer at once stops, when a peer could change its answer, so the others may act first (WAKE, DELIVER) or it answers as it stands (RUN); `POLLOUT` is ready on a connection and an eventfd, never on the listener or an epoll instance, and with `POLLHUP` on a socket never dialled; a closed fd is `POLLNVAL` at once | proc_gate pollloop, noprogress, syscorner poll, pollclosed, nbread read, poll, epoll |
 | a finite `poll`, `ppoll`, `epoll_wait` timeout | exact | a deadline on the node clock; EXPIRE returns 0 with nothing ready and moves the clock to the deadline | proc_gate sleeps poll, ppoll, epoll, "a finite poll timeout fires", leasedrift |
 | `nanosleep`, `clock_nanosleep` (relative or `TIMER_ABSTIME`), `select` and `pselect` with no descriptor | exact | a deadline on the node clock; `select` and `pselect` return their timeout counted down to zero; select on descriptors, select with no timeout and a sleep on a CPU-time clock are exit 3 | proc_gate sleeps nanosleep, clock_nanosleep, abstime, select, pselect, and the three refusal rows |
 | deadlines of several nodes | exact in order | EXPIRE fires a node's earliest deadline only when no other node passes a deadline first; time never advances one state per tick | proc_gate leasedrift |

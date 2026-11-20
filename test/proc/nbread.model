@@ -1,0 +1,7 @@
+# A model file for test/proc/nbread.c: the fast path (node 0 reports 1)
+# is reachable, so this invariant must be violated.
+[target]
+binary = nbread
+nodes = 2
+[invariants]
+nofast = "node[0][0] != 1"

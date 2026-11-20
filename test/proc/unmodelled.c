@@ -18,7 +18,8 @@
  *   rstwrite   node 1 closes the connection with node 0's second byte
  *              unread, an RST: node 0's read gets ECONNRESET, its write
  *              EPIPE, and the default SIGPIPE ends it before it records
- *   rstignore  the same with SIGPIPE ignored: node 0 records 2
+ *   rstignore  the same with SIGPIPE ignored: node 0 can record 2 (or 1, if
+ *              node 1 reads and closes before the second byte arrives)
  *   rsthandler the same with a SIGPIPE handler (refused)
  *   fork       node 0 forks; the child exits at once (refused)
  *   writev     a writev() longer than max_write (refused)

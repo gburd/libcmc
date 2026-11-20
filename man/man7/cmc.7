@@ -71,8 +71,25 @@ fd set with
 .Fn fcntl
 reads
 .Dv EAGAIN
-when nothing is deliverable, so an event loop loops instead of
-blocking;
+when nothing has arrived, so an event loop loops instead of
+blocking.
+Whether bytes have arrived by the time of a non-blocking read, or of a
+.Fn poll
+or
+.Fn epoll_wait
+that returns at once, is a search choice, as for a blocking read: when
+bytes are queued, or a peer could send, close or reset after the node's
+last send earlier in the step, the call stops and the search may let
+the others act first (and deliver, or wake the poll) or run it as it
+stands
+.Pq RUN .
+Likewise a write, after an earlier send of the step, to a peer that
+could reset the connection first (it holds unread bytes from the
+writer), stops so the RST may arrive before it.
+No invariant is checked at such a point, and it is never merged.
+Elsewhere other nodes do not act inside a step: what the node computes
+between two calls touches only its own memory, so it commutes with
+their actions;
 .Fn eventfd
 is a counter the loop wakes itself with.
 Node

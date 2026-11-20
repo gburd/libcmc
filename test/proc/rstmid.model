@@ -1,0 +1,7 @@
+# A model file for test/proc/rstmid.c: the peer's RST may arrive between
+# two writes of one step, so node 0 can report 1.
+[target]
+binary = rstmid
+nodes = 2
+[invariants]
+not1 = "node[0][0] != 1"
