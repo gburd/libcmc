@@ -411,6 +411,21 @@ expect "fslog: synced log and control file hold"   0 "No error has been found" $
 expect "fslog: no directory fsync is caught"       1 "acked_durable is violated" $(run fslog fslog-bug)
 expect "fslog: no fdatasync is caught"             1 "acked_durable is violated" $(run fslog fslog-bug2)
 expect "fslog: the bugs need the crash"            0 "No error has been found" $(run fslog fslog-bug2) --crashes 0
+# A seccomp filter the gate itself runs under outranks the checker's
+# when it answers with an errno: the nix build sandbox answers the xattr
+# calls ENOTSUP, so they never reach cmc (and change nothing).  Those
+# rows are skipped, by name, only when this process is under a seccomp
+# filter and a native xattr write gets ENOTSUP (95).
+xattr_blocked=0
+: > "$OUT/xa"
+if grep -q '^Seccomp:[[:space:]]*2' /proc/self/status; then
+	(cd "$OUT" && timeout 30 "$B/proc/files" 0 xattrprobe "$OUT/xa" 3>"$OUT/xa.state" > /dev/null 2>&1)
+	[ "$(od -An -tu1 "$OUT/xa.state" | tr -s ' \n' ' ' | cut -d' ' -f7)" = 95 ] && xattr_blocked=1
+fi
+echo "files: xattr probe: seccomp $(grep '^Seccomp:' /proc/self/status | tr -s ' \t' ' '), state '$(od -An -tu1 "$OUT/xa.state" 2>/dev/null | tr -s ' \n' ' ')', blocked $xattr_blocked"
+xattr_skip() {	# xattr_skip MODE: true if this host's sandbox answers MODE itself
+	case $1 in *xattr*) [ "$xattr_blocked" = 1 ] ;; *) false ;; esac
+}
 # fsfail: a write or fsync may fail (eio, enospc).  A failed fsync
 # forgets the unwritten data, so retrying the fsync alone loses an acked
 # value at a crash (retry); writing again first does not (rewrite).
@@ -628,21 +643,6 @@ reached = "eventually node[0][0] == 1"'
 expect_by 60 "files: fsync of fd 193 succeeds"                   0 "No error has been found" --model-file "$OUT/fs-durfsync.model"
 # each call that changes the file system ends the check, and none of
 # them touches $FD/none (a refused call never runs)
-# A seccomp filter the gate itself runs under outranks the checker's
-# when it answers with an errno: the nix build sandbox answers the xattr
-# calls ENOTSUP, so they never reach cmc (and change nothing).  Those
-# rows are skipped, by name, only when this process is under a seccomp
-# filter and a native xattr write gets ENOTSUP (95).
-xattr_blocked=0
-: > "$FD/xa"
-if grep -q '^Seccomp:[[:space:]]*2' /proc/self/status; then
-	(cd "$FD" && timeout 30 "$B/proc/files" 0 xattrprobe "$FD/xa" 3>"$FD/xa.state" > /dev/null 2>&1)
-	[ "$(od -An -tu1 "$FD/xa.state" | tr -s ' \n' ' ' | cut -d' ' -f7)" = 95 ] && xattr_blocked=1
-fi
-echo "files: xattr probe: seccomp $(grep '^Seccomp:' /proc/self/status | tr -s ' \t' ' '), state '$(od -An -tu1 "$FD/xa.state" 2>/dev/null | tr -s ' \n' ' ')', blocked $xattr_blocked"
-xattr_skip() {	# xattr_skip MODE: true if this host's sandbox answers MODE itself
-	case $1 in *xattr*) [ "$xattr_blocked" = 1 ] ;; *) false ;; esac
-}
 for m in open_wronly openat_rdwr openat_creat openat_trunc openat_append openat_tmpfile openat2 creat \
 	unlink unlinkat rename renameat renameat2 mkdir mkdirat rmdir link linkat symlink symlinkat \
 	truncate mknod mknodat chmod fchmodat fchmodat2 chown lchown fchownat utime utimes futimesat \
