@@ -176,6 +176,13 @@ for o in "" "--refine-steps" "--simulate --seed 1 --walks 20" "--simulate --seed
 	# shellcheck disable=SC2086
 	expect "a binding that fails to evaluate${o:+ ($o)}" 3 "refinement: divide by zero" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-div0.bind" $o
 done
+# a binding over the reply log: repl acks 5 from node 0 once, which a
+# spec with one ack step refines and a spec without any does not
+printf 'module rr\nvar n : 0 .. 1\ninit n == 0\naction ack():\n  when n == 0\n  n%s = 1\ninvariant small: n <= 1\n' "'" > "$OUT/rr.cml"
+sed 's/^module rr$/module rr0/; s/^invariant small: n <= 1$/invariant none: n == 0/' "$OUT/rr.cml" > "$OUT/rr0.cml"
+printf '[map]\nn = "count r in replies : r.src == 0 and r.val == 5"\n' > "$OUT/rr.bind"
+expect "a binding over replies refines one ack" 0 "No error has been found" $(run repl repl) --refine "$OUT/rr.cml" --bind "$OUT/rr.bind" --refine-steps
+expect "a binding over replies sees the ack"    1 "abstract invariant none is violated" $(run repl repl) --refine "$OUT/rr0.cml" --bind "$OUT/rr.bind"
 # a binding reads a byte past the nodes or past a node's record as -1
 printf '[fields]\ncval = 0\n[map]\nc = "node[0].cval + node[5][0] + node[0][40] + 2"\n' > "$OUT/mono-past.bind"
 expect "a binding reads past the record as -1" 0 "No error has been found" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-past.bind" --refine-steps
@@ -998,6 +1005,11 @@ echo "-- partitions: a cut link holds segments back until it heals"
 sed 's/^\[environment\]/[environment]\npartitions = 1/' "$T/repl.model" > "$OUT/repl-cut.model"
 expect_by 300 "partitions: repl holds with a cut link"     0 "28 distinct states" $(runx "$OUT/repl-cut.model" repl)
 expect_by 300 "partitions: repl's bug is still caught"     1 "agree_on_ack is violated" $(runx "$OUT/repl-cut.model" repl-bug)
+# a poll loop's wake waits for a cut link to heal: more worlds (5
+# without partitions), the same verdicts
+sed '/^\[invariants\]/i [environment]\npartitions = 1\n' "$T/pollloop.model" > "$OUT/pollloop-cut.model"
+expect_by 300 "partitions: pollloop holds with a cut link"  0 "20 distinct states" $(runx "$OUT/pollloop-cut.model" pollloop)
+expect_by 300 "partitions: pollloop's bug is still caught"  1 "stored_ok is violated" $(runx "$OUT/pollloop-cut.model" pollloop-bug)
 $CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpsem.c does not build"; fail=1; }
 printf '[target]\nbinary = %s\nnodes = 2\nargs = rstdata\n[environment]\npartitions = 1\n[invariants]\nx = "1 == 1"\n' "$B/proc/tcpsem" > "$OUT/rstcut.model"
 expect_by 120 "partitions: an RST across a cut link is refused" 3 "an RST held back by a partition is not modelled" --model-file "$OUT/rstcut.model"
