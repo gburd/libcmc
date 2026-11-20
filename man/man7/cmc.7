@@ -44,6 +44,17 @@ The checker answers every
 .Fn accept ,
 .Fn read ,
 .Fn write ,
+.Fn readv ,
+.Fn writev ,
+.Fn sendmsg ,
+.Fn recvmsg ,
+.Fn shutdown ,
+.Fn dup
+.Pf ( Fn dup2 , Fn dup3 ) ,
+.Fn getsockopt ,
+.Fn setsockopt ,
+.Fn getsockname ,
+.Fn getpeername ,
 .Fn close ,
 .Fn poll
 .Pf ( Fn ppoll ) ,
@@ -232,9 +243,48 @@ and a socket call on the wrong kind of descriptor gets Linux's errno
 .Er EBADF ) .
 A non-blocking
 .Fn connect
-is refused, since its completion through
+returns
+.Er EINPROGRESS ,
+as on Linux, and its handshake completes when the search says
+.Pq the CONNECT action :
+into the backlog of a live peer, or refused by one that is down.
+A call that looks at the socket before then
+.Pq a read, a write, Fn poll , Fn getsockopt
+is a choice between the two orders.
+While the handshake is out, reads and writes get
+.Er EAGAIN
+and
+.Fn connect
+gets
+.Er EALREADY ;
+once it is refused, the first of
+.Fn getsockopt Dv SO_ERROR ,
+a read, a write or
+.Fn connect
+reports
+.Er ECONNREFUSED .
+A blocking call on such a socket, and a non-blocking
+.Fn connect
+in a node with more than one thread, are refused.
+.Fn setsockopt
+records
+.Dv SO_KEEPALIVE ,
+.Dv SO_REUSEADDR ,
+.Dv SO_REUSEPORT
+and
+.Dv TCP_NODELAY ,
+which
 .Fn getsockopt
-is not modelled.
+reads back and which change nothing else, and accepts
+.Dv SO_RCVBUF
+and
+.Dv SO_SNDBUF
+with no effect; any other option is refused.
+.Fn getsockname
+and
+.Fn getpeername
+report 127.0.0.1, port 20000 + i for node i's listener, and a fixed
+port per dialling socket.
 On a descriptor the checker owns,
 .Fn lseek
 gets
@@ -416,6 +466,28 @@ discards it.
 Drop budget is left: a connection carrying bytes is reset.
 Its queues are discarded and each end's next call fails with
 .Er ECONNRESET .
+.It CONNECT
+A non-blocking
+.Fn connect
+is still handshaking: it completes, into the peer's backlog or refused.
+.It SHORT
+Short-write budget is left and a node is about to send on a
+non-blocking connection whose earlier bytes are still in flight: the
+send gets
+.Er EAGAIN
+or sends only 1, half, or all but one of its bytes, and the send
+buffer is full until the peer reads.
+Any buffer can fill this way, which no real load needs; the search
+finds more, never less.
+.It CUT(a, b)
+Partition budget is left: the link from node a to node b is cut.
+Bytes, FINs and handshakes from a to b wait, in order, until it heals;
+the link from b to a is not affected.
+An RST that would cross a cut link, and a blocking
+.Fn connect
+across one, are refused.
+.It HEAL(a, b)
+The link from a to b is cut: it heals, and what waited may move.
 .It RESTART
 Restart budget is left and a node has crashed: it is relaunched as a
 fresh process.
@@ -702,6 +774,27 @@ the writer's disposition decides (a handler, or the signal blocked, is
 refused).
 A write to a peer that closed cleanly succeeds once, then fails the same
 way.
+.Fn shutdown
+with
+.Dv SHUT_WR
+sends a FIN, and a later write fails with
+.Er EPIPE ;
+with
+.Dv SHUT_RD
+a read with nothing queued returns 0 at once; once both are shut,
+bytes arriving are answered with an RST.
+A
+.Fn dup
+of a connection shares it, and its
+.Dv O_NONBLOCK ,
+until the last number is closed; a dup of any other descriptor the
+checker owns is refused.
+Vector reads and writes act as one
+.Fn read
+or
+.Fn write
+of the iovec array's bytes; ancillary data and a destination address
+are refused.
 An exited listener resets the dials still in its backlog.
 A
 .Fn connect

@@ -31,9 +31,8 @@ model gives.  None of this page makes a pass mean more than that.
 
 The engine runs each node as a real process under seccomp user
 notification and answers the system calls below.  The file system is
-read-only to a node (see below).  `readv`, `writev`,
-`pread`, `pwrite`, `sendmsg`, `recvmsg`, `sendmmsg`, `recvmmsg`, `shutdown`, the
-`dup` family, `getsockopt`, `getsockname`, `getpeername`, `ioctl`,
+read-only to a node (see below).
+`pread`, `pwrite`, `sendmmsg`, `recvmmsg`, `ioctl`,
 `splice` and `sendfile` are refused on a checker-owned fd (exit 3), and
 run in the kernel on any other.  Every other system call runs
 in the kernel, untouched.
@@ -42,10 +41,12 @@ in the kernel, untouched.
 
 | construct | status | limit | gate |
 |---|---|---|---|
-| `socket`, `bind`, `listen`, `setsockopt` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i; options are accepted and ignored | proc_gate verdicts, "a UDP socket is refused", syscorner ipv6 |
+| `socket`, `bind`, `listen` | exact enough | `AF_INET`, `SOCK_STREAM` only (anything else is refused); node i listens on 127.0.0.1:20000+i | proc_gate verdicts, "a UDP socket is refused", syscorner ipv6 |
+| `setsockopt`, `getsockopt` | approximate | `SO_KEEPALIVE`, `SO_REUSEADDR`, `SO_REUSEPORT` and `TCP_NODELAY` are recorded, read back and inherited by an accepted socket, and change nothing (no keepalive timer, no Nagle delay, no port reuse); `SO_RCVBUF` and `SO_SNDBUF` may be set and change nothing, and reading them is refused; `SO_ERROR` reads and clears the pending error (`ECONNREFUSED`, `ECONNRESET`, `EPIPE`); any other option is exit 3 | proc_gate nbconnect |
+| `getsockname`, `getpeername` | approximate | 127.0.0.1 everywhere; a listener's port is 20000+i, a dialler's own port is 40000 + 256 i + (fd - 500), not an ephemeral port; `ENOTCONN` with no peer; `getsockname` of a socket not connected is exit 3 | proc_gate nbconnect |
 | a socket call on the wrong kind of fd (an eventfd, an epoll instance, a socket in the wrong state, a closed fd) | exact | Linux's errno: `ENOTSOCK`, `EINVAL`, `EISCONN`, `EBADF`; a read of a socket never dialled is `ENOTCONN`, a write `EPIPE` with its `SIGPIPE` | proc_gate syscorner wrongfd, notconn, notconnpipe, against a native run |
 | `fcntl` `O_NONBLOCK` and `FD_CLOEXEC` | exact | each fd keeps its own flags (a connection, the listener, an eventfd, an epoll instance, a socket not yet dialled); other `fcntl` commands on an owned fd are exit 1 | proc_gate syscorner eventfd, nbepoll, selfdial, fcntldup |
-| a non-blocking `connect` | refused | exit 3; `EINPROGRESS` and `getsockopt(SO_ERROR)` are not modelled | proc_gate syscorner nbclient |
+| a non-blocking `connect` | exact, single-threaded | `EINPROGRESS` always; the handshake completes when the search says (CONNECT), into the backlog of a live peer or refused by one that is down, and any call on the socket before then is a choice between both outcomes; while it is out, reads and writes are `EAGAIN`, `connect` is `EALREADY`, `SO_ERROR` 0, `poll` not ready; once refused, the first of `SO_ERROR`, a read, a write or `connect` reports `ECONNREFUSED`, then a read is 0, a write `EPIPE`, `connect` `ECONNABORTED`; `POLLOUT` with `POLLERR`, `POLLHUP` as Linux reports them; a blocking call on a socket still handshaking, or a non-blocking connect in a node with more than one thread, is exit 3 | proc_gate nbconnect ok, early, refused, against a native run |
 | `connect` to a live node | approximate | always succeeds and waits at the listener, even before the peer calls `listen()` | proc_gate verdicts |
 | `connect` to a node that is down | exact | `ECONNREFUSED`; later reads `ENOTCONN`, writes `EPIPE`; the socket may be dialled again | proc_gate "a dead node refuses the connection", tcpsem redial |
 | `accept`, `accept4` | exact | which waiting dialler is a search choice; per dialler, oldest first; the sockaddr out-parameter is not filled; `accept4` flags other than `SOCK_CLOEXEC` are refused | proc_gate verdicts, "accept4 SOCK_NONBLOCK is refused" |
@@ -53,6 +54,11 @@ in the kernel, untouched.
 | one queue per connection direction | exact | FIFO; two connections between one node pair never share bytes | proc_gate crossrpc, fifo |
 | `read`, `recvfrom` | approximate | one read takes at most one write's bytes; a short read leaves the rest queued; any `recvfrom` flag or source address is refused | proc_gate verdicts, "MSG_PEEK is refused" (the short read: code only, no fixture yet) |
 | `write`, `sendto` | approximate | at most `[target] max_write` bytes (default 64, cap 4096) per call; a longer write is exit 1; `sendto` flags other than `MSG_NOSIGNAL`, or a destination address, are refused | proc_gate bigmsg |
+| `readv`, `writev`, `sendmsg`, `recvmsg` | as `read` and `write` | the iovec array is gathered or scattered whole, its total within `[target] max_write`; up to 16 entries for a read; `recvmsg` sets `msg_namelen` and `msg_flags` to 0; a destination address, ancillary data, a `recvmsg` flag or a `sendmsg` flag other than `MSG_NOSIGNAL` is exit 3; a count past 1024 is `EINVAL` | proc_gate sockapi iov, "sendmsg with ancillary data is refused" |
+| `shutdown` | exact | `SHUT_WR` sends a FIN and a later write fails `EPIPE`; `SHUT_RD` makes an empty read return 0 at once while bytes queued or arriving are still read; once both are shut, bytes arriving are answered with an RST; `ENOTCONN` on a socket not connected, refused, reset, or past both FINs; a listener's or a timer connection's shutdown is exit 3 | proc_gate sockapi shut |
+| `dup`, `dup2`, `dup3` of a connection | exact | the new number shares the connection, its queue, `O_NONBLOCK` and options; `FD_CLOEXEC` is its own; the socket stays open until its last number closes; a dup of any other owned fd, or onto a fd that is open or below 500, is exit 3 | proc_gate sockapi dup, edges dup2, dup3 |
+| a full send buffer (`short_writes`) | approximate | a non-blocking send with bytes of its connection still in flight may get `EAGAIN` or send 1, half, or all but one of its bytes; then sends get `EAGAIN` and `POLLOUT` is not reported until the peer reads; any buffer size can fill, and only those counts are offered; a blocking send is never cut short | proc_gate shortw |
+| a network partition (`partitions`) | approximate | a budgeted CUT of a directed link holds back its bytes, FINs and handshakes, in order, until a HEAL; asymmetric cuts included; an RST across a cut link, and a blocking connect across one, are exit 3; the client is never cut off | proc_gate partitions |
 | `close` | exact | FIN, or RST when bytes were left unread; bytes already sent stay readable | proc_gate rstwrite, rstignore, tcpsem rstdata |
 | a reset connection | exact | the reset reported once (`ECONNRESET`, or `EPIPE` after a FIN), then reads 0 and writes `EPIPE` | proc_gate rstwrite, rstignore, reset, tcpsem finwrite |
 | an exited listener's backlog | exact | each waiting dial is reset | proc_gate tcpsem backlog |

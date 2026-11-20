@@ -669,7 +669,6 @@ scm() {	# scm MODE EXIT NEEDLE
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[invariants]\nany = "node[0][0] < 9"\n' "$B/proc/syscorner" "$1" > "$SC/r-$1.model"
 	expect_by 60 "syscorner $1: $3" "$2" "$3" --model-file "$SC/r-$1.model"
 }
-scm nbclient 3 "a non-blocking connect (EINPROGRESS) is not modelled"
 scm robufefd 3 "an eventfd read at an address it does not own"
 printf '[target]\nbinary = %s\nnodes = 2\nargs = durread\n[invariants]\nfresh = "node[0][0] < 1 or (node[0][1] == 1 and node[0][2] == 1 and node[0][3] == 1)"\nreached = "eventually node[0][0] == 1"\n' "$B/proc/syscorner" > "$SC/durread.model"
 expect_by 60 "syscorner durread: a fresh durable record reads EOF, fsyncs, cannot seek" 0 "No error has been found" --model-file "$SC/durread.model"
@@ -696,6 +695,90 @@ scm bigwrite 1 "writes 4096 bytes in one call"
 printf '[target]\nbinary = %s\nnodes = 2\nargs = notconnpipe\n[invariants]\nnever = "node[0][0] < 1"\nkilled = "eventually node[0][0] < 1"\n' "$B/proc/syscorner" > "$SC/r-notconnpipe.model"
 expect_by 60 "syscorner notconnpipe: SIGPIPE ends the writer" 0 "No error has been found" --model-file "$SC/r-notconnpipe.model"
 scm connect 3 "connects to port 20099, which is no node's"
+
+echo "-- a libpq-style client: non-blocking connect, POLLOUT, SO_ERROR"
+# nbconnect.c makes the socket calls libpq's connectDBStart() and
+# PQconnectPoll() make.  Each mode runs natively on loopback (the server
+# first, except in refused, where nothing listens), and its record is
+# then the model's invariant: cmc must reach it and no other.  On 2.1.0
+# the first non-blocking connect ended the check (exit 3).
+$CC -O1 -no-pie -w -o "$B/proc/nbconnect" "$T/nbconnect.c" || { echo "proc_gate: nbconnect.c does not build"; fail=1; }
+NB=$OUT/nbconnect
+mkdir -p "$NB"
+# record_model BINARY MODE STATEFILE ENV MODEL: a model whose invariants
+# say node 0's finished record is the one in STATEFILE, eight bytes to
+# an invariant, and that it is reached
+record_model() {
+	# shellcheck disable=SC2046
+	set -- "$1" "$2" "$4" "$5" $(od -An -tu1 "$3" | tr -s ' \n' ' ')
+	bin=$1 mode=$2 env=$3 model=$4; shift 4
+	if [ $# -lt 3 ]; then return 1; fi
+	shift 2; shift
+	invs="" cond="" k=0
+	for v in "$@"; do
+		cond="$cond and node[0][$k] == $v"; k=$((k + 1))
+		if [ $((k % 8)) = 0 ] || [ $k = $# ]; then
+			invs="${invs}linux$k = \"node[0][0] < 1 or (${cond# and })\"\n"; cond=""
+		fi
+	done
+	# a finished record must be reached, named by its last two bytes
+	# (nbconnect ends its record in two check bytes over it); a mode
+	# whose other records are Linux's too (early) asks only that
+	[ "$mode" = early ] && invs=""
+	eval "h1=\${$(($# - 1))} h2=\${$#}"
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[invariants]\n%breached = "eventually node[0][0] == 1 and node[0][%d] == %s and node[0][%d] == %s"\n' \
+		"$bin" "$mode" "$env" "$invs" "$((k - 2))" "$h1" "$((k - 1))" "$h2" > "$model"
+}
+for m in ok early refused; do
+	(
+		cd "$NB" || exit 1
+		if [ "$m" != refused ]; then timeout 30 "$B/proc/nbconnect" 1 "$m" 3>/dev/null > /dev/null 2>&1 & sleep 0.1; fi
+		timeout 30 "$B/proc/nbconnect" 0 "$m" 3>"$NB/$m.state" > /dev/null 2>&1
+		wait
+	)
+	if ! record_model "$B/proc/nbconnect" "$m" "$NB/$m.state" "timeouts = 0" "$NB/$m.model"; then
+		echo "FAIL nbconnect $m: the native run left no record"; fail=1; continue
+	fi
+	expect_by 120 "nbconnect $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$NB/$m.model"
+done
+
+echo "-- the socket calls past read and write"
+# sockapi.c dials its own listener and records each call's outcome, so
+# it runs the same natively and under cmc: cmc must reach Linux's
+# record and no other.  On 2.1.0 each of these calls on a checker-owned
+# socket ended the check (exit 3).
+$CC -O1 -no-pie -w -o "$B/proc/sockapi" "$T/sockapi.c" || { echo "proc_gate: sockapi.c does not build"; fail=1; }
+for m in iov shut dup opts; do
+	(cd "$NB" && timeout 30 "$B/proc/sockapi" 0 "$m" 3>"$NB/sa-$m.state" > /dev/null 2>&1)
+	if ! record_model "$B/proc/sockapi" "$m" "$NB/sa-$m.state" "timeouts = 0" "$NB/sa-$m.model"; then
+		echo "FAIL sockapi $m: the native run left no record"; fail=1; continue
+	fi
+	expect_by 60 "sockapi $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$NB/sa-$m.model"
+done
+
+echo "-- short writes: a full send buffer as a budgeted choice"
+# shortw.c sends on a non-blocking socket; the correct writer resends
+# after a short write or EAGAIN, the -DBUG one ignores the count, which
+# loses bytes only when the buffer fills.  On 2.1.0 a send always
+# succeeded whole, so the bug passed.
+$CC -O1 -no-pie -w -o "$B/proc/shortw" "$T/shortw.c" || { echo "proc_gate: shortw.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/shortw-bug" "$T/shortw.c" || { echo "proc_gate: shortw.c -DBUG does not build"; fail=1; }
+sed 's/short_writes = 2/short_writes = 0/' "$T/shortw.model" > "$OUT/shortw0.model"
+expect_by 120 "shortw: a writer that resends holds"            0 "No error has been found" $(run shortw shortw)
+expect_by 120 "shortw: a writer that ignores the count is caught" 1 "whole is violated" $(run shortw shortw-bug)
+expect_by 120 "shortw: the bug needs a full buffer"           0 "No error has been found" $(runx "$OUT/shortw0.model" shortw-bug)
+
+echo "-- partitions: a cut link holds segments back until it heals"
+# partitions = N lets the search cut a directed link between two nodes
+# and heal it later; bytes, FINs and handshakes on it wait.  The counts
+# pin that cut and healed worlds are searched (repl without partitions:
+# 7 distinct states).  An RST that would cross a cut link is refused.
+sed 's/^\[environment\]/[environment]\npartitions = 1/' "$T/repl.model" > "$OUT/repl-cut.model"
+expect_by 300 "partitions: repl holds with a cut link"     0 "28 distinct states" $(runx "$OUT/repl-cut.model" repl)
+expect_by 300 "partitions: repl's bug is still caught"     1 "agree_on_ack is violated" $(runx "$OUT/repl-cut.model" repl-bug)
+$CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpsem.c does not build"; fail=1; }
+printf '[target]\nbinary = %s\nnodes = 2\nargs = rstdata\n[environment]\npartitions = 1\n[invariants]\nx = "1 == 1"\n' "$B/proc/tcpsem" > "$OUT/rstcut.model"
+expect_by 120 "partitions: an RST across a cut link is refused" 3 "an RST held back by a partition is not modelled" --model-file "$OUT/rstcut.model"
 
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end
@@ -867,8 +950,8 @@ expect "unmodelled: EFD_SEMAPHORE is refused"            3 "EFD_SEMAPHORE" --mod
 expect "unmodelled: a fork is refused"                   3 "forks a second process" --model-file "$OUT/u-fork.model"
 # calls and flags the model does not answer are refused, not passed to a
 # kernel that has no such socket, or ignored
-expect "unmodelled: writev on an owned fd is refused"     3 "checker-owned fd" --model-file "$OUT/u-writev.model"
-expect "unmodelled: sendmsg on an owned fd is refused"    3 "checker-owned fd" --model-file "$OUT/u-sendmsg.model"
+expect "unmodelled: a writev past max_write is refused"   1 "in one vector call; the limit is 64" --model-file "$OUT/u-writev.model"
+expect "unmodelled: sendmsg with ancillary data is refused" 3 "ancillary data is not modelled" --model-file "$OUT/u-sendmsg.model"
 expect "unmodelled: MSG_PEEK is refused"                  3 "recvfrom flags" --model-file "$OUT/u-peek.model"
 expect "unmodelled: accept4 SOCK_NONBLOCK is refused"     3 "accept4 flags" --model-file "$OUT/u-nbaccept.model"
 expect "unmodelled: a UDP socket is refused"              3 "is not modelled" --model-file "$OUT/u-udp.model"

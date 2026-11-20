@@ -53,6 +53,8 @@
 #include <linux/futex.h>
 #include <linux/sched.h>			/* CLONE_THREAD, struct clone_args */
 #include <linux/seccomp.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <signal.h>
 #include <dirent.h>
@@ -138,7 +140,7 @@ static struct
 	char		binary[4096];	/* [target] binary, resolved against the file's directory */
 	int			nodes;
 	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
-	int			timeouts, crashes, drops, restarts;
+	int			timeouts, crashes, drops, restarts, short_writes, partitions;
 	int			max_write;		/* largest single write a node may make (<= MSGLEN) */
 	char		args[512];		/* extra argv after the node id, space-separated (e.g. flags) */
 	long		depth;			/* -1 = unbounded */
@@ -236,6 +238,10 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.crashes = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "drops"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.drops = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "short_writes"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.short_writes = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "partitions"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.partitions = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "restarts"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.restarts = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
@@ -598,6 +604,7 @@ check_invariant(const char *expr)
 /* =================================================================== */
 #define MAXTHREAD 8				/* threads tracked per node (tid slots) */
 #define MAXEPITEM 16			/* fds in one epoll instance's interest list */
+#define MAXRIOV 16				/* iovec entries of a readv or recvmsg */
 
 /* An epoll instance (epoll_create1).  Unlike poll(), whose fd set is
  * passed afresh on every call, an epoll instance holds a PERSISTENT
@@ -613,6 +620,11 @@ check_invariant(const char *expr)
 #define FD_NB 1					/* O_NONBLOCK */
 #define FD_CX 2					/* FD_CLOEXEC */
 #define FD_PLAIN 4				/* a socket() not yet connected or listening */
+/* sockopt bits: the boolean options setsockopt accepts and records */
+#define SO_B_KEEPALIVE 1
+#define SO_B_REUSEADDR 2
+#define SO_B_REUSEPORT 4
+#define SO_B_NODELAY 8
 
 typedef struct {
 	int epfd;					/* the virtual fd epoll_create1 returned */
@@ -644,6 +656,10 @@ typedef struct {
 	 * registered for pollfds[k] (epoll_event.data), returned verbatim. */
 	int epoll_fd; int poll_maxevents; uint64_t polldata[MAXPOLL];
 	int poll_woke_fd;			/* -1, or the channel fd a poll wake marked ready: its next read delivers (not EAGAIN) */
+	/* a readv or recvmsg: niov entries of the iovec array the bytes are
+	 * scattered over (0 for a read into one buffer), and recvmsg's
+	 * msghdr, whose msg_namelen and msg_flags the answer sets (0 else) */
+	int vecread, niov; uint64_t iovb[MAXRIOV]; uint64_t iovl[MAXRIOV]; uint64_t block_msg;
 	uint64_t futex_addr;		/* BK_FUTEX: the futex word this thread waits on */
 	/* the thread's latest notification: the call, its arguments, the
 	 * address of its syscall instruction and, in a node with more than one
@@ -672,6 +688,12 @@ typedef struct {
 	 * connection nor the listener: a socket not yet dialled or listening
 	 * (FD_PLAIN), an eventfd's FD_CLOEXEC, an epoll instance's flags */
 	unsigned char fdflag[MAXOWNED];
+	/* the socket options of each owned socket fd (index fd - 500), SO_*
+	 * bits below, as getsockopt reads them back; none changes the model */
+	unsigned char sockopt[MAXOWNED];
+	/* dup: for an owned fd that is a second number for a connection,
+	 * the fd it duplicates (which holds the connection slot); 0 else */
+	int dupof[MAXOWNED];
 	int listener_fd;			/* the fd passed to listen(), or -1; the server's accept fd */
 	int pend[MAXCONN]; int npend;	/* connections waiting at this node's listener, oldest first */
 	int efd[MAXEFD]; uint64_t efdval[MAXEFD]; int efdnb[MAXEFD]; int nefd;
@@ -707,8 +729,12 @@ static int g_unchecked_node, g_weak_seen;
  * fingerprint).  BK_DONE holds an answer the search has yet to send.  A
  * clone leaves two threads in ptrace stops, each released by a RUN:
  * BK_NEWBORN is the new thread before its first instruction, and
- * BK_CLONED the parent at the clone's return. */
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8 };
+ * BK_CLONED the parent at the clone's return.  BK_CONNWAIT is a call,
+ * not yet carried out, whose answer depends on whether a non-blocking
+ * connect's handshake has completed (see connwait()).  BK_SHORTW is a
+ * write, not yet carried out, that the search may cut short (see
+ * shortwait()). */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10 };
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
 
@@ -833,6 +859,15 @@ typedef struct {
 	int refused;				/* the dial was refused: end 0 is unconnected */
 	int eof[2];					/* this end has read the FIN */
 	int seq[2];					/* sends so far toward each end, for FIFO order */
+	/* A non-blocking connect.  connecting: the handshake is still out
+	 * (SYN_SENT); a search action (A_CONNECT) completes it, into the
+	 * peer's backlog or refused.  nbdial: the dialler's socket is still
+	 * in Linux's SS_CONNECTING, so its next connect() reports the outcome
+	 * (0, or the pending error or ECONNABORTED). */
+	int connecting, nbdial;
+	int lport;					/* the dialler's local port, for getsockname and getpeername */
+	int shut_wr[2], shut_rd[2];	/* shutdown() of this end's sending, receiving side */
+	int full[2];				/* this end's send buffer is full (a SHORT write): writes EAGAIN, no POLLOUT */
 } Conn;
 static Conn conns[MAXCONNS];
 
@@ -874,6 +909,7 @@ writable(Node *nd, int fd)
 	return (*fd_flags(nd, fd) & FD_PLAIN) ? POLLOUT | POLLHUP : 0;
 }
 
+
 /* What kind of checker-owned fd fd is, for a socket call that Linux
  * answers by its kind: a connection, the listener, an eventfd, an epoll
  * instance, a socket not yet dialled or listening, or nothing open.
@@ -891,6 +927,53 @@ fd_kind(Node *nd, int fd)
 	if (ep_slot(nd, fd) >= 0) return K_EPOLL;
 	if (fd - 500 < MAXOWNED && (nd->fdflag[fd - 500] & FD_PLAIN)) return K_PLAIN;
 	return K_NONE;
+}
+
+/* The local port of a dial from node nd's socket fd, as getsockname
+ * reports it.  Linux picks an ephemeral port; the model names one per
+ * node and fd so it never collides, and a program that depends on its
+ * value is outside the model. */
+static int
+local_port(const Node *nd, int fd)
+{
+	return 40000 + nd->id * MAXOWNED + (fd - 500);
+}
+
+/* What poll reports at once for owned fd fd asked for events, with no
+ * search choice: POLLNVAL for nothing open, the writability above, an
+ * eventfd's count, and a dial's settled outcome.  A connection still
+ * handshaking (a non-blocking connect) reports nothing until the search
+ * completes it (A_CONNECT).  A refused dial reports as Linux does, as
+ * measured on loopback: POLLHUP always, POLLERR while the error is
+ * unread, and POLLIN and POLLOUT while the socket is still the one the
+ * non-blocking connect left (nbdial) or the error is unread; after a
+ * blocking refusal only POLLOUT.  Whether a connection is readable
+ * otherwise is the search's (WAKE), not this. */
+static short
+local_ready(Node *nd, int fd, short events)
+{
+	if (fd < 0) return 0;
+	if (fd >= 500 && fd_kind(nd, fd) == K_NONE) return POLLNVAL;
+	int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
+	if (cs >= 0 && nd->cconn[cs] >= 0)
+	{
+		const Conn *cn = &conns[nd->cconn[cs]];
+		if (cn->connecting) return 0;
+		if (cn->full[nd->cend[cs]] && !cn->reset && !cn->err[nd->cend[cs]]) events &= ~POLLOUT;
+		if (!cn->refused && !cn->reset && cn->shut_rd[nd->cend[cs]])
+			return (short) ((events & (POLLIN | POLLOUT)) | (cn->shut_wr[nd->cend[cs]] ? POLLHUP : 0));
+		if (cn->refused)
+		{
+			short r = POLLHUP | (cn->err[0] ? POLLERR : 0);
+			if (cn->err[0] || cn->nbdial) r |= events & (POLLIN | POLLOUT);
+			else r |= events & POLLOUT;
+			return r;
+		}
+	}
+	unsigned out_ev = writable(nd, fd);
+	if ((events & POLLOUT) && out_ev) return (short) out_ev;
+	if (es >= 0 && nd->efdval[es] > 0 && (events & POLLIN)) return POLLIN;
+	return 0;
 }
 
 /* Linux's errno for socket call nr on owned fd fd of the wrong kind, or
@@ -939,8 +1022,29 @@ static Msg bag[MAXMSG];
 static unsigned char rep_src[MAXREP], rep_val[MAXREP]; static int nrep;
 
 /* environment budgets left on this path; part of the fingerprint */
-typedef struct { int timeouts, crashes, drops, restarts; } Budget;
+typedef struct { int timeouts, crashes, drops, restarts, short_writes, partitions; } Budget;
 static Budget bud;
+/* The network's cut links: cut[a][b] holds back every segment from node
+ * a to node b (bytes, FINs and handshakes wait, as TCP retransmits
+ * them) until the link heals.  Part of the world. */
+static unsigned char g_cut[MAXNODES][MAXNODES];
+/* may a segment travel from node a to node b now?  The client (-1)
+ * and a node's connection to itself are never cut */
+static int link_up(int a, int b) { return a < 0 || b < 0 || !g_cut[a][b]; }
+/* may a segment reach end `to` of connection conn: the link from the
+ * other end's node to this one is up */
+#define CONN_UP(conn, to) link_up(conns[conn].node[1 - (to)], conns[conn].node[to])
+/* An RST from node a to node b is about to be reported at b at once.
+ * The model has an RST arrive with no delay; across a cut link it
+ * would wait, and holding it back is not modelled, so the check ends
+ * rather than answering as if the link were up. */
+static void die(int code, const char *fmt, ...);
+static void
+rst_path(int a, int b)
+{
+	if (!link_up(a, b))
+		die(3, "node %d resets a connection to node %d across a cut link; an RST held back by a partition is not modelled", a, b);
+}
 
 /* M5b: the logical clock the checker owns.  It starts at a base and
  * advances by LEASE_TICK only when the checker fires a timeout, so a
@@ -1238,7 +1342,7 @@ launch(Node *nd)
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
 	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
-	memset(nd->fdflag, 0, sizeof nd->fdflag); nd->execd = 0;
+	memset(nd->fdflag, 0, sizeof nd->fdflag); memset(nd->sockopt, 0, sizeof nd->sockopt); memset(nd->dupof, 0, sizeof nd->dupof); nd->execd = 0;
 	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0; nd->race_ok = 0;
 	return 0;
 }
@@ -1396,6 +1500,7 @@ efd_slot(Node *nd, int fd)
 static int
 cfd_slot(Node *nd, int fd)
 {
+	if (fd >= 500 && fd - 500 < MAXOWNED && nd->dupof[fd - 500]) fd = nd->dupof[fd - 500];
 	for (int i = 0; i < nd->nc; i++)
 		if (nd->cfd[i] == fd) return i;
 	return -1;
@@ -1661,10 +1766,11 @@ end_close(int conn, int e, int dead)
 		if (conn_has_data(conn, e))
 		{
 			conn_discard_to(conn, e);
+			rst_path(cn->node[e], cn->node[1 - e]);
 			cn->reset = 1; cn->err[1 - e] = reset_errno(conn, 1 - e);
 			rst_notify(conn, 1 - e);
 		}
-		else bag_add(conn, 1 - e, NULL, 0, 1);
+		else if (!cn->shut_wr[e]) bag_add(conn, 1 - e, NULL, 0, 1);
 	}
 	conn_maybe_free(conn);
 }
@@ -1746,6 +1852,9 @@ visible(long nr, const __u64 *a)
 		case SYS_setsockopt: case SYS_bind: case SYS_listen: case SYS_connect:
 		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
 		case SYS_close: case SYS_fcntl:
+		case SYS_readv: case SYS_writev: case SYS_recvmsg: case SYS_sendmsg:
+		case SYS_shutdown: case SYS_getsockopt: case SYS_getsockname: case SYS_getpeername:
+		case SYS_dup: case SYS_dup2: case SYS_dup3:
 		{
 			int fd = (int) a[0];
 			return fd >= 500 || fd == 3 || fd == DURABLE_FD;
@@ -1774,7 +1883,9 @@ crash_point(const Node *nd, long nr, const __u64 *a)
 	switch (nr)
 	{
 		case SYS_write: return fd >= 500 || fd == DURABLE_FD;
-		case SYS_sendto: case SYS_close: return fd >= 500;
+		case SYS_sendto: case SYS_close: case SYS_writev: case SYS_sendmsg:
+		case SYS_shutdown:
+			return fd >= 500;
 		default: return 0;
 	}
 }
@@ -1868,6 +1979,14 @@ serve_hook(Node *nd, const __u64 *a)
 }
 
 static int serve(Node *nd, Thread *th);
+static void put_read(Node *nd, Thread *th, const unsigned char *body, int k);
+static int carry_out(Node *nd, Thread *th);
+static int connwait(const Node *nd, long nr, const __u64 *a);
+static int shortwait(Node *nd, long nr, const __u64 *a);
+static int read_iov(Node *nd, uint64_t addr, long cnt, int *total);
+/* -1, or the count a SHORT action makes the write being carried out
+ * return (0 for EAGAIN) */
+static int g_short = -1;
 static void birth(Node *nd, Thread *th);
 static void reap_tid(pid_t tid);
 
@@ -1908,6 +2027,123 @@ stack_pointer(const Node *nd, const Thread *th)
 	return 0;
 }
 
+/* Is owned fd fd of node nd a connection whose handshake is still out? */
+static int
+fd_connecting(Node *nd, int fd)
+{
+	int cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	return cs >= 0 && nd->cconn[cs] >= 0 && conns[nd->cconn[cs]].connecting;
+}
+
+/* Does call nr of node nd observe a socket whose non-blocking connect
+ * has not completed?  On Linux the handshake completes on its own time
+ * (on loopback, before connect() even returns), so such a call may see
+ * it done or not.  The call is parked unserved (BK_CONNWAIT) and the
+ * search chooses: complete the handshake first (CONNECT) or carry the
+ * call out as still connecting (RUN).  A poll or epoll_wait that watches
+ * such a socket counts too.  Only a node with one thread dials this way
+ * (serve() refuses the rest). */
+static int
+connwait(const Node *cnd, long nr, const __u64 *a)
+{
+	Node *nd = (Node *) cnd;
+	if (node_multi(nd)) return 0;
+	switch (nr)
+	{
+		case SYS_poll: case SYS_ppoll:
+		{
+			int n = (int) a[1];
+			struct pollfd pfs[MAXPOLL];
+			if (n <= 0 || n > MAXPOLL) return 0;
+			if (cr_read(nd->pid, a[0], pfs, (size_t) n * sizeof pfs[0]) != (size_t) n * sizeof pfs[0]) return 0;
+			for (int i = 0; i < n; i++) if (fd_connecting(nd, pfs[i].fd)) return 1;
+			return 0;
+		}
+		case SYS_epoll_wait: case SYS_epoll_pwait:
+		{
+			int eps = ep_slot(nd, (int) a[0]);
+			if (eps < 0) return 0;
+			for (int i = 0; i < nd->ep[eps].nit; i++) if (fd_connecting(nd, nd->ep[eps].fd[i])) return 1;
+			return 0;
+		}
+		case SYS_read: case SYS_write: case SYS_recvfrom: case SYS_sendto:
+		case SYS_readv: case SYS_writev: case SYS_recvmsg: case SYS_sendmsg:
+		case SYS_connect: case SYS_getsockopt: case SYS_getpeername:
+		case SYS_shutdown: case SYS_close:
+			return fd_connecting(nd, (int) a[0]);
+		default:
+			return 0;
+	}
+}
+
+/* RUN a thread parked in BK_CONNWAIT: carry its call out now, with the
+ * handshake as it stands.  The notification is rebuilt from what the
+ * thread recorded when it arrived. */
+static void
+run_connwait(Node *nd, Thread *th)
+{
+	memset(g_req, 0, g_sz.seccomp_notif);
+	g_req->id = th->block_id; g_req->pid = (__u32) th->tid;
+	g_req->data.nr = (int) th->nr; g_req->data.instruction_pointer = th->ip;
+	memcpy(g_req->data.args, th->args, sizeof th->args);
+	memset(g_resp, 0, g_sz.seccomp_notif_resp); g_resp->id = g_req->id;
+	th->block_kind = 0;
+	carry_out(nd, th);
+}
+
+/* Would write call nr of node nd, on a non-blocking connection a peer
+ * reads, be a point where its send buffer may be full?  While the
+ * short_writes budget lasts, such a write is parked unserved and the
+ * search chooses: carry it out whole (RUN), or cut it short (SHORT,
+ * see short_counts()).  A node with more than one thread is not
+ * offered this (its writes already park as visible calls). */
+static int
+shortwait(Node *nd, long nr, const __u64 *a)
+{
+	if (bud.short_writes <= 0 || node_multi(nd)) return 0;
+	if (nr != SYS_write && nr != SYS_sendto && nr != SYS_writev && nr != SYS_sendmsg) return 0;
+	int fd = (int) a[0], cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	if (cs < 0 || !nd->cnonblock[cs] || nd->cconn[cs] < 0 || nd->cpeer[cs] < 0) return 0;
+	const Conn *cn = &conns[nd->cconn[cs]];
+	int e = nd->cend[cs];
+	return !cn->connecting && !cn->full[e] && !cn->reset && !cn->refused && !cn->err[e] &&
+		!cn->shut_wr[e] && !cn->closed[1 - e] && conn_has_data(nd->cconn[cs], 1 - e);
+}
+
+/* The length of the write thread th is parked in (BK_SHORTW), as its
+ * arguments give it: a[2], or its iovec array's total. */
+static int
+parked_write_len(Node *nd, const Thread *th)
+{
+	uint64_t iov = th->args[1]; long cnt = (long) th->args[2];
+	int total = 0;
+	if (th->nr == SYS_write || th->nr == SYS_sendto) return (int) th->args[2];
+	if (th->nr == SYS_sendmsg)
+	{
+		struct msghdr mh;
+		if (cr_read(nd->pid, th->args[1], &mh, sizeof mh) != sizeof mh) return 0;
+		iov = (uint64_t) (uintptr_t) mh.msg_iov; cnt = (long) mh.msg_iovlen;
+	}
+	return read_iov(nd, iov, cnt, &total) ? 0 : total;
+}
+
+/* The counts a SHORT action may cut a write of len bytes to: 0 (the
+ * buffer is full: EAGAIN), and a prefix of 1, len / 2 and len - 1
+ * bytes, each once.  Returns how many, written to out[4]. */
+static int
+short_counts(int len, int *out)
+{
+	int n = 0, c[3] = {1, len / 2, len - 1};
+	out[n++] = 0;
+	for (int i = 0; i < 3; i++)
+	{
+		int dup = c[i] < 1 || c[i] >= len;
+		for (int j = 1; j < n; j++) dup |= out[j] == c[i];
+		if (!dup) out[n++] = c[i];
+	}
+	return n;
+}
+
 /* Service one ready notification on node nd without blocking the search.
  * Returns 1 if it did something, 0 if nd had no pending notification.
  * serve() carries the call out.  In a node with one thread its answer is
@@ -1941,6 +2177,26 @@ try_pending_for(Node *nd)
 	memcpy(th->args, a, sizeof th->args);
 	if (node_multi(nd) && kernel_fd_call(nr, a))
 		die(3, "node %d: a thread of a multi-threaded node uses kernel fd %d (system call %ld); only checker-owned fds and the state hook are modelled between threads", nd->id, (int) a[0], nr);
+	if (connwait(nd, nr, a))
+	{
+		th->block_kind = BK_CONNWAIT; th->block_id = g_req->id;
+		return 1;
+	}
+	if (shortwait(nd, nr, a))
+	{
+		th->block_kind = BK_SHORTW; th->block_id = g_req->id;
+		return 1;
+	}
+	return carry_out(nd, th);
+}
+
+/* Carry out notification g_req of thread th, and answer it now, hold
+ * its answer (BK_DONE) or leave it parked, as serve() decides.  Returns
+ * 1. */
+static int
+carry_out(Node *nd, Thread *th)
+{
+	long nr = g_req->data.nr; __u64 *a = g_req->data.args;
 	/* decided before the call is served, which may add or end a thread */
 	int hold = (node_multi(nd) && visible(nr, a)) || crash_point(nd, nr, a);
 	if (hold || nr == SYS_clone || nr == SYS_clone3) th->sp = stack_pointer(nd, th);
@@ -2012,6 +2268,233 @@ birth(Node *nd, Thread *th)
 	if (!nd->race_ok && !g_unchecked_node) g_unchecked_node = nd->id + 1;
 }
 
+/* The sockopt bit of option opt at level lvl, 0 for SO_RCVBUF and
+ * SO_SNDBUF (accepted, not recorded), or -1 for an option not modelled */
+static int
+sockopt_bit(int lvl, int opt)
+{
+	if (lvl == SOL_SOCKET && opt == SO_KEEPALIVE) return SO_B_KEEPALIVE;
+	if (lvl == SOL_SOCKET && opt == SO_REUSEADDR) return SO_B_REUSEADDR;
+	if (lvl == SOL_SOCKET && opt == SO_REUSEPORT) return SO_B_REUSEPORT;
+	if (lvl == IPPROTO_TCP && opt == TCP_NODELAY) return SO_B_NODELAY;
+	if (lvl == SOL_SOCKET && (opt == SO_RCVBUF || opt == SO_SNDBUF)) return 0;
+	return -1;
+}
+
+/* setsockopt and getsockopt on owned socket fd a[0].  The boolean
+ * options SO_KEEPALIVE, SO_REUSEADDR, SO_REUSEPORT and TCP_NODELAY are
+ * recorded and read back, and change nothing else: the model has no
+ * keepalive timer, no Nagle delay and no port reuse.  SO_RCVBUF and
+ * SO_SNDBUF may be set and change nothing (the model has no buffer
+ * sizes); reading them back would need Linux's doubled and clamped
+ * value, so getsockopt of them is refused.  getsockopt(SO_ERROR) reads
+ * and clears the error pending at this end: a refused dial's
+ * ECONNREFUSED or a reset's ECONNRESET or EPIPE, as Linux does.  Any
+ * other option ends the check.  The value lengths are checked as Linux
+ * checks them: setsockopt wants at least an int, and getsockopt copies
+ * at most one. */
+static void
+sock_option(Node *nd, long nr, const __u64 *a)
+{
+	int fd = (int) a[0], lvl = (int) a[1], opt = (int) a[2];
+	int bit = sockopt_bit(lvl, opt);
+	/* a dup shares the socket, and so its options */
+	if (nd->dupof[fd - 500]) fd = nd->dupof[fd - 500];
+	unsigned char *so = &nd->sockopt[fd - 500];
+	if (nr == SYS_setsockopt)
+	{
+		int v;
+		if (bit < 0) die(3, "node %d: setsockopt level %d option %d is not modelled", nd->id, lvl, opt);
+		if ((int) a[4] < (int) sizeof v) { g_resp->error = -EINVAL; return; }
+		if (cr_read(nd->pid, a[3], &v, sizeof v) != sizeof v) { g_resp->error = -EFAULT; return; }
+		*so = (unsigned char) (v ? *so | bit : *so & ~bit);
+		g_resp->val = 0; return;
+	}
+	int v, len;
+	if (lvl == SOL_SOCKET && opt == SO_ERROR)
+	{
+		int cs = cfd_slot(nd, fd);
+		Conn *cn = cs >= 0 && nd->cconn[cs] >= 0 ? &conns[nd->cconn[cs]] : NULL;
+		v = cn ? cn->err[nd->cend[cs]] : 0;
+		if (cn) cn->err[nd->cend[cs]] = 0;
+	}
+	else if (bit > 0) v = (*so & bit) != 0;
+	else die(3, "node %d: getsockopt level %d option %d is not modelled", nd->id, lvl, opt);
+	if (cr_read(nd->pid, a[4], &len, sizeof len) != sizeof len) { g_resp->error = -EFAULT; return; }
+	if (len < 0) { g_resp->error = -EINVAL; return; }
+	if (len > (int) sizeof v) len = sizeof v;
+	if (cr_write(nd->pid, a[3], &v, (size_t) len) != (size_t) len ||
+		cr_write(nd->pid, a[4], &len, sizeof len) != sizeof len)
+		cr_fail(nd->id, "getsockopt returns a value");
+	g_resp->val = 0;
+}
+
+/* getsockname and getpeername on owned fd a[0], as Linux answers them
+ * on loopback: every address is 127.0.0.1, node i's listener and the
+ * connections it accepts are on port 20000 + i, and a dialler's own
+ * port is local_port()'s.  A socket not yet dialled or listening, and
+ * a dial not connected, have no peer (ENOTCONN); getsockname on a plain
+ * socket or a listener would report what bind() was given, which the
+ * model does not keep, so it ends the check.  The length is Linux's: a
+ * negative one is EINVAL, and at most 16 bytes are copied. */
+static void
+sock_name(Node *nd, long nr, const __u64 *a)
+{
+	int fd = (int) a[0], k = fd_kind(nd, fd);
+	if (k == K_NONE || k == K_EFD || k == K_EPOLL) { g_resp->error = k == K_NONE ? -EBADF : -ENOTSOCK; return; }
+	int cs = cfd_slot(nd, fd);
+	const Conn *cn = cs >= 0 && nd->cconn[cs] >= 0 ? &conns[nd->cconn[cs]] : NULL;
+	int port = 0;
+	if (nr == SYS_getpeername)
+	{
+		if (!cn || cn->connecting || cn->refused) { g_resp->error = -ENOTCONN; return; }
+		port = nd->cend[cs] == 0 ? BASE + cn->node[1] : cn->lport;
+	}
+	else if (cn)
+		port = nd->cend[cs] == 0 ? cn->lport : BASE + nd->id;
+	else
+		die(3, "node %d: getsockname on a socket not connected is not modelled", nd->id);
+	struct sockaddr_in sa;
+	int len;
+	memset(&sa, 0, sizeof sa);
+	sa.sin_family = AF_INET;
+	sa.sin_port = htons((unsigned short) port);
+	sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (cr_read(nd->pid, a[2], &len, sizeof len) != sizeof len) { g_resp->error = -EFAULT; return; }
+	if (len < 0) { g_resp->error = -EINVAL; return; }
+	int n = len < (int) sizeof sa ? len : (int) sizeof sa;
+	len = sizeof sa;
+	if (cr_write(nd->pid, a[1], &sa, (size_t) n) != (size_t) n ||
+		cr_write(nd->pid, a[2], &len, sizeof len) != sizeof len)
+		cr_fail(nd->id, "a socket name");
+	g_resp->val = 0;
+}
+
+/* An iovec array of a node, read into the checker: cnt entries at
+ * addr, as readv, writev, sendmsg and recvmsg pass them.  Returns 0, or
+ * Linux's -errno for the array itself: EINVAL for a count below 0 or
+ * past IOV_MAX (1024), EFAULT for an array it cannot read.  A total past
+ * the model's per-call limit ends the check, as a long write does. */
+#define MAXIOV 1024
+static struct iovec g_iov[MAXIOV];
+static int
+read_iov(Node *nd, uint64_t addr, long cnt, int *total)
+{
+	if (cnt < 0 || cnt > MAXIOV) return -EINVAL;
+	size_t want = (size_t) cnt * sizeof g_iov[0];
+	if (cnt > 0 && cr_read(nd->pid, addr, g_iov, want) != want) return -EFAULT;
+	long sum = 0;
+	for (long i = 0; i < cnt; i++)
+	{
+		if ((ssize_t) g_iov[i].iov_len < 0) return -EINVAL;
+		sum += (long) g_iov[i].iov_len;
+		if (sum > M.max_write)
+			die(1, "node %d writes or reads %ld bytes in one vector call; the limit is %d (raise [target] max_write, up to %d)", nd->id, sum, M.max_write, MSGLEN);
+	}
+	*total = (int) sum;
+	return 0;
+}
+
+/* The bytes named by g_iov (n entries, total bytes), gathered into
+ * buf.  Returns 0, -EFAULT when none can be read, as Linux; a buffer
+ * that faults partway ends the check, as for write. */
+static int
+gather_iov(Node *nd, int n, int total, unsigned char *buf)
+{
+	int off = 0;
+	for (int i = 0; i < n; i++)
+	{
+		size_t l = g_iov[i].iov_len;
+		size_t got = cr_read(nd->pid, (uint64_t) (uintptr_t) g_iov[i].iov_base, buf + off, l);
+		if (got < l && off == 0 && got == 0) return -EFAULT;
+		if (got < l) cr_fail(nd->id, "a vector write sends from a buffer that ends");
+		off += (int) l;
+	}
+	(void) total;
+	return 0;
+}
+
+/* shutdown(fd, how) on owned socket fd, as Linux answers it on TCP.
+ * SHUT_WR sends a FIN behind the bytes already sent, once; a later
+ * write fails with EPIPE (and SIGPIPE).  SHUT_RD makes a read with
+ * nothing queued return 0 at once, while bytes already queued or still
+ * arriving stay readable; once both sides are shut, bytes arriving are
+ * answered with an RST (see the write path).  A socket not connected,
+ * refused or reset, and one that has sent its FIN and been sent the
+ * peer's, is ENOTCONN.  A listener's shutdown would close it, which is
+ * not modelled. */
+static void
+sock_shutdown(Node *nd, int fd, int how)
+{
+	int k = fd_kind(nd, fd);
+	if (k == K_NONE || k == K_EFD || k == K_EPOLL) { g_resp->error = k == K_NONE ? -EBADF : -ENOTSOCK; return; }
+	if (how != SHUT_RD && how != SHUT_WR && how != SHUT_RDWR) { g_resp->error = -EINVAL; return; }
+	if (k == K_LISTEN) die(3, "node %d: shutdown of a listening socket is not modelled", nd->id);
+	int cs = cfd_slot(nd, fd);
+	int c = cs >= 0 ? nd->cconn[cs] : -1, e = cs >= 0 ? nd->cend[cs] : 0;
+	if (cs >= 0 && c < 0) die(3, "node %d: shutdown of a timer connection is not modelled", nd->id);
+	Conn *cn = c >= 0 ? &conns[c] : NULL;
+	if (cn && cn->connecting) die(3, "node %d: shutdown of a socket whose non-blocking connect has not completed is not modelled", nd->id);
+	if (!cn || cn->refused || cn->reset || (cn->shut_wr[e] && fin_toward(c, e))) { g_resp->error = -ENOTCONN; return; }
+	if (how != SHUT_WR) cn->shut_rd[e] = 1;
+	if (how != SHUT_RD && !cn->shut_wr[e])
+	{
+		cn->shut_wr[e] = 1;
+		if (!cn->closed[1 - e]) bag_add(c, 1 - e, NULL, 0, 1);
+	}
+	g_resp->val = 0;
+}
+
+/* fd, the number holding connection slot cs, is being closed.  If a
+ * dup of it is still open, the lowest such number takes the slot over
+ * (with its own FD_CLOEXEC, and the socket's options) and the rest now
+ * name it, so the socket stays open.  Returns 1 if one did. */
+static int
+dup_takeover(Node *nd, int cs, int fd)
+{
+	int heir = 0;
+	for (int f = 0; f < MAXOWNED; f++)
+		if (nd->dupof[f] == fd) { heir = 500 + f; break; }
+	if (!heir) return 0;
+	for (int f = 0; f < MAXOWNED; f++)
+		if (nd->dupof[f] == fd) nd->dupof[f] = 500 + f == heir ? 0 : heir;
+	nd->cfd[cs] = heir;
+	nd->ccloexec[cs] = (nd->fdflag[heir - 500] & FD_CX) != 0;
+	nd->fdflag[heir - 500] = 0;
+	nd->sockopt[heir - 500] = nd->sockopt[fd - 500]; nd->sockopt[fd - 500] = 0;
+	if (nd->timer_fd == fd) nd->timer_fd = heir;
+	return 1;
+}
+
+/* dup, dup2 and dup3 of owned fd a[0].  The new number shares the old
+ * one's open socket, as on Linux: its connection, its queue and its
+ * O_NONBLOCK; only FD_CLOEXEC is the number's own (clear, or set by
+ * dup3's O_CLOEXEC).  A connection is the only kind modelled; a dup of
+ * a listener, an eventfd, an epoll instance, a socket not yet dialled
+ * or a timer connection ends the check, as does a target fd that is
+ * the kernel's (below 500) or an owned fd already open, which dup2
+ * would close first.  dup2 onto itself returns the fd; dup3 onto
+ * itself is EINVAL. */
+static void
+sock_dup(Node *nd, long nr, const __u64 *a)
+{
+	int fd = (int) a[0], to = nr == SYS_dup ? nd->next_fd : (int) a[1];
+	int k = fd_kind(nd, fd);
+	if (k == K_NONE) { g_resp->error = -EBADF; return; }
+	if (nr == SYS_dup3 && (a[2] & ~(uint64_t) O_CLOEXEC)) { g_resp->error = -EINVAL; return; }
+	if (to == fd) { if (nr == SYS_dup3) g_resp->error = -EINVAL; else g_resp->val = fd; return; }
+	int cs = cfd_slot(nd, fd);
+	if (k != K_CONN || nd->cconn[cs] < 0)
+		die(3, "node %d: dup of owned fd %d, which is not a connection, is not modelled", nd->id, fd);
+	if (to < 500 || to < nd->next_fd)
+		die(3, "node %d: dup onto fd %d, which is open or the kernel's, is not modelled", nd->id, to);
+	(void) fd_flags(nd, to);
+	nd->next_fd = to + 1;
+	nd->dupof[to - 500] = nd->cfd[cs];
+	nd->fdflag[to - 500] = nr == SYS_dup3 && (a[2] & O_CLOEXEC) ? FD_CX : 0;
+	g_resp->val = to;
+}
+
 /* Carry out notification g_req of thread th on node nd.  Returns 1 if the
  * call parked (a deferred recv, accept, poll or futex wait) or ended the
  * node, and 0 if g_resp holds its answer. */
@@ -2035,13 +2518,27 @@ serve(Node *nd, Thread *th)
 			*fd_flags(nd, fd) = FD_PLAIN | ((type & SOCK_CLOEXEC) ? FD_CX : 0);
 			g_resp->val = fd; break;
 		}
-		case SYS_readv: case SYS_writev: case SYS_preadv: case SYS_pwritev:
-		case SYS_pread64: case SYS_pwrite64: case SYS_recvmsg: case SYS_sendmsg:
-		case SYS_sendmmsg: case SYS_recvmmsg: case SYS_shutdown: case SYS_dup:
-		case SYS_dup2: case SYS_dup3: case SYS_getsockopt: case SYS_getsockname:
-		case SYS_getpeername: case SYS_ioctl: case SYS_splice: case SYS_sendfile:
+		case SYS_preadv: case SYS_pwritev:
+		case SYS_pread64: case SYS_pwrite64:
+		case SYS_dup: case SYS_dup2: case SYS_dup3:
+		{
+			int fd = (int) a[0];
+			if (fd >= 500 && fd < nd->next_fd) { sock_dup(nd, nr, a); break; }
 			refuse_on_owned(nd, nr, a);
 			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
+		}
+		case SYS_sendmmsg: case SYS_recvmmsg:
+		case SYS_ioctl: case SYS_splice: case SYS_sendfile:
+			refuse_on_owned(nd, nr, a);
+			g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break;
+		case SYS_shutdown:
+			if ((int) a[0] < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
+			sock_shutdown(nd, (int) a[0], (int) a[1]);
+			break;
+		case SYS_getsockname: case SYS_getpeername:
+			if ((int) a[0] < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
+			sock_name(nd, nr, a);
+			break;
 		case SYS_clock_gettime:
 			if ((long) a[0] == CMC_PRELOAD_MAGIC) { nd->preload_ok = 1; g_resp->val = 0; break; }
 		{
@@ -2094,11 +2591,19 @@ serve(Node *nd, Thread *th)
 			if (got < n) cr_fail(nd->id, "getrandom fills a buffer");
 			g_resp->val = (long) n; break;
 		}
-		case SYS_setsockopt: case SYS_bind:
+		case SYS_bind:
 		{
 			int err = wrong_kind(nd, nr, (int) a[0]);
 			if (err) { g_resp->error = -err; break; }
 			g_resp->val = 0; break;
+		}
+		case SYS_setsockopt: case SYS_getsockopt:
+		{
+			if ((int) a[0] < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
+			int err = wrong_kind(nd, nr, (int) a[0]);
+			if (err) { g_resp->error = -err; break; }
+			sock_option(nd, nr, a);
+			break;
 		}
 		case SYS_listen:
 		{
@@ -2122,6 +2627,14 @@ serve(Node *nd, Thread *th)
 			int fd = (int) a[0];
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
 			int cs = cfd_slot(nd, fd);
+			if (fd - 500 < MAXOWNED && nd->dupof[fd - 500])
+			{
+				/* one of two numbers for a socket: the socket stays */
+				nd->dupof[fd - 500] = 0; nd->fdflag[fd - 500] = 0;
+				g_resp->val = 0; break;
+			}
+			if (cs >= 0 && dup_takeover(nd, cs, fd)) { g_resp->val = 0; break; }
+			if (fd - 500 < MAXOWNED) nd->sockopt[fd - 500] = 0;
 			if (cs >= 0)
 			{
 				int c = nd->cconn[cs], e = nd->cend[cs];
@@ -2152,21 +2665,51 @@ serve(Node *nd, Thread *th)
 			 * shortcut: a live node that has not yet called listen() is
 			 * treated as listening, so a startup race that Linux would
 			 * refuse waits instead; upgrade if a target retries connects. */
-			/* a socket already dialled: a refused one may be dialled again
-			 * (its slot is reused), a connected one is EISCONN */
+			/* A socket already dialled.  One whose handshake is still out
+			 * is EALREADY.  One a non-blocking connect left (nbdial) gets
+			 * the outcome, as Linux reports it: 0 once connected; when
+			 * refused, the error not yet read, else ECONNABORTED; either
+			 * way it is then a plain refused socket.  A refused one may be
+			 * dialled again (its slot and flags are reused), and a
+			 * connected one is EISCONN. */
 			int fd = (int) a[0], cs = cfd_slot(nd, fd);
 			unsigned char plain = cs >= 0 ? 0 : *fd_flags(nd, fd);
-			/* On Linux a non-blocking connect returns EINPROGRESS and
-			 * completes later, read with getsockopt(SO_ERROR); neither is
-			 * modelled, so it ends the check rather than answering 0. */
-			if (plain & FD_NB)
-				die(3, "node %d: connect on non-blocking fd %d; a non-blocking connect (EINPROGRESS) is not modelled", nd->id, fd);
+			int nb = cs >= 0 ? nd->cnonblock[cs] : (plain & FD_NB) != 0;
+			int cx = cs >= 0 ? nd->ccloexec[cs] : (plain & FD_CX) != 0;
 			if (cs >= 0)
 			{
 				int old = nd->cconn[cs];
-				if (old < 0 || !conns[old].refused) { g_resp->error = -EISCONN; break; }
-				conns[old].closed[0] = 1; conn_maybe_free(old);
+				Conn *oc = old >= 0 ? &conns[old] : NULL;
+				if (oc && oc->connecting && !nb)
+					die(3, "node %d: a blocking connect on a socket whose non-blocking connect has not completed is not modelled", nd->id);
+				if (oc && oc->connecting) { g_resp->error = -EALREADY; break; }
+				if (oc && oc->nbdial)
+				{
+					oc->nbdial = 0;
+					if (!oc->refused) { g_resp->val = 0; break; }
+					int err = oc->err[0] ? oc->err[0] : ECONNABORTED;
+					oc->err[0] = 0;
+					g_resp->error = -err; break;
+				}
+				if (!oc || !oc->refused) { g_resp->error = -EISCONN; break; }
+				oc->closed[0] = 1; conn_maybe_free(old);
 				cfd_del(nd, cs);
+			}
+			if (nb && node_multi(nd))
+				die(3, "node %d: a non-blocking connect in a node with more than one thread is not modelled", nd->id);
+			if (nb)
+			{
+				/* Linux answers EINPROGRESS whether or not anything
+				 * listens; the handshake completes later, into the peer's
+				 * backlog or refused, when the search says (A_CONNECT).
+				 * Until then the acceptor end does not exist. */
+				int c = conn_new(nd->id, peer);
+				conns[c].connecting = conns[c].nbdial = 1; conns[c].closed[1] = 1;
+				conns[c].lport = local_port(nd, fd);
+				cfd_set(nd, fd, peer, c, 0);
+				nd->cnonblock[nd->nc - 1] = 1; nd->ccloexec[nd->nc - 1] = cx;
+				if (plain) *fd_flags(nd, fd) = 0;
+				g_resp->error = -EINPROGRESS; break;
 			}
 			if (!N[peer].alive)
 			{
@@ -2174,9 +2717,14 @@ serve(Node *nd, Thread *th)
 				 * ENOTCONN and a write with EPIPE, as on Linux after a
 				 * refusal, until it is dialled again */
 				int c = conn_new(nd->id, peer);
+				rst_path(peer, nd->id);
+				if (!link_up(nd->id, peer))
+					die(3, "node %d dials node %d across a cut link; a blocking connect that times out is not modelled", nd->id, peer);
 				conns[c].closed[1] = conns[c].gone[1] = 1; conns[c].refused = 1;
+				conns[c].lport = local_port(nd, fd);
 				cfd_set(nd, fd, peer, c, 0);
-				if (plain) { nd->ccloexec[nd->nc - 1] = (plain & FD_CX) != 0; *fd_flags(nd, fd) = 0; }
+				nd->ccloexec[nd->nc - 1] = cx;
+				if (plain) *fd_flags(nd, fd) = 0;
 				g_resp->error = -ECONNREFUSED; break;
 			}
 			if (N[peer].npend >= MAXCONN) die(1, "more than %d connections wait at node %d", MAXCONN, peer);
@@ -2184,8 +2732,10 @@ serve(Node *nd, Thread *th)
 			N[peer].pend[N[peer].npend++] = c;
 			/* the node sends/recvs on the socket() fd (connect's a[0]);
 			 * connect() itself returns 0 */
+			conns[c].lport = local_port(nd, fd);
 			cfd_set(nd, fd, peer, c, 0);
-			if (plain) { nd->ccloexec[nd->nc - 1] = (plain & FD_CX) != 0; *fd_flags(nd, fd) = 0; }
+			nd->ccloexec[nd->nc - 1] = cx;
+			if (plain) *fd_flags(nd, fd) = 0;
 			g_resp->val = 0; break;
 		}
 		case SYS_accept: case SYS_accept4:
@@ -2212,26 +2762,48 @@ serve(Node *nd, Thread *th)
 			 * dial (shortcut: the sockaddr out-parameter is not filled) */
 			th->block_kind = BK_ACCEPT; th->block_id = g_req->id; th->block_peer = -2;
 			return 1;
-		case SYS_write: case SYS_sendto:
+		case SYS_write: case SYS_sendto: case SYS_writev: case SYS_sendmsg:
 		{
 			int fd = (int) a[0];
 			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) { serve_hook(nd, a); break; }
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, libs) */
+			/* writev and sendmsg gather their iovec array into vbuf and
+			 * go the way of write and sendto; sendmsg's flags are
+			 * sendto's, and a destination or ancillary data is refused */
+			int vec = nr == SYS_writev || nr == SYS_sendmsg, vlen = 0;
+			uint64_t wflags = nr == SYS_sendto ? a[3] : nr == SYS_sendmsg ? a[2] : 0;
+			unsigned char vbuf[MSGLEN];
+			if (vec)
+			{
+				struct msghdr mh;
+				uint64_t iov = a[1]; long cnt = (long) a[2];
+				if (nr == SYS_sendmsg)
+				{
+					if (cr_read(nd->pid, a[1], &mh, sizeof mh) != sizeof mh) { g_resp->error = -EFAULT; break; }
+					if (mh.msg_name || mh.msg_control || mh.msg_controllen)
+						die(3, "node %d: sendmsg with a destination address or ancillary data is not modelled", nd->id);
+					iov = (uint64_t) (uintptr_t) mh.msg_iov; cnt = (long) mh.msg_iovlen;
+				}
+				if (fd_kind(nd, fd) == K_EFD) die(3, "node %d: a vector write to an eventfd is not modelled", nd->id);
+				int err = read_iov(nd, iov, cnt, &vlen);
+				if (!err) err = gather_iov(nd, (int) cnt, vlen, vbuf);
+				if (err) { g_resp->error = err; break; }
+			}
 			/* sendto's flags: MSG_NOSIGNAL is honoured; any other would
 			 * change the call (MSG_DONTWAIT, MSG_MORE, MSG_OOB) and is
 			 * refused, as is a destination address on a connected socket */
-			if (nr == SYS_sendto)
+			if (nr == SYS_sendto || nr == SYS_sendmsg)
 			{
 				int err = wrong_kind(nd, nr, fd);
 				if (err) { g_resp->error = -err; break; }
 			}
-			if (nr == SYS_sendto && ((a[3] & ~(uint64_t) MSG_NOSIGNAL) || a[4]))
-				die(3, "node %d: sendto flags %#llx or a destination address are not modelled", nd->id, (unsigned long long) a[3]);
+			if ((wflags & ~(uint64_t) MSG_NOSIGNAL) || (nr == SYS_sendto && a[4]))
+				die(3, "node %d: sendto flags %#llx or a destination address are not modelled", nd->id, (unsigned long long) wflags);
+			int nosig = (wflags & MSG_NOSIGNAL) != 0;
 			if (fd_kind(nd, fd) == K_PLAIN)
 			{
 				/* a socket never connected: EPIPE, and the SIGPIPE its
 				 * disposition decides unless MSG_NOSIGNAL */
-				int nosig = nr == SYS_sendto && (a[3] & MSG_NOSIGNAL);
 				if (!nosig && sigpipe_kills(nd, th)) return 1;
 				g_resp->error = -EPIPE; break;
 			}
@@ -2248,15 +2820,19 @@ serve(Node *nd, Thread *th)
 			int cs = cfd_slot(nd, fd);
 			if (cs < 0) { g_resp->error = fd_kind(nd, fd) == K_EPOLL ? -EINVAL : -EBADF; break; }
 			int peer = nd->cpeer[cs], c = nd->cconn[cs], e = nd->cend[cs];
-			int len = (int) a[2];
+			int len = vec ? vlen : (int) a[2];
 			if (len < 0 || len > M.max_write) die(1, "node %d writes %d bytes in one call; the limit is %d (raise [target] max_write, up to %d)", nd->id, len, M.max_write, MSGLEN);
 			if (c < 0) { g_resp->val = len; break; }	/* a timer fd has no reader */
 			Conn *cn = &conns[c];
-			int nosig = (nr == SYS_sendto) && (a[3] & MSG_NOSIGNAL);
+			if (cn->connecting || (cn->full[e] && !cn->err[e] && !cn->reset))
+			{
+				if (!nd->cnonblock[cs]) die(3, "node %d: a blocking write to a socket whose non-blocking connect has not completed is not modelled", nd->id);
+				g_resp->error = -EAGAIN; break;
+			}
 			/* a pending reset is reported first; EPIPE, from a reset, a
 			 * refused dial, or a reported reset, raises SIGPIPE unless the
 			 * caller asked for MSG_NOSIGNAL */
-			int werr = cn->err[e] ? cn->err[e] : (cn->reset || cn->refused) ? EPIPE : 0;
+			int werr = cn->err[e] ? cn->err[e] : (cn->reset || cn->refused || cn->shut_wr[e]) ? EPIPE : 0;
 			if (werr)
 			{
 				cn->err[e] = 0;
@@ -2270,16 +2846,25 @@ serve(Node *nd, Thread *th)
 				 * the data with an RST, and this end, which had its FIN, gets
 				 * EPIPE on its next call.  shortcut: the RST arrives at once,
 				 * not a round trip later. */
-				if (!cn->gone[1 - e]) { cn->reset = 1; cn->err[e] = reset_errno(c, e); }
+				if (!cn->gone[1 - e]) { rst_path(nd->id, cn->node[1 - e]); rst_path(cn->node[1 - e], nd->id); cn->reset = 1; cn->err[e] = reset_errno(c, e); }
 				g_resp->val = len; break;
 			}
 			unsigned char buf[MSGLEN] = {0};
-			size_t got = cr_read(nd->pid, a[1], buf, (size_t) len);
+			if (vec) memcpy(buf, vbuf, (size_t) len);
+			size_t got = vec ? (size_t) len : cr_read(nd->pid, a[1], buf, (size_t) len);
 			/* nothing readable is the kernel's EFAULT with nothing sent; a
 			 * buffer that faults partway would send a prefix, which the
 			 * model does not do */
 			if (got == 0 && len > 0) { g_resp->error = -EFAULT; break; }
 			if (got < (size_t) len) cr_fail(nd->id, "write sends from a buffer that ends");
+			/* a SHORT action: the send buffer fills after g_short bytes
+			 * (none: EAGAIN), and stays full until the peer reads */
+			if (g_short >= 0)
+			{
+				cn->full[e] = 1;
+				if (g_short == 0) { g_resp->error = -EAGAIN; break; }
+				len = g_short;
+			}
 			if (peer == -1)			/* reply to the client: ghost log */
 			{
 				if (len >= 2 && buf[0] == 'A')
@@ -2288,13 +2873,53 @@ serve(Node *nd, Thread *th)
 					rep_src[nrep] = (unsigned char) nd->id; rep_val[nrep] = buf[1]; nrep++;
 				}
 			}
+			else if (len > 0 && cn->shut_rd[1 - e] && cn->shut_wr[1 - e])
+			{
+				/* the peer shut both sides: its stack answers the bytes
+				 * with an RST, as Linux's does in FIN_WAIT */
+				rst_path(nd->id, cn->node[1 - e]); rst_path(cn->node[1 - e], nd->id);
+				int er[2] = {reset_errno(c, 0), reset_errno(c, 1)};
+				conn_discard(c);
+				cn->reset = 1; cn->err[0] = er[0]; cn->err[1] = er[1];
+				rst_notify(c, 1 - e);
+			}
 			else if (len > 0)		/* inter-node: buffer in the bag */
 				bag_add(c, 1 - e, buf, len, 0);
 			g_resp->val = len; break;
 		}
-		case SYS_read: case SYS_recvfrom:
+		case SYS_read: case SYS_recvfrom: case SYS_readv: case SYS_recvmsg:
 		{
 			int fd = (int) a[0];
+			int rvec = nr == SYS_readv || nr == SYS_recvmsg;
+			/* the bytes a read may take: a[2], or the iovec array's total */
+			int rwant = (int) a[2];
+			th->niov = 0; th->vecread = 0; th->block_msg = 0; th->block_bufaddr = a[1];
+			if (rvec && fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; }
+			if (rvec)
+			{
+				/* readv and recvmsg take the read path with their iovec
+				 * array recorded on the thread; recvmsg's flags are
+				 * recvfrom's (none), and ancillary data is refused */
+				uint64_t iov = a[1]; long cnt = (long) a[2];
+				if (nr == SYS_recvmsg)
+				{
+					struct msghdr mh;
+					int err = wrong_kind(nd, nr, fd);
+					if (err) { g_resp->error = -err; break; }
+					if (cr_read(nd->pid, a[1], &mh, sizeof mh) != sizeof mh) { g_resp->error = -EFAULT; break; }
+					if (mh.msg_control || mh.msg_controllen || a[2])
+						die(3, "node %d: recvmsg flags %#llx or ancillary data are not modelled", nd->id, (unsigned long long) a[2]);
+					iov = (uint64_t) (uintptr_t) mh.msg_iov; cnt = (long) mh.msg_iovlen;
+					th->block_msg = a[1];
+				}
+				if (fd_kind(nd, fd) == K_EFD) die(3, "node %d: a vector read of an eventfd is not modelled", nd->id);
+				int err = read_iov(nd, iov, cnt, &rwant);
+				if (err) { g_resp->error = err; th->block_msg = 0; break; }
+				if (cnt > MAXRIOV) die(3, "node %d reads into %ld iovec entries; the limit is %d", nd->id, cnt, MAXRIOV);
+				for (long i = 0; i < cnt; i++)
+				{ th->iovb[i] = (uint64_t) (uintptr_t) g_iov[i].iov_base; th->iovl[i] = g_iov[i].iov_len; }
+				th->niov = (int) cnt; th->vecread = 1;
+			}
 			/* recvfrom's flags change the call (MSG_PEEK keeps the bytes,
 			 * MSG_WAITALL waits for all, MSG_DONTWAIT does not block), so
 			 * any is refused; a source address out-parameter is not filled */
@@ -2349,6 +2974,8 @@ serve(Node *nd, Thread *th)
 			 * EBADF, as on Linux; a plain socket was answered above */
 			if (rs < 0) { g_resp->error = fd_kind(nd, fd) == K_EPOLL ? -EINVAL : -EBADF; break; }
 			int peer = nd->cpeer[rs], c = nd->cconn[rs], e = nd->cend[rs];
+			/* a read of no bytes returns 0 at once, as on Linux */
+			if (rwant == 0 && c >= 0 && !conns[c].connecting) { g_resp->val = 0; break; }
 			if (fd != nd->timer_fd && c >= 0 && conn_head(c, e) < 0)
 			{
 				/* nothing queued: an unconnected socket reads ENOTCONN, a
@@ -2357,9 +2984,20 @@ serve(Node *nd, Thread *th)
 				 * not, as Linux does.  No search choice remains, so answer
 				 * immediately. */
 				Conn *cn = &conns[c];
+				/* a dial still handshaking: EAGAIN.  A refused one reports
+				 * its error once; a socket a non-blocking connect left
+				 * refused then reads 0, one refused otherwise ENOTCONN, as
+				 * Linux does */
+				if (cn->connecting)
+				{
+					if (!nd->cnonblock[rs]) die(3, "node %d: a blocking read of a socket whose non-blocking connect has not completed is not modelled", nd->id);
+					g_resp->error = -EAGAIN; break;
+				}
+				if (cn->refused && cn->err[e]) { g_resp->error = -cn->err[e]; cn->err[e] = 0; break; }
+				if (cn->refused && cn->nbdial) { g_resp->val = 0; break; }
 				if (cn->refused) { th->poll_woke_fd = -1; g_resp->error = -ENOTCONN; break; }
 				if (cn->err[e] == ECONNRESET) { cn->err[e] = 0; th->poll_woke_fd = -1; g_resp->error = -ECONNRESET; break; }
-				if (cn->eof[e] || cn->reset) { th->poll_woke_fd = -1; g_resp->val = 0; break; }
+				if (cn->eof[e] || cn->reset || cn->shut_rd[e]) { th->poll_woke_fd = -1; g_resp->val = 0; break; }
 			}
 			if (fd == nd->timer_fd)
 			{
@@ -2367,9 +3005,9 @@ serve(Node *nd, Thread *th)
 				 * timeout's one byte 'T', then the fd is an ordinary
 				 * (empty, timer-peer) channel */
 				static const unsigned char t = 'T';
-				int want = (int) a[2]; int k = want < 1 ? want : 1;
+				int k = rwant < 1 ? rwant : 1;
 				nd->timer_fd = -1; th->poll_woke_fd = -1;
-				if (k > 0 && cr_write(nd->pid, a[1], &t, (size_t) k) != (size_t) k) cr_fail(nd->id, "a read of a timer byte");
+				put_read(nd, th, &t, k);
 				g_resp->val = k; break;
 			}
 			/* A non-blocking channel read with nothing deliverable returns
@@ -2378,7 +3016,7 @@ serve(Node *nd, Thread *th)
 			 * next poll() defers (BK_POLL), handing control back to the
 			 * search; EAGAIN never lets a node bypass delivery. */
 			int cs = cfd_slot(nd, fd);
-			if (cs >= 0 && nd->cnonblock[cs] && fd != th->poll_woke_fd)
+			if (cs >= 0 && nd->cnonblock[cs] && (th->poll_woke_fd < 0 || cfd_slot(nd, th->poll_woke_fd) != cs))
 			{ g_resp->error = -EAGAIN; g_resp->val = 0; break; }
 			th->poll_woke_fd = -1;	/* the wake is spent; this read defers */
 			/* Always DEFER a blocking channel recv: whether it is satisfied
@@ -2386,7 +3024,7 @@ serve(Node *nd, Thread *th)
 			 * search makes, so delivery must never be automatic (M5).  The
 			 * node blocks in the kernel until the search delivers to it. */
 			th->block_kind = BK_RECV; th->block_id = g_req->id; th->block_bufaddr = a[1];
-			th->block_want = (int) a[2]; th->block_peer = peer;
+			th->block_want = rwant; th->block_peer = peer;
 			th->block_conn = c; th->block_end = e;
 			return 1;				/* do NOT answer */
 		}
@@ -2406,7 +3044,8 @@ serve(Node *nd, Thread *th)
 			 * socket's and an epoll instance's flags) in fdflag */
 			int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
 			int nb, cx;
-			if (cs >= 0) { nb = nd->cnonblock[cs]; cx = nd->ccloexec[cs]; }
+			int alias = fd - 500 < MAXOWNED && nd->dupof[fd - 500];
+			if (cs >= 0) { nb = nd->cnonblock[cs]; cx = alias ? (nd->fdflag[fd - 500] & FD_CX) != 0 : nd->ccloexec[cs]; }
 			else if (fd == nd->listener_fd) { nb = nd->ls_nonblock; cx = nd->ls_cloexec; }
 			else
 			{
@@ -2419,7 +3058,8 @@ serve(Node *nd, Thread *th)
 			if (cmd == F_SETFL) nb = (a[2] & O_NONBLOCK) != 0;
 			else if (cmd == F_SETFD) cx = (a[2] & FD_CLOEXEC) != 0;
 			else die(1, "node %d: fcntl cmd %d on virtual fd %d has no model", nd->id, cmd, fd);
-			if (cs >= 0) { nd->cnonblock[cs] = nb; nd->ccloexec[cs] = cx; }
+			if (cs >= 0 && alias) { nd->cnonblock[cs] = nb; nd->fdflag[fd - 500] = cx ? FD_CX : 0; }
+			else if (cs >= 0) { nd->cnonblock[cs] = nb; nd->ccloexec[cs] = cx; }
 			else if (fd == nd->listener_fd) { nd->ls_nonblock = nb; nd->ls_cloexec = cx; }
 			else
 			{
@@ -2529,12 +3169,11 @@ serve(Node *nd, Thread *th)
 			int ready = 0;
 			for (int i = 0; i < e->nit && ready < maxevents; i++)
 			{
-				int fd = e->fd[i]; int es = efd_slot(nd, fd);
-				unsigned out_ev = writable(nd, fd);
-				if ((e->events[i] & EPOLLOUT) && out_ev)
-				{ out[ready].events = out_ev; out[ready].data = e->data[i]; ready++; continue; }
-				if (es >= 0 && nd->efdval[es] > 0 && (e->events[i] & EPOLLIN))
-				{ out[ready].events = EPOLLIN; out[ready].data = e->data[i]; ready++; }
+				/* poll's and epoll's bits agree (EPOLLIN is POLLIN, and so
+				 * on); a watched fd since closed is not reported */
+				int fd = e->fd[i];
+				short rev = fd >= 500 && fd_kind(nd, fd) == K_NONE ? 0 : local_ready(nd, fd, e->events[i]);
+				if (rev) { out[ready].events = (uint16_t) rev; out[ready].data = e->data[i]; ready++; }
 			}
 			if (ready > 0 || zero_timeout)
 			{
@@ -2591,14 +3230,9 @@ serve(Node *nd, Thread *th)
 			{
 				pfs[i].revents = 0;
 				int fd = pfs[i].fd;
-				if (fd < 0) continue;
 				/* a closed owned fd is ready at once with POLLNVAL, as on Linux */
-				if (fd >= 500 && fd_kind(nd, fd) == K_NONE) { pfs[i].revents = POLLNVAL; ready++; continue; }
-				int es = efd_slot(nd, fd);
-				unsigned out_ev = writable(nd, fd);
-				if ((pfs[i].events & POLLOUT) && out_ev) { pfs[i].revents |= (short) out_ev; ready++; continue; }
-				if (es >= 0 && nd->efdval[es] > 0 && (pfs[i].events & POLLIN))
-				{ pfs[i].revents |= POLLIN; ready++; }
+				pfs[i].revents = local_ready(nd, fd, pfs[i].events);
+				if (pfs[i].revents) ready++;
 			}
 			if (ready > 0 || zero_timeout)
 			{
@@ -2965,6 +3599,33 @@ futex_wake(Node *nd, uint64_t uaddr, int n)
 	return woke;
 }
 
+/* Write the k bytes a read of thread th returns into its buffer, or
+ * scatter them over its readv or recvmsg iovec array in order, and set
+ * a recvmsg's msg_namelen and msg_flags to 0, as Linux does for TCP. */
+static void
+put_read(Node *nd, Thread *th, const unsigned char *body, int k)
+{
+	if (!th->vecread)
+	{
+		if (k > 0 && cr_write(nd->pid, th->block_bufaddr, body, (size_t) k) != (size_t) k) cr_fail(nd->id, "a recv buffer");
+		return;
+	}
+	int off = 0;
+	for (int i = 0; i < th->niov && off < k; i++)
+	{
+		size_t l = th->iovl[i] < (uint64_t) (k - off) ? (size_t) th->iovl[i] : (size_t) (k - off);
+		if (l > 0 && cr_write(nd->pid, th->iovb[i], body + off, l) != l) cr_fail(nd->id, "a readv buffer");
+		off += (int) l;
+	}
+	if (th->block_msg)
+	{
+		socklen_t zl = 0; int zf = 0;
+		if (cr_write(nd->pid, th->block_msg + offsetof(struct msghdr, msg_namelen), &zl, sizeof zl) != sizeof zl ||
+			cr_write(nd->pid, th->block_msg + offsetof(struct msghdr, msg_flags), &zf, sizeof zf) != sizeof zf)
+			cr_fail(nd->id, "a recvmsg header");
+	}
+}
+
 /* answer a thread's deferred recv with up to len bytes (0 = EOF);
  * returns how many it took -- a short read leaves the rest queued */
 static int
@@ -2972,7 +3633,7 @@ deliver(Node *nd, Thread *th, const unsigned char *body, int len)
 {
 	int k = len < th->block_want ? len : th->block_want;
 	Thread *old = cap_begin(th);
-	if (k > 0 && cr_write(nd->pid, th->block_bufaddr, body, (size_t) k) != (size_t) k) cr_fail(nd->id, "a recv buffer");
+	put_read(nd, th, body, k);
 	answer(nd, th, k);
 	g_cap = old;
 	return k;
@@ -2995,6 +3656,8 @@ accept_from(Node *nd, Thread *th, int peer)
 	conns[c].accepted = 1;
 	int fd = nd->next_fd++;
 	cfd_set(nd, fd, peer, c, 1);
+	/* an accepted socket inherits the listener's options, as on Linux */
+	(void) fd_flags(nd, fd); nd->sockopt[fd - 500] = nd->sockopt[nd->listener_fd - 500];
 	/* accept4's SOCK_CLOEXEC is the new fd's FD_CLOEXEC */
 	if (th->nr == SYS_accept4 && (th->args[3] & SOCK_CLOEXEC)) nd->ccloexec[nd->nc - 1] = 1;
 	answer(nd, th, fd);
@@ -3042,6 +3705,7 @@ node_gone(Node *nd)
 		{
 			/* the kernel of an exited listener resets the dials still in
 			 * its backlog; a crashed host answers nothing */
+			rst_path(nd->id, cn->node[0]);
 			cn->reset = 1; cn->err[0] = reset_errno(c, 0);
 			rst_notify(c, 0);
 		}
@@ -3467,8 +4131,11 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 {
 #define PUTC(b) put_byte(w, &n, cap, (unsigned) (b))
 	const Conn *cn = &conns[c];
-	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5));
-	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : 0);
+	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5) |
+		 (cn->connecting << 6) | (cn->nbdial << 7));
+	PUTC(cn->full[e] | (cn->full[1 - e] << 1));
+	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : cn->err[e] == ECONNREFUSED ? 3 : 0);
+	PUTC(cn->shut_wr[e] | (cn->shut_rd[e] << 1) | (cn->shut_wr[1 - e] << 2) | (cn->shut_rd[1 - e] << 3));
 	for (int last = -1;;)
 	{
 		int h = conn_next(c, e, last);
@@ -3533,6 +4200,20 @@ world_fp(uint64_t fp[2])
 		for (int f = 0; f < nd->next_fd - 500 && f < MAXOWNED; f++)
 			if (nd->fdflag[f] & FD_PLAIN) PUT(nd->fdflag[f]);
 		PUT(0xfd);
+		/* the socket options set, each with its fd's class, as getsockopt
+		 * reads them */
+		for (int f = 0; f < nd->next_fd - 500 && f < MAXOWNED; f++)
+			if (nd->sockopt[f])
+			{
+				unsigned char c[2]; fd_class(nd, 500 + f, c);
+				PUT(c[0]); PUT(c[1]); PUT(nd->sockopt[f]);
+			}
+		PUT(0xfd);
+		/* second numbers for connections (dup), by the slot they name
+		 * and their own FD_CLOEXEC, in fd order */
+		for (int f = 0; f < nd->next_fd - 500 && f < MAXOWNED; f++)
+			if (nd->dupof[f]) { PUT(cfd_slot((Node *) nd, nd->dupof[f])); PUT(nd->fdflag[f]); }
+		PUT(0xfd);
 		/* epoll instances: each one's interest list, by requested events,
 		 * the watched fd's class and the user data epoll_wait returns.  The
 		 * data is how the loop routes a ready fd to its handler, so two
@@ -3571,7 +4252,9 @@ world_fp(uint64_t fp[2])
 	 * bytes cannot occur: conn_maybe_free() discards it */
 	PUT(nrep);
 	for (int i = 0; i < nrep; i++) { PUT(rep_src[i]); PUT(rep_val[i]); }
-	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts);
+	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts); PUT(bud.short_writes);
+	PUT(bud.partitions);
+	for (int i = 0; i < M.nodes; i++) for (int j = 0; j < M.nodes; j++) PUT(g_cut[i][j]);
 	PUT8(logical_ns);
 #undef PUT8
 #undef PUT
@@ -3585,13 +4268,14 @@ reset_world(void)
 	memset(bag, 0, sizeof bag); memset(conns, 0, sizeof conns);
 	nrep = 0; logical_ns = CLK_BASE; g_fault_node = -1; g_race_node = -1;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
-	bud.restarts = M.restarts;
+	bud.restarts = M.restarts; bud.short_writes = M.short_writes; bud.partitions = M.partitions;
+	memset(g_cut, 0, sizeof g_cut);
 }
 
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -3668,7 +4352,7 @@ enum_actions(Act *out)
 			if (th->block_kind == BK_ACCEPT)
 			{
 				for (int s = -1; s < M.nodes; s++)
-					if (pend_from(nd, s)) ADD(A_ACCEPT, d, s, ti);
+					if (pend_from(nd, s) && link_up(s, d) && link_up(d, s)) ADD(A_ACCEPT, d, s, ti);
 				/* a server idle in accept() can have its election timer fire:
 				 * the timeout arrives as a synthetic timer connection it
 				 * accepts and reads a 'T' from (peer = TIMER_PEER) */
@@ -3694,7 +4378,8 @@ enum_actions(Act *out)
 						saw_chan = 1;
 						/* readable: a queued byte or FIN, a pending reset, or
 						 * a peer whose node is gone (the EOF a peer notices) */
-						if (conn_head(ci, e) >= 0 || (ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
+						if ((conn_head(ci, e) >= 0 && CONN_UP(ci, e)) ||
+							(ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
 							peer_lost(ci, e))
 							ADD2(A_WAKE, d, peer, ti, k);
 					}
@@ -3704,7 +4389,10 @@ enum_actions(Act *out)
 					}
 					else if (fd == nd->listener_fd)
 					{
-						if (nd->npend > 0) ADD(A_WAKE, d, POLL_LISTENER, ti);
+						int up = 0;
+						for (int q = 0; q < nd->npend; q++)
+							up |= link_up(conns[nd->pend[q]].node[0], d) && link_up(d, conns[nd->pend[q]].node[0]);
+						if (up) ADD(A_WAKE, d, POLL_LISTENER, ti);
 					}
 					else
 					{
@@ -3720,10 +4408,20 @@ enum_actions(Act *out)
 				continue;
 			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
-			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED)
-			{ ADD(A_RUN, d, -1, ti); continue; }
+			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED ||
+				th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW)
+			{
+				ADD(A_RUN, d, -1, ti);
+				if (th->block_kind == BK_SHORTW)
+				{
+					int ks[4], nk = short_counts(parked_write_len(nd, th), ks);
+					for (int j = 0; j < nk; j++) ADD2(A_SHORT, d, -1, ti, ks[j]);
+				}
+				continue;
+			}
 			int p = th->block_peer;
-			if (conn_head(th->block_conn, th->block_end) >= 0) ADD(A_DELIVER, d, p, ti);
+			if (conn_head(th->block_conn, th->block_end) >= 0 && CONN_UP(th->block_conn, th->block_end))
+				ADD(A_DELIVER, d, p, ti);
 			else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, p, ti);
 			if (bud.timeouts > 0) ADD(A_TIMEOUT, d, p, ti);
 		}
@@ -3742,6 +4440,20 @@ enum_actions(Act *out)
 			if (!cn->used || cn->reset || cn->node[0] < 0) continue;
 			if (conn_has_data(ci, 0) || conn_has_data(ci, 1)) ADD2(A_DROP, cn->node[1], cn->node[0], -1, ci);
 		}
+	/* the network cuts a directed link between two nodes (budgeted),
+	 * or heals one it cut, and the segments held on it may move again */
+	for (int x = 0; x < M.nodes; x++)
+		for (int y = 0; y < M.nodes; y++)
+		{
+			if (x == y) continue;
+			if (g_cut[x][y]) ADD(A_HEAL, x, y, -1);
+			else if (bud.partitions > 0) ADD(A_CUT, x, y, -1);
+		}
+	/* a non-blocking dial's handshake completes (CONNECT) */
+	for (int ci = 0; ci < MAXCONNS; ci++)
+		if (conns[ci].used && conns[ci].connecting && link_up(conns[ci].node[0], conns[ci].node[1]) &&
+			link_up(conns[ci].node[1], conns[ci].node[0]))
+			ADD2(A_CONNECT, conns[ci].node[0], conns[ci].node[1], -1, ci);
 	if (bud.restarts > 0)
 		for (int d = 0; d < M.nodes; d++)
 			if (!N[d].alive && N[d].crashed) ADD(A_RESTART, d, -1, -1);
@@ -3804,6 +4516,61 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 	g_cap = old;
 }
 
+/* A thread of nd parked in poll or epoll_wait on fds of which some are
+ * now ready with no search choice (local_ready()), as when a dial's
+ * handshake completes: answer it with every such fd, as the call would
+ * have been answered had it been made now.  Returns 1 if it answered. */
+static int
+poll_recheck(Node *nd, Thread *th)
+{
+	struct pollfd pfs[MAXPOLL];
+	struct __attribute__((packed)) { uint32_t events; uint64_t data; } ev[MAXPOLL];
+	int ready = 0;
+	for (int k = 0; k < th->pollfd_n; k++)
+	{
+		pfs[k].fd = th->pollfds[k]; pfs[k].events = th->pollevents[k];
+		pfs[k].revents = local_ready(nd, th->pollfds[k], th->pollevents[k]);
+		if (!pfs[k].revents) continue;
+		if (th->epoll_fd < 0 || ready < th->poll_maxevents)
+		{ ev[ready].events = (uint16_t) pfs[k].revents; ev[ready].data = th->polldata[k]; ready++; }
+	}
+	if (!ready) return 0;
+	Thread *old = cap_begin(th);
+	size_t want = th->epoll_fd >= 0 ? (size_t) ready * sizeof ev[0] : (size_t) th->pollfd_n * sizeof pfs[0];
+	const void *src = th->epoll_fd >= 0 ? (const void *) ev : (const void *) pfs;
+	if (cr_write(nd->pid, th->block_pollarr, src, want) != want) cr_fail(nd->id, "poll returns revents");
+	th->poll_woke_fd = -1;
+	answer(nd, th, ready);
+	g_cap = old;
+	return 1;
+}
+
+/* A_CONNECT: the handshake of non-blocking dial conn completes.  A live
+ * peer's listener takes it into its backlog, as a blocking connect's
+ * would be; a peer that is down refuses it, leaving ECONNREFUSED for
+ * the dialler to read once.  A dialler parked in poll on the socket
+ * then sees it ready. */
+static void
+complete_connect(int conn)
+{
+	Conn *cn = &conns[conn];
+	int peer = cn->node[1];
+	cn->connecting = 0;
+	if (N[peer].alive)
+	{
+		if (N[peer].npend >= MAXCONN) die(1, "more than %d connections wait at node %d", MAXCONN, peer);
+		cn->closed[1] = 0;
+		N[peer].pend[N[peer].npend++] = conn;
+	}
+	else
+	{
+		cn->refused = 1; cn->gone[1] = 1; cn->err[0] = ECONNREFUSED;
+	}
+	Node *nd = &N[cn->node[0]];
+	for (int ti = 0; ti < nd->nth; ti++)
+		if (nd->th[ti].inuse && nd->th[ti].block_kind == BK_POLL) poll_recheck(nd, &nd->th[ti]);
+}
+
 /* Reset connection conn (a DROP): discard every queued message in both
  * directions, mark it reset, and tell both ends at once.  A node parked
  * in recv on it gets ECONNRESET; a node parked in poll on it is woken so
@@ -3838,7 +4605,11 @@ break_peer_links(int node)
 	for (int c = 0; c < MAXCONNS; c++)
 	{
 		Conn *cn = &conns[c];
-		if (!cn->used || cn->reset) continue;
+		/* a dial still handshaking reaches whichever process listens
+		 * when it completes */
+		if (!cn->used || cn->reset || cn->connecting) continue;
+		if (cn->node[0] == node) rst_path(node, cn->node[1]);
+		if (cn->node[1] == node) rst_path(node, cn->node[0]);
 		if (cn->node[0] == node || cn->node[1] == node) reset_conn(c);
 	}
 }
@@ -3867,6 +4638,17 @@ apply(const Act *a)
 			int k = deliver(nd, th, bag[h].body, bag[h].len);
 			if (k < bag[h].len) { memmove(bag[h].body, bag[h].body + k, (size_t) (bag[h].len - k)); bag[h].len -= k; }
 			else bag[h].used = 0;
+			/* the reader made room: a writer whose buffer was full may
+			 * write again, and a poll for POLLOUT there is answered */
+			Conn *rc = &conns[th->block_conn];
+			int we = 1 - th->block_end;
+			if (rc->full[we])
+			{
+				rc->full[we] = 0;
+				Node *wn = rc->node[we] >= 0 ? &N[rc->node[we]] : NULL;
+				for (int ti = 0; wn && wn->alive && ti < wn->nth; ti++)
+					if (wn->th[ti].inuse && wn->th[ti].block_kind == BK_POLL) poll_recheck(wn, &wn->th[ti]);
+			}
 			break;
 		}
 		case A_EOF: deliver(nd, th, NULL, 0); break;
@@ -3902,7 +4684,16 @@ apply(const Act *a)
 		case A_WAKE: poll_wake(nd, th, a->peer, a->arg); break;
 		case A_RUN:
 			if (th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED) run_stopped(nd, th);
+			else if (th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW) run_connwait(nd, th);
 			else run_held(nd, th);
+			break;
+		case A_CUT: bud.partitions--; g_cut[a->node][a->peer] = 1; break;
+		case A_HEAL: g_cut[a->node][a->peer] = 0; break;
+		case A_SHORT:
+			bud.short_writes--;
+			g_short = a->arg;
+			run_connwait(nd, th);
+			g_short = -1;
 			break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
@@ -3912,6 +4703,14 @@ apply(const Act *a)
 			if (relaunch(nd)) die(3, "node %d would not restart", a->node);
 			break;
 		case A_STEP: drive_node(nd); break;
+		case A_CONNECT:
+			complete_connect(a->arg);
+			/* a call parked on the handshake is no longer a choice */
+			for (int ti = 0; ti < nd->nth; ti++)
+				if (nd->th[ti].inuse && nd->th[ti].block_kind == BK_CONNWAIT &&
+					!connwait(nd, nd->th[ti].nr, (const __u64 *) nd->th[ti].args))
+					run_connwait(nd, &nd->th[ti]);
+			break;
 	}
 	settle();
 }
@@ -4033,10 +4832,13 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);
 	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
+	else if (a->kind == A_CUT || a->kind == A_HEAL) snprintf(b, n, "%s n%d->n%d", k[a->kind], a->node, a->peer);
+	else if (a->kind == A_SHORT && a->arg == 0) snprintf(b, n, "full n%d t%d (EAGAIN)", a->node, a->thr);
+	else if (a->kind == A_SHORT) snprintf(b, n, "short n%d t%d (%d bytes)", a->node, a->thr, a->arg);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
 	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);
@@ -4268,6 +5070,8 @@ cmc_proc_main(const CmcProcOptions *po)
 		   M.nodes == 1 ? "" : "s", po->simulate ? "random simulation" : "breadth-first search");
 	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d, restarts %d",
 		   M.client_write, M.timeouts, M.crashes, M.drops, M.restarts);
+	if (M.short_writes) printf(", short_writes %d", M.short_writes);
+	if (M.partitions) printf(", partitions %d", M.partitions);
 	if (depth >= 0) printf(", depth %ld", depth);
 	printf("\n");
 	fflush(stdout);

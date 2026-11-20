@@ -44,6 +44,47 @@ and such a spec was refused (exit 3).  The skipped operand is still
 parsed.  Gates: spec_gate guard and short-circuit rows, and the guard
 row of spec_calibrate against TLC.
 
+A non-blocking `connect()` is modelled instead of refused, so a client
+that connects the way libpq does (connect returning `EINPROGRESS`, a
+poll for `POLLOUT`, then `getsockopt(SO_ERROR)`) runs under the checker.
+The handshake completes when the search says, into a live peer's
+backlog or refused, and a call on the socket before then may see it
+either way, as on loopback.  `setsockopt` and `getsockopt` of
+`SO_KEEPALIVE`, `SO_REUSEADDR`, `SO_REUSEPORT` and `TCP_NODELAY` are
+recorded and read back and change nothing; `SO_RCVBUF` and `SO_SNDBUF`
+may be set; `SO_ERROR` reads the pending error; other options, which
+were accepted and ignored, are now refused.  `getsockname` and
+`getpeername` answer on owned sockets instead of being refused.  A
+socket redialled after a refusal keeps its `O_NONBLOCK` and
+`FD_CLOEXEC` (they were lost).  Gate: proc_gate nbconnect ok, early and
+refused, each against a native run.
+
+`readv`, `writev`, `sendmsg`, `recvmsg`, `shutdown`, `dup`, `dup2` and
+`dup3` on a checker-owned socket are modelled instead of refused.  The
+vector calls act as one read or write of the iovec array's bytes, with
+ancillary data and a destination address refused.  `shutdown` sends a
+FIN or stops reads as Linux does, including the RST that bytes arriving
+at a socket shut both ways draw.  A dup shares the connection and its
+`O_NONBLOCK` until its last number closes.  A refused dial's pending
+`ECONNREFUSED` was left out of the world encoding; it is in now.  Gate:
+proc_gate sockapi iov, shut, dup and opts, each against a native run.
+
+A full send buffer is a budgeted choice, `[environment] short_writes =
+N`.  While it lasts, a send on a non-blocking connection with bytes
+still in flight may get `EAGAIN` or send a prefix (1 byte, half, or all
+but one), and the buffer then stays full, with no `POLLOUT`, until the
+peer reads.  On 2.1.0 every send succeeded whole, so a writer that
+ignored a short count passed.  Gate: proc_gate shortw.
+
+Network partitions, `[environment] partitions = N`: the search may cut
+a directed link between two nodes (asymmetric partitions included) and
+heal it later.  A cut link holds back its bytes, FINs and handshakes,
+in order, as TCP's retransmission does; nothing is lost.  An RST that
+would cross a cut link, and a blocking connect across one, are refused.
+The search already delays any delivery as long as it likes, so a cut
+alone adds no safety violation; it matters with timeouts.  Gate:
+proc_gate partitions rows.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

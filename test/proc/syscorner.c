@@ -331,24 +331,6 @@ main(int argc, char **argv)
 		connect(s, (struct sockaddr *) &a, sizeof a);
 		code(write(s, buf, sizeof buf));
 	}
-	else if (!strcmp(mode, "nbclient"))
-	{
-		/* a client socket made non-blocking before connect: its recv with
-		 * nothing sent returns EAGAIN on Linux; the node's own listener,
-		 * which nobody made non-blocking, keeps blocking (shown by poll,
-		 * which reports it not ready) */
-		int			ls = listener(BASE);
-		struct sockaddr_in a = addr(BASE + 1);
-		int			s = socket(AF_INET, SOCK_STREAM, 0);
-		char		c;
-
-		code(fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK));
-		code(connect(s, (struct sockaddr *) &a, sizeof a));
-		code(fcntl(s, F_GETFL) & O_NONBLOCK ? 0 : -1);
-		errno = 0;
-		code(recv(s, &c, 1, 0));	/* EAGAIN */
-		code(fcntl(ls, F_GETFL) & O_NONBLOCK ? -1 : 0);
-	}
 	else if (!strcmp(mode, "nbepoll"))
 	{
 		/* an epoll fd made non-blocking leaves the listener blocking */

@@ -1,0 +1,11 @@
+# A non-blocking writer and a full send buffer (test/proc/shortw.c):
+# the reader gets the whole message once the stream ends.
+[target]
+binary = shortw
+nodes = 2
+
+[environment]
+short_writes = 2
+
+[invariants]
+whole = "node[1][0] == 0 or (node[1][1] == 5 and node[1][2] == 72 and node[1][3] == 97 and node[1][6] == 100)"
