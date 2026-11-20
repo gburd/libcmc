@@ -5337,6 +5337,11 @@ syn_stuck(int c)
 	const Conn *cn = &conns[c];
 	int a = cn->node[0], b = cn->node[1];
 	if (!cn->used || !cn->connecting || a < 0 || !N[a].alive || cn->closed[0]) return 0;
+	/* a call parked on the handshake (BK_CONNWAIT) is the dialler mid-
+	 * step, where no time passes: its deadline competes once the call
+	 * has run (a poll then has its own deadline) */
+	for (int ti = 0; ti < N[a].nth; ti++)
+		if (N[a].th[ti].inuse && N[a].th[ti].block_kind == BK_CONNWAIT) return 0;
 	return !link_up(a, b) || !link_up(b, a) || N[b].crashed;
 }
 

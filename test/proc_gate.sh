@@ -1136,6 +1136,12 @@ for m in block nb; do
 	sd $m crashref$m "and is never refused" 0 "No error has been found" \
 		"crashes = 1" 'norefuse = "node[1][0] != 3 and node[1][0] != 4"'
 done
+# a poll's own deadline on the handshake: one shorter than the dial's
+# fires first (the dial cannot fail), a longer one does not
+sd nbpoll pollfirst "a poll timeout shorter than the dial's comes first" 0 "No error has been found" \
+	"partitions = 1" 'not1 = "node[1][0] != 1"'
+sd nbpoll2 dialfirst "the dial's deadline before a longer poll timeout" 1 "not1 is violated" \
+	"partitions = 1" 'not1 = "node[1][0] != 1"'
 sd exit exit "a host whose process exited refuses at once" 0 "No error has been found" \
 	"timeouts = 0" 'linux = "node[1][0] == 0 or node[1][0] == 3"
 reached = "eventually node[1][0] == 3"'

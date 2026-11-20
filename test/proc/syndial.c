@@ -6,6 +6,9 @@
  * host stays up).  The mode, from the target args:
  *   nb     a non-blocking connect, poll(POLLOUT, -1), then SO_ERROR;
  *          node 1 also records poll's revents as node[1][1]
+ *   nbpoll the same with a finite poll timeout: 100 s (the poll's
+ *          deadline comes first, code 5), or 200 s with arg nbpoll2
+ *          (the dial's comes first)
  *   block  a blocking connect
  *   exit   a blocking connect to node 0, which has exited
  * With partitions, a cut link loses the SYNs and Linux gives up after
@@ -70,7 +73,7 @@ main(int argc, char **argv)
 	nanosleep(&t, NULL);
 	int			s = socket(AF_INET, SOCK_STREAM, 0);
 
-	if (strcmp(mode, "nb") != 0)
+	if (strncmp(mode, "nb", 2) != 0)
 	{
 		int			r = connect(s, (struct sockaddr *) &a, sizeof a);
 
@@ -88,7 +91,13 @@ main(int argc, char **argv)
 			emit(4, 0);
 			return 0;
 		}
-		poll(&p, 1, -1);
+		int			tmo = !strcmp(mode, "nbpoll") ? 100000 : !strcmp(mode, "nbpoll2") ? 200000 : -1;
+
+		if (poll(&p, 1, tmo) == 0)
+		{
+			emit(5, 0);
+			return 0;
+		}
 		getsockopt(s, SOL_SOCKET, SO_ERROR, &e, &l);
 		emit((unsigned char) code(e), (unsigned char) p.revents);
 		fcntl(s, F_SETFL, 0);
