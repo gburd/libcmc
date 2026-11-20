@@ -1192,6 +1192,7 @@ is_pie(const char *b)
   if(memcmp(e,"\177ELF",4))return -1;
   return (e[16]|(e[17]<<8))==3; }
 
+/* GCOVR_EXCL_START: both filters are built in the launch child, past its last count */
 static int
 install_filter(void)
 {
@@ -1312,6 +1313,7 @@ install_trace_filter(void)
 	struct sock_fprog p = {sizeof f/sizeof*f, f};
 	return seccomp(SECCOMP_SET_MODE_FILTER, 0, &p);
 }
+/* GCOVR_EXCL_STOP */
 
 /* Start node nd's process.  The parent seizes the child with ptrace
  * before the child installs any filter, and the child waits for a byte
@@ -2796,7 +2798,7 @@ birth(Node *nd, Thread *th)
 		die(1, "node %d: cannot read the new thread of a clone: %s", nd->id, strerror(errno));
 	pid_t tid = (pid_t) nt;
 	do r = waitpid(tid, &st, __WALL);
-	while (r < 0 && errno == EINTR);
+	while (r < 0 && errno == EINTR);	/* GCOVR_EXCL_LINE: a wait interrupted by a signal; the checker takes none */
 	if (r != tid || !WIFSTOPPED(st) || st >> 16 != PTRACE_EVENT_STOP)
 		die(1, "node %d: new thread %d did not start in a ptrace stop (status %#x)", nd->id, (int) tid, st);
 	Thread *t = th_for(nd, tid);

@@ -23,6 +23,9 @@
  *   opts   setsockopt and getsockopt of the options the model records,
  *          inheritance by an accepted socket, the length checks, and
  *          SO_ERROR of a reset connection.
+ *   errs   the errors: a socket call on an eventfd, an epoll instance or
+ *          a closed fd, bad flags, addresses and lengths, a socket not
+ *          connected, and an option set through a dup.
  *
  * Canonical state fd 3: [phase][codes...], phase 1 once done.
  *
@@ -38,12 +41,16 @@
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
 #define BASE 20000
+
+#define BAD ((void *) 16)		/* an address no node maps */
 
 static unsigned char rec[64];
 static int	port = BASE;		/* the listener's port: BASE under cmc */
@@ -183,6 +190,9 @@ dups(int c, int s)
 
 	code(e == d + 40 ? 0 : -1);
 	code(fcntl(e, F_GETFD) == FD_CLOEXEC ? 0 : -1);
+	code(fcntl(e, F_SETFD, 0));
+	code(fcntl(e, F_GETFD) == 0 ? 0 : -1);
+	code(fcntl(d, F_GETFD) == 0 ? 0 : -1);
 	code(close(d));
 	code(write(e, "r", 1));
 	code(read(s, b, sizeof b) == 1 && b[0] == 'r' ? 0 : -1);
@@ -232,6 +242,58 @@ opts(int ls)
 	raw(v);
 }
 
+/* the errors of the socket calls: the wrong kind of fd, a closed one,
+ * a bad address or length, and a socket in the wrong state */
+static void
+errs(int c, int s)
+{
+	struct sockaddr_in sa;
+	socklen_t	l = sizeof sa;
+	int			v = 0, neg = -1, efd = eventfd(0, 0), ep = epoll_create1(0);
+	int			p = socket(AF_INET, SOCK_STREAM, 0), gone = socket(AF_INET, SOCK_STREAM, 0);
+
+	close(gone);
+	code(getsockname(efd, (struct sockaddr *) &sa, &l));	/* ENOTSOCK */
+	code(getpeername(ep, (struct sockaddr *) &sa, &l));	/* ENOTSOCK */
+	code(shutdown(efd, SHUT_RD));	/* ENOTSOCK */
+	code(getsockname(gone, (struct sockaddr *) &sa, &l));	/* EBADF */
+	code(shutdown(gone, SHUT_RD));	/* EBADF */
+	code(dup(gone));				/* EBADF */
+	code(dup3(c, c + 40, 1));		/* EINVAL */
+	code(shutdown(c, 99));			/* EINVAL */
+	code(getpeername(p, (struct sockaddr *) &sa, &l));	/* ENOTCONN */
+	code(shutdown(p, SHUT_RD));		/* ENOTCONN */
+	code(getpeername(c, (struct sockaddr *) &sa, (socklen_t *) BAD));	/* EFAULT */
+	code(getpeername(c, (struct sockaddr *) &sa, (socklen_t *) &neg));	/* EINVAL */
+	l = 4;
+	code(getsockname(s, (struct sockaddr *) &sa, &l));
+	raw((int) l);
+	code(getsockname(c, (struct sockaddr *) &sa, &l));
+	code(getpeername(s, (struct sockaddr *) &sa, &l));
+	l = sizeof v;
+	code(getsockopt(p, SOL_SOCKET, SO_ERROR, &v, &l));
+	raw(v);
+	code(getsockopt(c, SOL_SOCKET, SO_KEEPALIVE, &v, (socklen_t *) BAD));	/* EFAULT */
+	code(getsockopt(c, SOL_SOCKET, SO_KEEPALIVE, &v, (socklen_t *) &neg));	/* EINVAL */
+	code(setsockopt(c, SOL_SOCKET, SO_KEEPALIVE, BAD, sizeof v));	/* EFAULT */
+	{
+		/* recvmsg on an eventfd, and readv and recvfrom on a closed fd */
+		char		b[4];
+		struct iovec iov = {b, sizeof b};
+		struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1};
+
+		code(recvmsg(efd, &mh, 0));	/* ENOTSOCK */
+		code(readv(gone, &iov, 1));	/* EBADF */
+		code(recvfrom(gone, b, sizeof b, 0, NULL, NULL));	/* EBADF */
+		code(syscall(SYS_readv, c, BAD, 1));	/* EFAULT */
+	}
+	int			d = dup(c);
+
+	code(setsockopt(d, SOL_SOCKET, SO_KEEPALIVE, &(int) {1}, sizeof v));
+	code(getsockopt(c, SOL_SOCKET, SO_KEEPALIVE, &v, &l));
+	raw(v);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -269,6 +331,8 @@ main(int argc, char **argv)
 		shuts(c, s, ls);
 	else if (!strcmp(mode, "dup"))
 		dups(c, s);
+	else if (!strcmp(mode, "errs"))
+		errs(c, s);
 	emit(1);
 	return 0;
 }
