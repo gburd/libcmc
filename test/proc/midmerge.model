@@ -1,0 +1,9 @@
+# A model file for test/proc/midmerge.c: node 0 must not report that
+# node 1's byte came first while the peers still report nothing.  The
+# violation is reachable with or without a crash in the budget.
+[target]
+nodes = 3
+[environment]
+crashes = 1
+[invariants]
+notfirst = "not (node[0][0] == 2 and node[1][0] == 0 and node[2][0] == 0)"

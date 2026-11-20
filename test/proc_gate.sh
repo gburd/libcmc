@@ -64,6 +64,7 @@ for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files syscorn
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DSINGLE -o "$B/proc/durack-single" "$T/durack.c" || { echo "proc_gate: durack.c -DSINGLE does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/midmerge" "$T/midmerge.c" || { echo "proc_gate: midmerge.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/ackfirst" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/ackfirst-bug" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/fslog" "$T/fslog.c" || { echo "proc_gate: fslog.c does not build"; fail=1; }
@@ -399,6 +400,10 @@ expect "durack: a crash between a durable write and its ack" 0 "No error has bee
 expect "durack-single: a crash between two calls of one step" 0 "No error has been found" $(run durack durack-single)
 expect "ackfirst: durable before the ack holds"            0 "No error has been found" $(run ackfirst ackfirst)
 expect "ackfirst: an ack before the durable write is lost" 1 "acked_durable is violated" $(run ackfirst ackfirst-bug)
+# a world held mid-step is never merged on its (stale) state hook, so a
+# crash budget cannot hide a violation reachable without one
+expect "midmerge: the violation is found without a crash"   1 "notfirst is violated" $(run midmerge midmerge) --crashes 0
+expect "midmerge: and with a crash in the budget"           1 "notfirst is violated" $(run midmerge midmerge)
 
 echo "-- a modelled file system (plan 2.2, item 3)"
 # fslog keeps its log in files under the model's [files] dir: pwrite and

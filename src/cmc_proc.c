@@ -6031,7 +6031,9 @@ cmc_proc_main(const CmcProcOptions *po)
 		}
 		uint64_t fp[2]; world_fp(fp);
 		int tree = world_threaded();
-		int isnew = tree || mark(fp, g_world, g_world_len);
+		/* a mid-step world is never merged: its state hook lags the calls
+		 * the node has made, so two different histories could share it */
+		int isnew = tree || midstep_node() >= 0 || mark(fp, g_world, g_world_len);
 		if (isnew) { distinct++; ntree += tree; if (e.depth > maxlen) maxlen = e.depth; }
 		/* did this action make progress?  A non-root entry whose reached
 		 * world equals its parent's is a stutter: the action was enabled
