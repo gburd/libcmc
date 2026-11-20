@@ -917,13 +917,19 @@ echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes
 # and heal it later; bytes, FINs and handshakes on it wait.  The counts
 # pin that cut and healed worlds are searched (repl without partitions:
-# 7 distinct states).  An RST that would cross a cut link is refused.
+# 7 distinct states), including a dial that waits for the link to heal.
+# An RST that would cross a cut link is refused.
 sed 's/^\[environment\]/[environment]\npartitions = 1/' "$T/repl.model" > "$OUT/repl-cut.model"
-expect_by 300 "partitions: repl holds with a cut link"     0 "28 distinct states" $(runx "$OUT/repl-cut.model" repl)
+expect_by 300 "partitions: repl holds with a cut link"     0 "34 distinct states" $(runx "$OUT/repl-cut.model" repl)
 expect_by 300 "partitions: repl's bug is still caught"     1 "agree_on_ack is violated" $(runx "$OUT/repl-cut.model" repl-bug)
 $CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpsem.c does not build"; fail=1; }
 printf '[target]\nbinary = %s\nnodes = 2\nargs = rstdata\n[environment]\npartitions = 1\n[invariants]\nx = "1 == 1"\n' "$B/proc/tcpsem" > "$OUT/rstcut.model"
 expect_by 120 "partitions: an RST across a cut link is refused" 3 "an RST held back by a partition is not modelled" --model-file "$OUT/rstcut.model"
+# a blocking connect to a live node across a cut link waits for a heal
+# or times out (ETIMEDOUT, after Linux's 127 s); it used to go straight
+# into the backlog, so a program that mishandles the failure passed
+$CC -O1 -no-pie -w -o "$B/proc/cutconn" "$T/cutconn.c" || { echo "proc_gate: cutconn.c does not build"; fail=1; }
+expect_by 120 "partitions: a blocking connect across a cut link times out" 1 "nofail is violated" $(run cutconn cutconn)
 
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end

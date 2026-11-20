@@ -783,8 +783,13 @@ static int g_unchecked_node, g_weak_seen, g_try_seen;
  * connect's handshake has completed (see connwait()).  BK_SHORTW is a
  * write, not yet carried out, that the search may cut short (see
  * shortwait()).  BK_SLEEP is a pure wait on the node's clock (see
- * sleep_call()). */
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10, BK_SLEEP = 11 };
+ * sleep_call()).  BK_SYNWAIT is a blocking connect, not yet carried
+ * out, across a cut link (see SYN_TIMEOUT). */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10, BK_SLEEP = 11, BK_SYNWAIT = 12 };
+/* Linux's blocking connect gives up after tcp_syn_retries (6 by
+ * default) retransmissions of its SYN, from a 1 s timeout doubling each
+ * time: 1 + 2 + ... + 64 = 127 s, then ETIMEDOUT. */
+#define SYN_TIMEOUT (127ULL * 1000000000ULL)
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
 
@@ -792,7 +797,7 @@ enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NE
 static int
 timed_kind(int kind)
 {
-	return kind == BK_POLL || kind == BK_SLEEP || kind == BK_FUTEX;
+	return kind == BK_POLL || kind == BK_SLEEP || kind == BK_FUTEX || kind == BK_SYNWAIT;
 }
 
 /* Find the thread slot for tid on node nd, allocating one on first sight
@@ -3300,6 +3305,19 @@ serve(Node *nd, Thread *th)
 				if (plain) *fd_flags(nd, fd) = 0;
 				g_resp->error = -EINPROGRESS; break;
 			}
+			/* Across a cut link the SYN or its answer is lost, and Linux
+			 * retransmits: the connect waits (BK_SYNWAIT) until the link
+			 * heals, when the search may RUN it again, or until it times
+			 * out (EXPIRE, ETIMEDOUT).  A node with more than one thread
+			 * is not offered the wait. */
+			if (!link_up(nd->id, peer) || !link_up(peer, nd->id))
+			{
+				if (node_multi(nd))
+					die(3, "node %d dials node %d across a cut link; a blocking connect that waits in a node with more than one thread is not modelled", nd->id, peer);
+				th->block_kind = BK_SYNWAIT; th->block_id = g_req->id; th->block_peer = peer;
+				set_deadline(nd, th, 1, SYN_TIMEOUT);
+				return 1;
+			}
 			if (!N[peer].alive)
 			{
 				/* the socket stays, unconnected: a read fails with
@@ -3307,8 +3325,6 @@ serve(Node *nd, Thread *th)
 				 * refusal, until it is dialled again */
 				int c = conn_new(nd->id, peer);
 				rst_path(peer, nd->id);
-				if (!link_up(nd->id, peer))
-					die(3, "node %d dials node %d across a cut link; a blocking connect that times out is not modelled", nd->id, peer);
 				conns[c].closed[1] = conns[c].gone[1] = 1; conns[c].refused = 1;
 				conns[c].lport = local_port(nd, fd);
 				cfd_set(nd, fd, peer, c, 0);
@@ -4654,7 +4670,7 @@ encode_threads(const Node *nd, unsigned char *out, int cap)
 			r[p++] = (unsigned char) (th->block_peer + 4); r[p++] = (unsigned char) (cs + 1);
 			r[p++] = (unsigned char) th->block_want; r[p++] = (unsigned char) (th->block_want >> 8);
 		}
-		else if (th->block_kind == BK_ACCEPT)
+		else if (th->block_kind == BK_ACCEPT || th->block_kind == BK_SYNWAIT)
 			r[p++] = (unsigned char) (th->block_peer + 4);
 		else if (th->block_kind == BK_FUTEX)
 			for (int b = 0; b < 8; b++) r[p++] = (unsigned char) (th->futex_addr >> (8 * b));
@@ -5158,6 +5174,12 @@ enum_actions(Act *out)
 				continue;
 			}
 			if (th->block_kind == BK_SLEEP) continue;	/* only its deadline wakes it (A_EXPIRE) */
+			if (th->block_kind == BK_SYNWAIT)
+			{
+				/* the link healed: the next SYN gets through */
+				if (link_up(d, th->block_peer) && link_up(th->block_peer, d)) ADD(A_RUN, d, -1, ti);
+				continue;
+			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
 			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED ||
 				th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW)
@@ -5327,7 +5349,8 @@ complete_connect(int conn)
  * clock moves to the deadline, and every other clock by as much as
  * drift variant v says (drift_advance()).  The thread's call returns
  * as Linux returns it on expiry: poll and epoll_wait with 0 and nothing
- * ready, a sleep with 0, and select and pselect6 with 0 and their
+ * ready, a sleep with 0, a futex wait and a connect across a cut link
+ * with ETIMEDOUT, and select and pselect6 with 0 and their
  * timeout counted down to zero (a timeval and a timespec are both two
  * zero 64-bit words). */
 static void
@@ -5351,7 +5374,7 @@ fire_deadline(int d, Thread *th, int v)
 		static const struct { long long sec, usec; } zero;
 		if (cr_write(nd->pid, th->block_bufaddr, &zero, sizeof zero) != sizeof zero) cr_fail(nd->id, "select returns the time left");
 	}
-	answer(nd, th, th->block_kind == BK_FUTEX ? -ETIMEDOUT : 0);
+	answer(nd, th, th->block_kind == BK_FUTEX || th->block_kind == BK_SYNWAIT ? -ETIMEDOUT : 0);
 	g_cap = old;
 }
 
@@ -5468,6 +5491,7 @@ apply(const Act *a)
 		case A_WAKE: poll_wake(nd, th, a->peer, a->arg); break;
 		case A_RUN:
 			if (th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED) run_stopped(nd, th);
+			else if (th->block_kind == BK_SYNWAIT) { th->has_dl = 0; run_connwait(nd, th); }
 			else if (th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW) run_connwait(nd, th);
 			else run_held(nd, th);
 			break;

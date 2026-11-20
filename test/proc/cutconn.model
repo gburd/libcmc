@@ -1,0 +1,10 @@
+# cutconn.c: node 1 makes a blocking connect to node 0, which is alive.
+# Across a cut link Linux's connect waits, and fails with ETIMEDOUT if
+# the link does not heal in time, so node 1 can report 2.
+[target]
+binary = cutconn
+nodes = 2
+[environment]
+partitions = 1
+[invariants]
+nofail = "node[1][0] != 2"

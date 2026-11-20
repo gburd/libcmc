@@ -80,10 +80,13 @@ Network partitions, `[environment] partitions = N`: the search may cut
 a directed link between two nodes (asymmetric partitions included) and
 heal it later.  A cut link holds back its bytes, FINs and handshakes,
 in order, as TCP's retransmission does; nothing is lost.  An RST that
-would cross a cut link, and a blocking connect across one, are refused.
-The search already delays any delivery as long as it likes, so a cut
-alone adds no safety violation; it matters with timeouts.  Gate:
-proc_gate partitions rows.
+would cross a cut link is refused (exit 3).  A blocking connect across
+a cut link waits until the link heals, or fails with ETIMEDOUT when a
+127 s deadline on the node's clock (Linux's six SYN retries) fires
+first; it used to succeed at once when the node dialled was up.  The
+search already delays any delivery as long as it likes, so a cut alone
+adds little; it matters with deadlines.  Gate: proc_gate partitions
+rows, among them cutconn.
 
 The race runtime provides the 16-byte atomics (`__tsan_atomic128_*`)
 that gcc and clang emit for `__int128` atomics under `-mcx16`.  A

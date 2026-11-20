@@ -589,9 +589,13 @@ finds more, never less.
 Partition budget is left: the link from node a to node b is cut.
 Bytes, FINs and handshakes from a to b wait, in order, until it heals;
 the link from b to a is not affected.
-An RST that would cross a cut link, and a blocking
+An RST that would cross a cut link is refused.
+A blocking
 .Fn connect
-across one, are refused.
+across a cut link waits; once the link heals RUN lets it through, and
+if its deadline (127 seconds on the node's clock, Linux's six SYN
+retries) fires first it fails with
+.Er ETIMEDOUT .
 .It HEAL(a, b)
 The link from a to b is cut: it heals, and what waited may move.
 .It RESTART

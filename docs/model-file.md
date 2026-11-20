@@ -128,15 +128,17 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   dialled across it is not accepted, and a non-blocking connect across
   it does not complete, until the link heals.  Nothing is lost: TCP
   retransmits, so the bytes wait, in order.  A cut from a to b with b
-  to a up is an asymmetric partition.  Two things a cut would hold back
-  are not modelled and end the check (exit 3): an RST that would cross
+  to a up is an asymmetric partition.  One thing a cut would hold back
+  is not modelled and ends the check (exit 3): an RST that would cross
   a cut link (a close with bytes unread, a write to a closed peer, an
-  exited listener's backlog, a restart), and a blocking connect across
-  one, which Linux times out after its retries.  The client is never
-  cut off.  Note that the search already delays any delivery for as
-  long as it likes, and the clock moves only by budgeted timeouts, so
-  a cut adds no safety violation on its own; it shows its effect with
-  timeouts (a node that times out while the bytes wait) and in a
+  exited listener's backlog, a restart).  A blocking connect across a
+  cut link waits: it goes through once the link heals, or fails with
+  ETIMEDOUT when its deadline (127 s on the node's clock, Linux's six
+  SYN retries) fires first.  The client is never cut off.  Note that
+  the search already delays any delivery for as long as it likes, and
+  the clock moves only by budgeted timeouts and deadlines, so a cut adds
+  little on its own; it shows its effect with deadlines (a node that
+  times out while the bytes wait, a dial that fails) and in a
   counterexample that reads the way the failure happens.
 - `restarts`: a crashed node is relaunched as a fresh process.  The
   surviving durable record (what it last reported on descriptor 193) is
