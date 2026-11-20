@@ -78,9 +78,12 @@ addr(int port)
 static int
 listener(int port)
 {
-	int			s = socket(AF_INET, SOCK_STREAM, 0);
+	int			s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
 	struct sockaddr_in a = addr(port);
 
+	/* natively, modes run one after another on one port, and a dial of
+	 * the last one may still hold it in TIME_WAIT */
+	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
 	bind(s, (struct sockaddr *) &a, sizeof a);
 	listen(s, 8);
 	return s;
