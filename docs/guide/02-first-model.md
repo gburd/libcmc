@@ -73,7 +73,7 @@ build/cmc --model-file kvserver.model
 cmc: model file kvserver.model, binary kvserver, 2 nodes, breadth-first search
   environment: client_write 7, timeouts 0, crashes 1, drops 0, restarts 0
 Model checking completed. No error has been found.
-42 states generated, 30 distinct states found, 0 states left on queue.
+43 states generated, 32 distinct states found, 0 states left on queue.
 The depth of the complete state graph search is 12.
 ```
 

@@ -83,7 +83,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
 			[ "$rc" = "$want" ] && grep -q -- "$needle" "$OUT/kv.txt" ||
 				{ echo "docs: guide: $d (exit $rc, wanted $want and \"$needle\"; see $OUT/kv.txt)"; cat "$OUT/kv.txt"; fail=1; }
 		}
-		kv "the correct server does not pass" 0 "30 distinct states found"
+		kv "the correct server does not pass" 0 "32 distinct states found"
 		kv "the bug is not caught as the guide shows" 1 "5. crash n0" --binary "$KB/kvserver-bug"
 		kv "the bug shows without a crash, which the guide says it does not" 0 "No error has been found" --binary "$KB/kvserver-bug" --crashes 0
 		kv "simulation does not find the bug" 1 "no_lost_ack is violated" --binary "$KB/kvserver-bug" --simulate --seed 1 --walks 200

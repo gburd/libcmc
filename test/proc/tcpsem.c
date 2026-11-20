@@ -7,7 +7,8 @@
  *
  * A code is a decimal digit string packed in one byte, each digit one
  * call's result: 1 = success, 2 = ECONNRESET, 3 = EPIPE, 4 = 0 (EOF),
- * 5 = ENOTCONN, 6 = ECONNREFUSED, 7 = the byte the peer sent first.
+ * 5 = ENOTCONN, 6 = ECONNREFUSED, 7 = the byte the peer sent first,
+ * 8 = ETIMEDOUT.
  *
  * Under cmc each scenario is driven by its model in test/proc_gate.sh
  * (timers, and for redial a crash and a restart); natively the gate
@@ -24,6 +25,9 @@
  *   redial    node 0 dials node 1 while it is down (refused), reads,
  *             then, once node 1 is back and listening, dials again on the
  *             same socket.  Linux: ECONNREFUSED, ENOTCONN, then success.
+ *             Natively node 1's process is stopped with its host up;
+ *             under cmc it crashes, a host that answers nothing, so the
+ *             first dial times out instead (ETIMEDOUT).
  *
  * Node 0's code is two bytes, the high digits then the low two.
  *
@@ -63,7 +67,7 @@ note(ssize_t r, int byte)
 {
 	int			d = r > 0 ? (byte ? 7 : 1) : r == 0 ? 4 :
 		errno == ECONNRESET ? 2 : errno == EPIPE ? 3 :
-		errno == ENOTCONN ? 5 : errno == ECONNREFUSED ? 6 : 9;
+		errno == ENOTCONN ? 5 : errno == ECONNREFUSED ? 6 : errno == ETIMEDOUT ? 8 : 9;
 
 	code = code * 10 + d;
 }

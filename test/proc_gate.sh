@@ -1128,6 +1128,17 @@ sd nb nbcut "a non-blocking connect across a cut link times out" 1 "notimeout is
 sd nb nbcutrev "it reports POLLOUT, POLLERR and POLLHUP, and no other error" 0 "No error has been found" \
 	"partitions = 1" 'linux = "node[1][0] != 1 or node[1][1] == 28"
 other = "node[1][0] != 3 and node[1][0] != 4"'
+# a host that crashed answers no SYN: a dial to it times out, never
+# ECONNREFUSED (it was refused, as by a host whose process exited)
+for m in block nb; do
+	sd $m crash$m "a $m dial to a crashed host times out" 1 "notimeout is violated" \
+		"crashes = 1" 'notimeout = "node[1][0] != 1"'
+	sd $m crashref$m "and is never refused" 0 "No error has been found" \
+		"crashes = 1" 'norefuse = "node[1][0] != 3 and node[1][0] != 4"'
+done
+sd exit exit "a host whose process exited refuses at once" 0 "No error has been found" \
+	"timeouts = 0" 'linux = "node[1][0] == 0 or node[1][0] == 3"
+reached = "eventually node[1][0] == 3"'
 
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end
@@ -1347,19 +1358,23 @@ tcpsem_native() {	# MODE FIRST PAUSE: run natively, print node 0's two code byte
 	wait $pa; wait $pb
 	od -An -tu1 "$d/n0.state" | tr -s ' ' '\n' | grep -v '^$' | tail -2 | tr '\n' ' '
 }
-tcpsem_row() {	# MODE FIRST PAUSE HI LO ENV
+tcpsem_row() {	# MODE FIRST PAUSE HI LO ENV [CMC_HI]: CMC_HI, when cmc's answer differs by design
 	got=$(tcpsem_native "$1" "$2" "$3")
 	if [ "$got" = "$4 $5 " ]; then echo "ok   tcpsem $1: Linux gives $4,$5"
 	else echo "FAIL tcpsem $1: Linux gave '$got', the fixture expects '$4 $5'"; fail=1; fi
+	hi=${7:-$4}
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[fields]\nhi = 0\nlo = 1\n[invariants]\nlinux = "node[0].hi < 1 or (node[0].hi == %s and node[0].lo == %s) or node[0].lo == 9"\nreached = "eventually node[0].hi == %s and node[0].lo == %s"\n' \
-		"$B/proc/tcpsem" "$1" "$6" "$4" "$5" "$4" "$5" > "$OUT/tcpsem-$1.model"
+		"$B/proc/tcpsem" "$1" "$6" "$hi" "$5" "$hi" "$5" > "$OUT/tcpsem-$1.model"
 	expect "tcpsem $1: cmc reaches Linux's result and no other" 0 "No error has been found" --model-file "$OUT/tcpsem-$1.model"
 }
 tcpsem_row finwrite 1 0.1 13 44 "timeouts = 0"
 tcpsem_row rstdata  1 0.1 7 24  "timeouts = 0"
 tcpsem_row backlog  1 0.1 0 24  "timeouts = 1"
+# redial: natively node 1's process is stopped (its host refuses the
+# dial, 6); under cmc it crashes, a host that answers nothing, so the
+# dial times out (8) before the same ENOTCONN and redial
 tcpsem_row redial   0 0.3 6 51  "crashes = 1
-restarts = 1"
+restarts = 1" 8
 
 # the world encoding (soundness plan 3.1, 3.2): worlds whose futures
 # differ encode differently, and the seen set compares bytes, not hashes

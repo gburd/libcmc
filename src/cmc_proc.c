@@ -3537,15 +3537,16 @@ serve(Node *nd, Thread *th)
 				if (plain) *fd_flags(nd, fd) = 0;
 				g_resp->error = -EINPROGRESS; break;
 			}
-			/* Across a cut link the SYN or its answer is lost, and Linux
-			 * retransmits: the connect waits (BK_SYNWAIT) until the link
-			 * heals, when the search may RUN it again, or until it times
-			 * out (EXPIRE, ETIMEDOUT).  A node with more than one thread
-			 * is not offered the wait. */
-			if (!link_up(nd->id, peer) || !link_up(peer, nd->id))
+			/* Across a cut link, or to a host that is down (crashed: no
+			 * kernel answers with an RST), the SYN or its answer is lost,
+			 * and Linux retransmits: the connect waits (BK_SYNWAIT) until
+			 * the link heals or the host restarts, when the search may RUN
+			 * it again, or until it times out (EXPIRE, ETIMEDOUT).  A node
+			 * with more than one thread is not offered the wait. */
+			if (!link_up(nd->id, peer) || !link_up(peer, nd->id) || N[peer].crashed)
 			{
 				if (node_multi(nd))
-					die(3, "node %d dials node %d across a cut link; a blocking connect that waits in a node with more than one thread is not modelled", nd->id, peer);
+					die(3, "node %d dials node %d across a cut link or to a crashed host; a blocking connect that waits in a node with more than one thread is not modelled", nd->id, peer);
 				th->block_kind = BK_SYNWAIT; th->block_id = g_req->id; th->block_peer = peer;
 				set_deadline(nd, th, 1, SYN_TIMEOUT);
 				return 1;
@@ -5326,15 +5327,17 @@ first_deadline(int d)
 	return best;
 }
 
-/* Can non-blocking dial c not complete its handshake now: is its link
- * cut?  Its SYN deadline may then come due (fire_syn()). */
+/* Can non-blocking dial c not complete its handshake now: its link is
+ * cut, or the peer's host is down (crashed, so nothing answers the SYN,
+ * where a host whose process exited refuses it)?  Its SYN deadline may
+ * then come due (fire_syn()). */
 static int
 syn_stuck(int c)
 {
 	const Conn *cn = &conns[c];
 	int a = cn->node[0], b = cn->node[1];
 	if (!cn->used || !cn->connecting || a < 0 || !N[a].alive || cn->closed[0]) return 0;
-	return !link_up(a, b) || !link_up(b, a);
+	return !link_up(a, b) || !link_up(b, a) || N[b].crashed;
 }
 
 /* The stuck dial of node d whose SYN deadline comes first, or -1.  Ties
@@ -5599,8 +5602,9 @@ enum_actions(Act *out)
 			if (th->block_kind == BK_SLEEP) continue;	/* only its deadline wakes it (A_EXPIRE) */
 			if (th->block_kind == BK_SYNWAIT)
 			{
-				/* the link healed: the next SYN gets through */
-				if (link_up(d, th->block_peer) && link_up(th->block_peer, d)) ADD(A_RUN, d, -1, ti);
+				/* the link healed and the host is up: the next SYN gets through */
+				if (link_up(d, th->block_peer) && link_up(th->block_peer, d) && !N[th->block_peer].crashed)
+					ADD(A_RUN, d, -1, ti);
 				continue;
 			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
@@ -5655,10 +5659,11 @@ enum_actions(Act *out)
 			if (g_cut[x][y]) ADD(A_HEAL, x, y, -1);
 			else if (bud.partitions > 0) ADD(A_CUT, x, y, -1);
 		}
-	/* a non-blocking dial's handshake completes (CONNECT) */
+	/* a non-blocking dial's handshake completes (CONNECT), unless the
+	 * link is cut or the peer's host is down (see syn_stuck()) */
 	for (int ci = 0; ci < MAXCONNS; ci++)
 		if (conns[ci].used && conns[ci].connecting && link_up(conns[ci].node[0], conns[ci].node[1]) &&
-			link_up(conns[ci].node[1], conns[ci].node[0]))
+			link_up(conns[ci].node[1], conns[ci].node[0]) && !N[conns[ci].node[1]].crashed)
 			ADD2(A_CONNECT, conns[ci].node[0], conns[ci].node[1], -1, ci);
 	if (bud.restarts > 0)
 		for (int d = 0; d < M.nodes; d++)

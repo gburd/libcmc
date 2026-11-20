@@ -325,7 +325,8 @@ returns
 .Er EINPROGRESS ,
 as on Linux, and its handshake completes when the search says
 .Pq the CONNECT action :
-into the backlog of a live peer, or refused by one that is down.
+into the backlog of a live peer, or refused by one whose process has
+exited (one whose host crashed times out, see CUT).
 A call that looks at the socket before then
 .Pq a read, a write, Fn poll , Fn getsockopt
 is a choice between the two orders.
@@ -1086,9 +1087,14 @@ are refused.
 An exited listener resets the dials still in its backlog.
 A
 .Fn connect
-to a node that is down is refused, and the socket reads
+to a node whose process has exited is refused, and the socket reads
 .Er ENOTCONN
-until it is dialled again; one to a live node that has not yet called
+until it is dialled again.
+One to a node that crashed (its host is down, so nothing answers the
+SYN) waits, as across a cut link, until a RESTART lets RUN complete it
+or its 127-second deadline fails it with
+.Er ETIMEDOUT ;
+a non-blocking one times out the same way; one to a live node that has not yet called
 .Fn listen
 waits rather than failing.
 Each of these is compared with a native Linux run by

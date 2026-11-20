@@ -5,6 +5,23 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A dial to a node that crashed times out instead of being refused.  A
+CRASH is a host losing power, and a host that is down sends no RST, so
+Linux retries the SYN and fails with `ETIMEDOUT` after about 127 s
+(or connects, if the host comes back first).  cmc answered
+`ECONNREFUSED` at once, which needs a live kernel with no listener, so
+a client whose timeout path was wrong passed, and one that fails over
+fast on a refusal took a path a real outage does not give.  A dial to
+a node whose process exited is still refused.  Now a blocking dial to
+a crashed node waits (as across a cut link) until a RESTART lets it
+through or its deadline fails it, and a non-blocking one fails at its
+deadline.  The tcpsem redial row, whose node 1 crashes under cmc, now
+expects `ETIMEDOUT` there where the native run (a stopped process)
+gets `ECONNREFUSED`.  State counts grow where a node dials a crashed
+peer: raftlog and zab from 105 to 107, the guide's kvserver from 30 to
+32.  Gates: proc_gate syndial crashblock, crashrefblock, crashnb,
+crashrefnb and exit, and tcpsem redial.
+
 A non-blocking `connect` across a cut link times out, as a blocking
 one already did: after 127 s on the dialler's clock (EXPIRE) the dial
 fails with `ETIMEDOUT` for `SO_ERROR`, and `poll` reports `POLLOUT`,
