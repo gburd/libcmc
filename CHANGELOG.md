@@ -5,6 +5,15 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A non-blocking `connect` across a cut link times out, as a blocking
+one already did: after 127 s on the dialler's clock (EXPIRE) the dial
+fails with `ETIMEDOUT` for `SO_ERROR`, and `poll` reports `POLLOUT`,
+`POLLERR` and `POLLHUP`, as measured on Linux.  The handshake simply
+waited for the link to heal, so a program whose timeout path was wrong
+(libpq's connect is non-blocking) passed.  The deadline is in the
+world encoding.  No example's state count changes.  Gate: proc_gate
+syndial nbcut and nbcutrev.
+
 A crash no longer loses a message its peer has read part of, or that a
 `poll` or `epoll_wait` has reported to the peer, nor any message
 before it: those bytes are in the peer's kernel.  A crash after a

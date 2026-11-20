@@ -689,6 +689,18 @@ across a cut link waits; once the link heals RUN lets it through, and
 if its deadline (127 seconds on the node's clock, Linux's six SYN
 retries) fires first it fails with
 .Er ETIMEDOUT .
+A non-blocking
+.Fn connect
+across a cut link has the same deadline: when it fires (EXPIRE) the
+dial fails as a refused one does, with
+.Er ETIMEDOUT
+for
+.Fn getsockopt Dv SO_ERROR
+and
+.Dv POLLOUT , POLLERR
+and
+.Dv POLLHUP ,
+as Linux reports them.
 .It HEAL(a, b)
 The link from a to b is cut: it heals, and what waited may move.
 .It RESTART

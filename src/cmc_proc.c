@@ -938,6 +938,7 @@ typedef struct {
 	int lport;					/* the dialler's local port, for getsockname and getpeername */
 	int shut_wr[2], shut_rd[2];	/* shutdown() of this end's sending, receiving side */
 	int full[2];				/* this end's send buffer is full (a SHORT write): writes EAGAIN, no POLLOUT */
+	unsigned long long syn_dl;	/* a non-blocking dial's SYN deadline, on the dialler's clock (fire_syn()) */
 } Conn;
 static Conn conns[MAXCONNS];
 
@@ -3529,6 +3530,7 @@ serve(Node *nd, Thread *th)
 				 * Until then the acceptor end does not exist. */
 				int c = conn_new(nd->id, peer);
 				conns[c].connecting = conns[c].nbdial = 1; conns[c].closed[1] = 1;
+				conns[c].syn_dl = g_clk[nd->id] + SYN_TIMEOUT;
 				conns[c].lport = local_port(nd, fd);
 				cfd_set(nd, fd, peer, c, 0);
 				nd->cnonblock[nd->nc - 1] = 1; nd->ccloexec[nd->nc - 1] = cx;
@@ -5093,8 +5095,16 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5) |
 		 (cn->connecting << 6) | (cn->nbdial << 7));
 	PUTC(cn->full[e] | (cn->full[1 - e] << 1));
-	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : cn->err[e] == ECONNREFUSED ? 3 : 0);
+	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : cn->err[e] == ECONNREFUSED ? 3 :
+		 cn->err[e] == ETIMEDOUT ? 4 : 0);
 	PUTC(cn->shut_wr[e] | (cn->shut_rd[e] << 1) | (cn->shut_wr[1 - e] << 2) | (cn->shut_rd[1 - e] << 3));
+	/* a handshake still out: its SYN deadline, as the time left on the
+	 * dialler's clock (see the thread records) */
+	if (cn->connecting)
+	{
+		unsigned long long now = g_clk[cn->node[0]], left = cn->syn_dl > now ? cn->syn_dl - now : 0;
+		for (int b = 0; b < 8; b++) PUTC(left >> (8 * b));
+	}
 	for (int last = -1;;)
 	{
 		int h = conn_next(c, e, last);
@@ -5316,6 +5326,42 @@ first_deadline(int d)
 	return best;
 }
 
+/* Can non-blocking dial c not complete its handshake now: is its link
+ * cut?  Its SYN deadline may then come due (fire_syn()). */
+static int
+syn_stuck(int c)
+{
+	const Conn *cn = &conns[c];
+	int a = cn->node[0], b = cn->node[1];
+	if (!cn->used || !cn->connecting || a < 0 || !N[a].alive || cn->closed[0]) return 0;
+	return !link_up(a, b) || !link_up(b, a);
+}
+
+/* The stuck dial of node d whose SYN deadline comes first, or -1.  Ties
+ * go to the lowest connection. */
+static int
+first_syn(int d)
+{
+	int best = -1;
+	for (int c = 0; c < MAXCONNS; c++)
+		if (conns[c].node[0] == d && syn_stuck(c) && (best < 0 || conns[c].syn_dl < conns[best].syn_dl)) best = c;
+	return best;
+}
+
+/* Node d's first deadline, a parked thread's or a stuck dial's: returns
+ * 1 with it in *dl, its thread in *ti (or -1) and its dial in *ci (or
+ * -1), or 0 when it has none.  A thread wins a tie. */
+static int
+node_deadline(int d, unsigned long long *dl, int *ti, int *ci)
+{
+	*ti = first_deadline(d); *ci = first_syn(d);
+	if (*ti >= 0 && *ci >= 0 && conns[*ci].syn_dl < N[d].th[*ti].dl) *ti = -1;
+	else if (*ti >= 0) *ci = -1;
+	if (*ti < 0 && *ci < 0) return 0;
+	*dl = *ti >= 0 ? N[d].th[*ti].dl : conns[*ci].syn_dl;
+	return 1;
+}
+
 /* x * num / den for the drift rates, without overflowing 64 bits for
  * deadlines up to a century; rounded up when up is set */
 static unsigned long long
@@ -5347,9 +5393,10 @@ expire_ok(int d, unsigned long long D, int v)
 {
 	for (int j = 0; j < M.nodes; j++)
 	{
-		int tj = j == d ? -1 : first_deadline(j);
-		if (tj < 0) continue;
-		unsigned long long dl = N[j].th[tj].dl, left = dl > g_clk[j] ? dl - g_clk[j] : 0;
+		unsigned long long dl;
+		int tj, cj;
+		if (j == d || !node_deadline(j, &dl, &tj, &cj)) continue;
+		unsigned long long left = dl > g_clk[j] ? dl - g_clk[j] : 0;
 		if (drift_advance(d, j, D, v) > left) return 0;
 	}
 	return 1;
@@ -5363,14 +5410,17 @@ enum_expire(Act *out, int *c)
 {
 	for (int d = 0; d < M.nodes; d++)
 	{
-		int ti = first_deadline(d);
-		if (ti < 0) continue;
-		unsigned long long dl = N[d].th[ti].dl, D = dl > g_clk[d] ? dl - g_clk[d] : 0;
-		if (expire_ok(d, D, -1)) add_act(out, c, A_EXPIRE, d, -1, ti, -1);
+		unsigned long long dl;
+		int ti, ci;
+		if (!node_deadline(d, &dl, &ti, &ci)) continue;
+		/* a dial's deadline names its connection as the action's peer */
+		int pr = ci >= 0 ? ci : -1;
+		unsigned long long D = dl > g_clk[d] ? dl - g_clk[d] : 0;
+		if (expire_ok(d, D, -1)) add_act(out, c, A_EXPIRE, d, pr, ti, -1);
 		if (M.drift == 0 || D == 0) continue;
 		for (int j = 0; j < M.nodes; j++)
 			for (int s = 0; j != d && s < 2; s++)
-				if (expire_ok(d, D, 2 * j + s)) add_act(out, c, A_EXPIRE, d, -1, ti, 2 * j + s);
+				if (expire_ok(d, D, 2 * j + s)) add_act(out, c, A_EXPIRE, d, pr, ti, 2 * j + s);
 	}
 }
 
@@ -5745,12 +5795,12 @@ poll_recheck(Node *nd, Thread *th)
  * the dialler to read once.  A dialler parked in poll on the socket
  * then sees it ready. */
 static void
-complete_connect(int conn)
+complete_connect(int conn, int err)
 {
 	Conn *cn = &conns[conn];
 	int peer = cn->node[1];
 	cn->connecting = 0;
-	if (N[peer].alive)
+	if (!err && N[peer].alive)
 	{
 		if (N[peer].npend >= MAXCONN) die(1, "more than %d connections wait at node %d", MAXCONN, peer);
 		cn->closed[1] = 0;
@@ -5758,11 +5808,29 @@ complete_connect(int conn)
 	}
 	else
 	{
-		cn->refused = 1; cn->gone[1] = 1; cn->err[0] = ECONNREFUSED;
+		cn->refused = 1; cn->gone[1] = 1; cn->err[0] = err ? err : ECONNREFUSED;
 	}
 	Node *nd = &N[cn->node[0]];
 	for (int ti = 0; ti < nd->nth; ti++)
 		if (nd->th[ti].inuse && nd->th[ti].block_kind == BK_POLL) poll_recheck(nd, &nd->th[ti]);
+	/* a call parked on the handshake is no longer a choice */
+	for (int ti = 0; ti < nd->nth; ti++)
+		if (nd->th[ti].inuse && nd->th[ti].block_kind == BK_CONNWAIT &&
+			!connwait(nd, nd->th[ti].nr, (const __u64 *) nd->th[ti].args))
+			run_connwait(nd, &nd->th[ti]);
+}
+
+/* A_EXPIRE of non-blocking dial conn of node d: Linux gives up on the
+ * SYN after its retries (SYN_TIMEOUT), and the dial fails as a refused
+ * one does, with ETIMEDOUT for the dialler to read once (measured: then
+ * POLLIN, POLLOUT, POLLERR and POLLHUP, a read 0, a write EPIPE).  The
+ * clocks move as for a thread's deadline (fire_deadline()). */
+static void
+fire_syn(int d, int conn, int v)
+{
+	unsigned long long dl = conns[conn].syn_dl, D = dl > g_clk[d] ? dl - g_clk[d] : 0;
+	for (int j = 0; j < M.nodes; j++) g_clk[j] += drift_advance(d, j, D, v);
+	complete_connect(conn, ETIMEDOUT);
 }
 
 /* A_EXPIRE: node d's first deadline, on thread th, comes due.  Node d's
@@ -5948,15 +6016,11 @@ apply(const Act *a)
 			if (relaunch(nd)) die(3, "node %d would not restart", a->node);
 			break;
 		case A_STEP: drive_node(nd); break;
-		case A_CONNECT:
-			complete_connect(a->arg);
-			/* a call parked on the handshake is no longer a choice */
-			for (int ti = 0; ti < nd->nth; ti++)
-				if (nd->th[ti].inuse && nd->th[ti].block_kind == BK_CONNWAIT &&
-					!connwait(nd, nd->th[ti].nr, (const __u64 *) nd->th[ti].args))
-					run_connwait(nd, &nd->th[ti]);
+		case A_CONNECT: complete_connect(a->arg, 0); break;
+		case A_EXPIRE:
+			if (a->peer >= 0) fire_syn(a->node, a->peer, a->arg);
+			else fire_deadline(a->node, th, a->arg);
 			break;
-		case A_EXPIRE: fire_deadline(a->node, th, a->arg); break;
 	}
 	settle();
 }
@@ -6094,6 +6158,8 @@ act_name(const Act *a, char *b, size_t n)
 	else if (a->kind == A_SHORT) snprintf(b, n, "short n%d t%d (%d bytes)", a->node, a->thr, a->arg);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
+	else if (a->kind == A_EXPIRE && a->peer >= 0)
+		snprintf(b, n, "expire n%d dial to n%d (ETIMEDOUT)%s", a->node, conns[a->peer].node[1], a->arg < 0 ? "" : ", drift");
 	else if (a->kind == A_EXPIRE && a->arg < 0) snprintf(b, n, "expire n%d t%d", a->node, a->thr);
 	else if (a->kind == A_EXPIRE)
 		snprintf(b, n, "expire n%d t%d, n%d clock %s", a->node, a->thr, a->arg / 2, (a->arg & 1) ? "fast" : "slow");

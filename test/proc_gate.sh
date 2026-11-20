@@ -1113,6 +1113,21 @@ expect_by 120 "partitions: an RST across a cut link is refused" 3 "an RST held b
 # into the backlog, so a program that mishandles the failure passed
 $CC -O1 -no-pie -w -o "$B/proc/cutconn" "$T/cutconn.c" || { echo "proc_gate: cutconn.c does not build"; fail=1; }
 expect_by 120 "partitions: a blocking connect across a cut link times out" 1 "nofail is violated" $(run cutconn cutconn)
+# syndial.c: a dial whose SYNs go unanswered gives up after Linux's
+# retries (ETIMEDOUT at 127 s on the dialler's clock).  A non-blocking
+# one across a cut link reached only success (no deadline), and then
+# POLLOUT|POLLERR|POLLHUP (28) and SO_ERROR ETIMEDOUT, as measured
+$CC -O1 -no-pie -w -o "$B/proc/syndial" "$T/syndial.c" || { echo "proc_gate: syndial.c does not build"; fail=1; }
+sd() {	# sd MODE NAME DESC EXIT NEEDLE ENV INVARIANTS
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[invariants]\n%s\n' \
+		"$B/proc/syndial" "$1" "$6" "$7" > "$OUT/sd-$2.model"
+	expect_by 120 "syndial $2: $3" "$4" "$5" --model-file "$OUT/sd-$2.model"
+}
+sd nb nbcut "a non-blocking connect across a cut link times out" 1 "notimeout is violated" \
+	"partitions = 1" 'notimeout = "node[1][0] != 1"'
+sd nb nbcutrev "it reports POLLOUT, POLLERR and POLLHUP, and no other error" 0 "No error has been found" \
+	"partitions = 1" 'linux = "node[1][0] != 1 or node[1][1] == 28"
+other = "node[1][0] != 3 and node[1][0] != 4"'
 
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end
