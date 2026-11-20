@@ -83,9 +83,13 @@ last send earlier in the step, the call stops and the search may let
 the others act first (and deliver, or wake the poll) or run it as it
 stands
 .Pq RUN .
-Likewise a write, after an earlier send of the step, to a peer that
-could reset the connection first (it holds unread bytes from the
-writer), stops so the RST may arrive before it.
+Likewise a write, or a
+.Fn poll
+or
+.Fn epoll_wait
+that returns at once over such a connection, after an earlier send of
+the step, to a peer that could reset the connection first (it holds
+unread bytes from the writer), stops so the RST may arrive before it.
 No invariant is checked at such a point, and it is never merged.
 Elsewhere other nodes do not act inside a step: what the node computes
 between two calls touches only its own memory, so it commutes with

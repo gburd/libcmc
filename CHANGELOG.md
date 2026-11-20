@@ -5,6 +5,13 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A `poll` or `epoll_wait` that returns at once and asks only for
+`POLLOUT` (or `EPOLLOUT`) stops after an earlier send of the step, as
+a write does, when the peer could reset the connection first.  Only a
+poll for `POLLIN` stopped, so a zero-timeout writability check after a
+send never saw the peer's RST.  No example's state count changes.
+Gate: proc_gate midstep rstout and rsteout.
+
 `poll` and `epoll_wait` report `POLLERR` and `POLLHUP` on a connection
 its peer reset, and `POLLIN` once its receiving side is done, as Linux
 does.  A reset connection reported only what was asked for (and a

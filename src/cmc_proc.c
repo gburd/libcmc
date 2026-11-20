@@ -2619,6 +2619,8 @@ fd_may_change(Node *nd, int fd)
 	return conn_head(c, e) >= 0 || (nd->step_effect && may_change(c, e));
 }
 
+static int rst_may_come(Node *nd, int fd);
+
 /* Would write call nr of node nd, mid-step, answer differently had
  * another node or the network acted first?  A write fails only once an
  * RST has arrived; bytes arriving toward the writer change nothing, a
@@ -2634,9 +2636,19 @@ fd_may_change(Node *nd, int fd)
 static int
 peerwait(Node *nd, long nr, const __u64 *a)
 {
-	if (!nd->step_effect || node_multi(nd)) return 0;
 	if (nr != SYS_write && nr != SYS_sendto && nr != SYS_writev && nr != SYS_sendmsg) return 0;
-	int fd = (int) a[0], cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	return rst_may_come(nd, (int) a[0]);
+}
+
+/* Could an RST reach node nd's connection fd before its next call,
+ * mid-step, by an action of another node or the network (see
+ * peerwait())?  A write's result and a poll's POLLERR and POLLHUP
+ * change only then. */
+static int
+rst_may_come(Node *nd, int fd)
+{
+	if (!nd->step_effect || node_multi(nd)) return 0;
+	int cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
 	if (cs < 0 || nd->cconn[cs] < 0) return 0;
 	int c = nd->cconn[cs], e = nd->cend[cs], p = nd->cpeer[cs];
 	const Conn *cn = &conns[c];
@@ -3945,8 +3957,8 @@ serve(Node *nd, Thread *th)
 			/* as for poll(): park an answer-at-once that a peer could change */
 			int now_park = 0;
 			for (int i = 0; (ready > 0 || zero_timeout) && !th->now && !node_multi(nd) && i < e->nit; i++)
-				if ((e->events[i] & POLLIN) && !(local_ready(nd, e->fd[i], e->events[i]) & POLLIN) &&
-					fd_may_change(nd, e->fd[i]))
+				if (((e->events[i] & POLLIN) && !(local_ready(nd, e->fd[i], e->events[i]) & POLLIN) &&
+					 fd_may_change(nd, e->fd[i])) || rst_may_come(nd, e->fd[i]))
 					now_park = 1;
 			if (!now_park && (ready > 0 || zero_timeout))
 			{
@@ -4015,11 +4027,13 @@ serve(Node *nd, Thread *th)
 			}
 			/* A poll that would return at once, with a polled channel not
 			 * yet readable that another node could make readable first,
-			 * parks (poll_now) so the search may act first: WAKE it with
+			 * or one an RST could reach (POLLERR, POLLHUP), parks (poll_now) so the search may act first: WAKE it with
 			 * that channel ready too, or RUN it to answer as it stands. */
 			int now_park = 0;
 			for (int i = 0; (ready > 0 || zero_timeout) && !th->now && !node_multi(nd) && i < nfds; i++)
-				if ((pfs[i].events & POLLIN) && !(pfs[i].revents & POLLIN) && fd_may_change(nd, pfs[i].fd)) now_park = 1;
+				if (((pfs[i].events & POLLIN) && !(pfs[i].revents & POLLIN) && fd_may_change(nd, pfs[i].fd)) ||
+					rst_may_come(nd, pfs[i].fd))
+					now_park = 1;
 			if (!now_park && (ready > 0 || zero_timeout))
 			{
 				if (cr_write(nd->pid, arr, pfs, (size_t) nfds * sizeof pfs[0]) != (size_t) nfds * sizeof pfs[0])

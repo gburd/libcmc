@@ -1055,6 +1055,13 @@ for m in rstwake rstewake; do
 	ms $m "a reset wakes POLLIN|POLLERR|POLLHUP" 0 "No error has been found" \
 		'[invariants]\nlinux = "node[0][0] == 0 or node[0][0] == 25"\nreached = "eventually node[0][0] == 25"'
 done
+# poll(POLLOUT) or epoll_wait(EPOLLOUT) with a zero timeout right after
+# the write may find node 1's RST there (it never could: only a poll
+# for POLLIN stopped for the others)
+for m in rstout rsteout; do
+	ms $m "the peer's RST can come before a zero-timeout POLLOUT poll" 1 "not1 is violated" \
+		'[invariants]\nnot1 = "node[0][0] != 1"'
+done
 
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes
