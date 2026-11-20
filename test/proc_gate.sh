@@ -1002,7 +1002,7 @@ echo "-- the socket calls past read and write"
 # record and no other.  On 2.1.0 each of these calls on a checker-owned
 # socket ended the check (exit 3).
 $CC -O1 -no-pie -w -o "$B/proc/sockapi" "$T/sockapi.c" || { echo "proc_gate: sockapi.c does not build"; fail=1; }
-for m in iov shut dup opts errs; do
+for m in iov shut dup opts errs revents; do
 	(cd "$NB" && timeout 30 "$B/proc/sockapi" 0 "$m" 3>"$NB/sa-$m.state" > /dev/null 2>&1)
 	if ! record_model "$B/proc/sockapi" "$m" "$NB/sa-$m.state" "timeouts = 0" "$NB/sa-$m.model"; then
 		echo "FAIL sockapi $m: the native run left no record"; fail=1; continue
@@ -1041,6 +1041,20 @@ for m in read poll epoll; do
 	expect_by 120 "nbread $m: the peer's answer can arrive first" 1 "nofast is violated" $(runx "$OUT/nbread-$m.model" nbread)
 done
 expect_by 120 "rstmid: an RST can arrive between two writes"  1 "not1 is violated" $(run rstmid rstmid)
+# midstep.c: node 0 sends, then a call whose answer Linux gives from
+# what node 1 did meanwhile; ms MODE DESC EXIT NEEDLE INVARIANTS writes
+# and runs its model
+$CC -O1 -no-pie -w -o "$B/proc/midstep" "$T/midstep.c" || { echo "proc_gate: midstep.c does not build"; fail=1; }
+ms() {
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n%b\n' "$B/proc/midstep" "$1" "$5" > "$OUT/ms-$1.model"
+	expect_by 120 "midstep $1: $2" "$3" "$4" --model-file "$OUT/ms-$1.model"
+}
+# a poll or epoll_wait woken by a reset reports POLLIN|POLLERR|POLLHUP
+# (25), as Linux does, never POLLIN alone (it did)
+for m in rstwake rstewake; do
+	ms $m "a reset wakes POLLIN|POLLERR|POLLHUP" 0 "No error has been found" \
+		'[invariants]\nlinux = "node[0][0] == 0 or node[0][0] == 25"\nreached = "eventually node[0][0] == 25"'
+done
 
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes

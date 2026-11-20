@@ -1017,7 +1017,9 @@ local_port(const Node *nd, int fd)
  * measured on loopback: POLLHUP always, POLLERR while the error is
  * unread, and POLLIN and POLLOUT while the socket is still the one the
  * non-blocking connect left (nbdial) or the error is unread; after a
- * blocking refusal only POLLOUT.  Whether a connection is readable
+ * blocking refusal only POLLOUT.  A connection whose receiving side is
+ * done (shut, its FIN read, or reset) reports as Linux does, measured
+ * by proc_gate's sockapi revents.  Whether a connection is readable
  * otherwise is the search's (WAKE), not this. */
 static short
 local_ready(Node *nd, int fd, short events)
@@ -1028,10 +1030,17 @@ local_ready(Node *nd, int fd, short events)
 	if (cs >= 0 && nd->cconn[cs] >= 0)
 	{
 		const Conn *cn = &conns[nd->cconn[cs]];
+		int e = nd->cend[cs];
 		if (cn->connecting) return 0;
-		if (cn->full[nd->cend[cs]] && !cn->reset && !cn->err[nd->cend[cs]]) events &= ~POLLOUT;
-		if (!cn->refused && !cn->reset && cn->shut_rd[nd->cend[cs]])
-			return (short) ((events & (POLLIN | POLLOUT)) | (cn->shut_wr[nd->cend[cs]] ? POLLHUP : 0));
+		if (cn->full[e] && !cn->reset && !cn->err[e]) events &= ~POLLOUT;
+		if (!cn->refused && (cn->reset || cn->shut_rd[e] || cn->eof[e]))
+		{
+			/* Linux's tcp_poll(): a receive side shut (SHUT_RD, the FIN
+			 * read, or an RST) is readable, both sides shut or an RST is
+			 * POLLHUP, and the RST's error is POLLERR until read */
+			int hup = cn->reset || (cn->shut_wr[e] && (cn->shut_rd[e] || cn->eof[e]));
+			return (short) ((events & (POLLIN | POLLOUT)) | (hup ? POLLHUP : 0) | (cn->err[e] ? POLLERR : 0));
+		}
 		if (cn->refused)
 		{
 			short r = POLLHUP | (cn->err[0] ? POLLERR : 0);
@@ -5524,6 +5533,16 @@ enum_actions(Act *out)
  * for the ready fd -- that data is how the loop routes to the fd's
  * handler, so it is returned verbatim. */
 static int poll_answer(Node *nd, Thread *th, int hit);
+/* What else polled fd k of thread th reports as it is woken readable:
+ * the POLLHUP and POLLERR of a reset, or a FIN or a shut side, which
+ * Linux reports with the POLLIN (local_ready()); the woken fd's
+ * POLLOUT stays unreported, as before, so a wake answers one event. */
+static short
+woke_ready(Node *nd, const Thread *th, int k)
+{
+	return (short) (local_ready(nd, th->pollfds[k], th->pollevents[k]) & (POLLHUP | POLLERR));
+}
+
 static void
 poll_wake(Node *nd, Thread *th, int target, int at)
 {
@@ -5554,7 +5573,7 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 		/* return one ready struct epoll_event (packed on x86-64) carrying
 		 * the fd's stored user data */
 		struct __attribute__((packed)) { uint32_t events; uint64_t data; } ev;
-		ev.events = (th->pollevents[hit] & POLLIN) ? EPOLLIN : 0;
+		ev.events = (uint16_t) ((th->pollevents[hit] & POLLIN) | woke_ready(nd, th, hit));
 		ev.data = th->polldata[hit];
 		if (cr_write(nd->pid, th->block_pollarr, &ev, sizeof ev) != sizeof ev) cr_fail(nd->id, "epoll_wait returns an event");
 	}
@@ -5564,7 +5583,7 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 		for (int k = 0; k < th->pollfd_n; k++)
 		{
 			pfs[k].fd = th->pollfds[k]; pfs[k].events = th->pollevents[k];
-			pfs[k].revents = (k == hit) ? (short) (th->pollevents[k] & POLLIN) : 0;
+			pfs[k].revents = (k == hit) ? (short) ((th->pollevents[k] & POLLIN) | woke_ready(nd, th, k)) : 0;
 		}
 		size_t want = (size_t) th->pollfd_n * sizeof pfs[0];
 		if (cr_write(nd->pid, th->block_pollarr, pfs, want) != want) cr_fail(nd->id, "poll returns revents");

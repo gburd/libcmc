@@ -26,6 +26,10 @@
  *   errs   the errors: a socket call on an eventfd, an epoll instance or
  *          a closed fd, bad flags, addresses and lengths, a socket not
  *          connected, and an option set through a dup.
+ *   revents  what poll and epoll_wait report on a connection that is
+ *          open, reset by its peer (before and after the error is read),
+ *          past the peer's FIN, past a write the peer's stack answered
+ *          with an RST, and shut one way or both.
  *
  * Canonical state fd 3: [phase][codes...], phase 1 once done.
  *
@@ -311,6 +315,78 @@ errs(int c, int s, int ls)
 	raw(v);
 }
 
+/* poll's revents for events ev on fd, and epoll_wait's events */
+static void
+rev(int fd, short ev)
+{
+	struct pollfd p = {fd, ev, 0};
+	struct epoll_event e = {(uint32_t) ev, {0}}, o = {0, {0}};
+	static int	ep = -1;
+
+	if (ep < 0)
+		ep = epoll_create1(0);
+	raw(poll(&p, 1, 0) == 1 ? p.revents : 99);
+	epoll_ctl(ep, EPOLL_CTL_ADD, fd, &e);
+	raw(epoll_wait(ep, &o, 1, 0) == 1 ? (int) o.events : 0);
+	epoll_ctl(ep, EPOLL_CTL_DEL, fd, &e);
+}
+
+static void
+revs(int c, int s, int ls)
+{
+	char		b[8];
+	int			v, x;
+	socklen_t	l = sizeof v;
+
+	signal(SIGPIPE, SIG_IGN);
+	rev(c, POLLIN | POLLOUT);	/* POLLOUT */
+	/* reset: POLLERR until the error is read, POLLHUP, POLLIN, POLLOUT */
+	(void) !write(c, "x", 1);
+	close(s);
+	rev(c, POLLIN | POLLOUT);
+	rev(c, 0);
+	rev(c, POLLIN);
+	code(read(c, b, sizeof b));		/* ECONNRESET */
+	rev(c, POLLIN | POLLOUT);
+	close(c);
+	/* the error read by SO_ERROR instead */
+	s = pair(ls, &c);
+	(void) !write(c, "x", 1);
+	close(s);
+	code(getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &l));
+	rev(c, POLLOUT);
+	close(c);
+	/* the peer's FIN, read: POLLIN; a write it answers with an RST */
+	s = pair(ls, &c);
+	close(s);
+	code(read(c, b, sizeof b));		/* 0 */
+	rev(c, POLLIN | POLLOUT);
+	rev(c, 0);
+	code(write(c, "z", 1));
+	rev(c, POLLIN | POLLOUT);
+	close(c);
+	/* shut one way, both ways, and one way past the peer's FIN */
+	s = pair(ls, &c);
+	code(shutdown(c, SHUT_WR));
+	rev(c, POLLIN | POLLOUT);
+	close(c);
+	close(s);
+	s = pair(ls, &c);
+	code(shutdown(c, SHUT_RD));
+	rev(c, POLLIN | POLLOUT);
+	code(shutdown(c, SHUT_WR));
+	rev(c, POLLIN | POLLOUT);
+	rev(c, 0);
+	close(c);
+	close(s);
+	s = pair(ls, &c);
+	x = shutdown(c, SHUT_WR);
+	close(s);
+	code(x + (int) read(c, b, sizeof b));	/* 0 */
+	rev(c, POLLIN | POLLOUT);
+	close(c);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -350,6 +426,8 @@ main(int argc, char **argv)
 		dups(c, s);
 	else if (!strcmp(mode, "errs"))
 		errs(c, s, ls);
+	else if (!strcmp(mode, "revents"))
+		revs(c, s, ls);
 	emit(1);
 	return 0;
 }

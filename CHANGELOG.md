@@ -5,6 +5,19 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+`poll` and `epoll_wait` report `POLLERR` and `POLLHUP` on a connection
+its peer reset, and `POLLIN` once its receiving side is done, as Linux
+does.  A reset connection reported only what was asked for (and a
+blocked poll it woke, `POLLIN` alone), so an event loop that closes a
+connection on `POLLERR|POLLHUP` without reading was checked on a path
+Linux never takes (also on 2.1.0).  The revents for a reset, a FIN, a
+shut side and a refused dial now follow a native measurement.  raft's
+state count moves from 4072 to 4078 distinct states, and the hc
+example at depth 12 from 8095 to 7518: a poll over a connection
+already reset or past its FIN is ready at once, as on Linux, where it
+waited for the search to wake it.  Gates:
+proc_gate sockapi revents, midstep rstwake and rstewake.
+
 A non-blocking read, and a `poll` or `epoll_wait` that would return at
 once, can see bytes that have arrived.  They read EAGAIN, or reported
 nothing ready, unless a poll had just woken that fd, and the node ran
