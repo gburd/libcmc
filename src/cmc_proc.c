@@ -5566,7 +5566,6 @@ kill_all(void)
 /* refinement (Milestone C): expose the live nodes' observables to the
  * abstract model, and check the implementation's state refines it. */
 static long ob_node_byte(void *cx, int i, int k){ (void)cx; if(i<0||i>=M.nodes||k<0||k>=N[i].canon_len) return -1; return N[i].canon[k]; }
-static int  ob_node_len(void *cx, int i){ (void)cx; return (i>=0&&i<M.nodes)?N[i].canon_len:0; }
 static long ob_repl_src(void *cx, int r){ (void)cx; return rep_src[r]; }
 static long ob_repl_val(void *cx, int r){ (void)cx; return rep_val[r]; }
 static int
@@ -5574,7 +5573,7 @@ refine_check_state(int steps, const char **name, char *err, size_t errcap)
 {
 	CmcObs o = {0};
 	o.nnodes = M.nodes; o.nrepl = nrep;
-	o.node_byte = ob_node_byte; o.node_len = ob_node_len;
+	o.node_byte = ob_node_byte;
 	o.repl_src = ob_repl_src; o.repl_val = ob_repl_val;
 	return steps ? cmc_refine_step(&o, name, err, errcap)
 	             : cmc_refine_check(&o, name, err, errcap);
