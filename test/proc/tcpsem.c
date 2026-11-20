@@ -50,7 +50,9 @@ addr(int id)
 
 	memset(&a, 0, sizeof a);
 	a.sin_family = AF_INET;
-	a.sin_port = htons(BASE + id);
+	/* natively, away from 20000, where another check on the same host
+	 * may be listening; under cmc node i is 20000 + i */
+	a.sin_port = htons((unsigned short) (BASE + id + (getenv("CMC_STATE_FD") ? 0 : 9200)));
 	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 	return a;
 }
