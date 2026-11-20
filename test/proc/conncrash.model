@@ -1,0 +1,10 @@
+# conncrash.c: node 1 connects to node 0 and writes one byte.  A crash
+# can fall between connect() and the write, so node 0 can read EOF from
+# a connection that never carried a byte (node[0] reports 1).
+[target]
+binary = conncrash
+nodes = 2
+[environment]
+crashes = 1
+[invariants]
+no_empty = "node[0][0] != 1"

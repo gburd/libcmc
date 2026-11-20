@@ -18,6 +18,12 @@ such a mid-step point, since a program reports its state after its
 effects.  Gates: proc_gate rows durack-single and ackfirst, the guarded
 row, and the guide's trace in docs_gate.
 
+A connect() is a crash point too: the connection waits in the peer's
+backlog once it returns, so a crash before the first write leaves the
+peer an empty connection.  The guide's server grows from 26 to 30
+distinct states, and its counterexample gains a `run`.  Gate: proc_gate
+conncrash, and the guide's trace in docs_gate.
+
 Hand-written TLA+ twins for `fpaxos.cml`, `caspaxos.cml`, `zab.cml` and
 `fastpaxos.cml` (examples/spec/*.tla, in the style of `paxos.tla`), each
 cited to its paper.  Single-worker TLC gives the same distinct-state

@@ -2388,9 +2388,10 @@ visible(long nr, const __u64 *a)
  * machines or the disk see is decided per call, so while a crash is in
  * the budget each call with an effect outside the process ends the step:
  * a write or send on a checker-owned fd (bytes reach a peer or the
- * client), a close of one (a FIN or an RST), and a durable write (fd
- * 193).  Its answer is held (BK_DONE), and the search may RUN the node
- * on or CRASH it first (midstep_node()).  Calls with no outside effect
+ * client), a close of one (a FIN or an RST), a connect (the connection
+ * waits in the peer's backlog), and a durable write (fd 193).  Its
+ * answer is held (BK_DONE), and the search may RUN the node on or CRASH
+ * it first (midstep_node()).  Calls with no outside effect
  * stay inside the step, and so does a write to the volatile state hook,
  * which a crash discards.  A node with more
  * than one thread holds every visible call already (visible()). */
@@ -2403,7 +2404,7 @@ crash_point(const Node *nd, long nr, const __u64 *a)
 	{
 		case SYS_write: return fd >= 500 || fd == DURABLE_FD;
 		case SYS_sendto: case SYS_close: case SYS_writev: case SYS_sendmsg:
-		case SYS_shutdown:
+		case SYS_shutdown: case SYS_connect:
 			return fd >= 500;
 		default: return 0;
 	}
