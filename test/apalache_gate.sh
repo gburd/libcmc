@@ -96,7 +96,11 @@ fi
 
 # row: DIR | CML | MODULE | INV | want | length | define
 # length is the bound on steps (--length); a VIOLATION row needs at
-# least the length of the shortest counterexample cmc --spec reports
+# least the length of the shortest counterexample cmc --spec reports.
+# A PASS row whose length is at least cmc's depth minus one (the depth
+# counts the initial state) explores every reachable state: counter,
+# raft, hc, twophase and fastpaxos.  The others are bounded passes; see
+# docs/measurements/2026-11-20-apalache-length.md for longer runs.
 rows="
 test/spec|counter|counter|in_range|PASS|10|
 examples/spec|paxos|paxos|agreement|PASS|10|
@@ -114,7 +118,7 @@ examples/spec|caspaxos|caspaxos|descends|PASS|10|
 examples/spec|caspaxos|caspaxosb|descends|VIOLATION|12|--define BUG
 examples/spec|twophase|twophase|consistency|PASS|10|
 examples/spec|twophase|twophaseb|consistency|VIOLATION|10|--define BUG
-examples/spec|fastpaxos|fastpaxos|agreement|PASS|10|
+examples/spec|fastpaxos|fastpaxos|agreement|PASS|11|
 examples/spec|fastpaxos|fastpaxosb|agreement|VIOLATION|11|--define BUG
 "
 check() {

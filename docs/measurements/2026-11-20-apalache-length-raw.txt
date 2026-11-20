@@ -1,0 +1,726 @@
+# Raw output for 2026-11-20-apalache-length.md
+# host werk (48 x Xeon 8375C, 185 GiB, Linux 6.18.60), Apalache 0.63.0 on OpenJDK 21.0.12.1
+# cmc built from pr/2.2-spec 9bf1fea (c05d588 does not touch src/), sha256 308d1c2e17d37088917925a08c6c841a3cb297a4a7e99e4fa2d43c9bc09077b6
+# emitted modules (cmc --emit-tla, module renamed to the file name), sha256:
+#   892715305ffa0f9b14e939e1fd18bf57bec798a222f2c21e120b1acb4353c07c  caspaxos/caspaxos.tla
+#   65442bacc4cdee3986fe9440faf2daf1da62047429a06cb1a67aff639d8fb60a  counter/counter.tla
+#   68826bd31bee21c65ae7f6e8925a386356d8830cdd5b244e820a7aa4aafe1fea  fastpaxos/fastpaxos.tla
+#   3ec6c0ae508ee365201bc31066df7ff5f8cd2ad9d219b292f6f6d0723240b39f  fpaxos/fpaxos.tla
+#   88790a6d47e956ea4f471d0dab319c6d24fb84ff7696bf36aac4c4e48b91a8fe  paxos/paxos.tla
+#   50bdf9ca1b10c94b7a660e3f9a9a79eb8048e15f8f4fe97ef3b48e706c58b367  zab/zab.tla
+# load average at the three batch starts:
+#   16:25:39  up  8:43,  40 users,  load average: 8.58, 9.01, 9.60
+#   17:08:23  up  9:26,  39 users,  load average: 6.89, 8.72, 11.35
+#   18:02:31  up 10:20,  37 users,  load average: 4.36, 5.71, 6.69
+
+## per-run summary (run.sh: timeout CAP apalache-mc check --no-deadlock --cinit=CInit --inv=INV --length=N; rc 124 = hit CAP)
+fpaxos len=10 rc=0 wall=29s The outcome is: NoError 
+caspaxos len=10 rc=0 wall=32s The outcome is: NoError 
+paxos len=10 rc=0 wall=33s The outcome is: NoError 
+fastpaxos len=10 rc=0 wall=35s The outcome is: NoError 
+zab len=10 rc=0 wall=40s The outcome is: NoError 
+fastpaxos len=11 rc=0 wall=83s The outcome is: NoError 
+caspaxos len=12 rc=0 wall=194s The outcome is: NoError 
+paxos len=12 rc=0 wall=303s The outcome is: NoError 
+fpaxos len=12 rc=0 wall=410s The outcome is: NoError 
+zab len=13 rc=0 wall=442s The outcome is: NoError 
+caspaxos len=14 rc=124 wall=1201s no outcome 
+paxos len=14 rc=124 wall=1201s no outcome 
+fpaxos len=14 rc=124 wall=1200s no outcome 
+zab len=16 rc=124 wall=1200s no outcome 
+zab len=14 rc=0 wall=767s The outcome is: NoError 
+caspaxos len=13 rc=0 wall=807s The outcome is: NoError 
+paxos len=13 rc=0 wall=821s The outcome is: NoError 
+fpaxos len=13 rc=0 wall=984s The outcome is: NoError 
+zab len=15 rc=0 wall=1430s The outcome is: NoError 
+paxos len=14 rc=0 wall=2304s The outcome is: NoError 
+zab len=16 rc=0 wall=2758s The outcome is: NoError 
+
+## per-step progress and outcome lines from each log
+### counter/len3.txt
+Total time: 0.421 sec  @16:25:19.287
+EXITCODE: ERROR (255)
+### counter/len10.txt
+Step 0: picking a transition out of 1 transition(s)  @16:25:26.405
+Step 1: Transition #1 is disabled  @16:25:26.420
+Step 1: picking a transition out of 1 transition(s)  @16:25:26.420
+Step 2: Transition #1 is disabled  @16:25:26.426
+Step 2: picking a transition out of 1 transition(s)  @16:25:26.426
+Step 3: Transition #1 is disabled  @16:25:26.432
+Step 3: picking a transition out of 1 transition(s)  @16:25:26.432
+Step 4: Transition #0 is disabled  @16:25:26.435
+Step 4: picking a transition out of 1 transition(s)  @16:25:26.439
+Step 5: Transition #1 is disabled  @16:25:26.444
+Step 5: picking a transition out of 1 transition(s)  @16:25:26.444
+Step 6: Transition #1 is disabled  @16:25:26.449
+Step 6: picking a transition out of 1 transition(s)  @16:25:26.450
+Step 7: Transition #1 is disabled  @16:25:26.456
+Step 7: picking a transition out of 1 transition(s)  @16:25:26.456
+Step 8: Transition #0 is disabled  @16:25:26.459
+Step 8: picking a transition out of 1 transition(s)  @16:25:26.462
+Step 9: Transition #1 is disabled  @16:25:26.466
+Step 9: picking a transition out of 1 transition(s)  @16:25:26.466
+Step 10: Transition #1 is disabled  @16:25:26.470
+Step 10: picking a transition out of 1 transition(s)  @16:25:26.470
+The outcome is: NoError  @16:25:26.474
+Checker reports no error up to computation length 10  @16:25:26.474
+Total time: 1.614 sec  @16:25:26.474
+EXITCODE: OK
+### paxos/len10.txt
+Step 0: picking a transition out of 1 transition(s)  @16:25:42.695
+Step 1: Transition #1 is disabled  @16:25:42.867
+Step 1: Transition #2 is disabled  @16:25:42.921
+Step 1: Transition #3 is disabled  @16:25:42.961
+Step 1: picking a transition out of 1 transition(s)  @16:25:42.962
+Step 2: Transition #1 is disabled  @16:25:43.094
+Step 2: Transition #2 is disabled  @16:25:43.133
+Step 2: Transition #3 is disabled  @16:25:43.162
+Step 2: picking a transition out of 1 transition(s)  @16:25:43.163
+Step 3: Transition #2 is disabled  @16:25:43.292
+Step 3: Transition #3 is disabled  @16:25:43.317
+Step 3: picking a transition out of 2 transition(s)  @16:25:43.318
+Step 4: Transition #3 is disabled  @16:25:43.571
+Step 4: picking a transition out of 3 transition(s)  @16:25:43.572
+Step 5: Transition #3 is disabled  @16:25:44.049
+Step 5: picking a transition out of 3 transition(s)  @16:25:44.051
+Step 6: picking a transition out of 4 transition(s)  @16:25:44.882
+Step 7: picking a transition out of 4 transition(s)  @16:25:46.186
+Step 8: picking a transition out of 4 transition(s)  @16:25:48.738
+Step 9: picking a transition out of 4 transition(s)  @16:25:57.135
+Step 10: picking a transition out of 4 transition(s)  @16:26:12.633
+The outcome is: NoError  @16:26:12.678
+Checker reports no error up to computation length 10  @16:26:12.678
+Total time: 32.117 sec  @16:26:12.679
+EXITCODE: OK
+### paxos/len12.txt
+Step 0: picking a transition out of 1 transition(s)  @16:26:15.100
+Step 1: Transition #1 is disabled  @16:26:15.242
+Step 1: Transition #2 is disabled  @16:26:15.278
+Step 1: Transition #3 is disabled  @16:26:15.304
+Step 1: picking a transition out of 1 transition(s)  @16:26:15.305
+Step 2: Transition #1 is disabled  @16:26:15.408
+Step 2: Transition #2 is disabled  @16:26:15.436
+Step 2: Transition #3 is disabled  @16:26:15.457
+Step 2: picking a transition out of 1 transition(s)  @16:26:15.458
+Step 3: Transition #2 is disabled  @16:26:15.594
+Step 3: Transition #3 is disabled  @16:26:15.614
+Step 3: picking a transition out of 2 transition(s)  @16:26:15.615
+Step 4: Transition #3 is disabled  @16:26:15.844
+Step 4: picking a transition out of 3 transition(s)  @16:26:15.845
+Step 5: Transition #3 is disabled  @16:26:16.238
+Step 5: picking a transition out of 3 transition(s)  @16:26:16.239
+Step 6: picking a transition out of 4 transition(s)  @16:26:17.010
+Step 7: picking a transition out of 4 transition(s)  @16:26:18.502
+Step 8: picking a transition out of 4 transition(s)  @16:26:20.732
+Step 9: picking a transition out of 4 transition(s)  @16:26:25.779
+Step 10: picking a transition out of 4 transition(s)  @16:26:39.870
+Step 11: picking a transition out of 4 transition(s)  @16:27:48.805
+Step 12: picking a transition out of 4 transition(s)  @16:31:15.783
+The outcome is: NoError  @16:31:15.844
+Checker reports no error up to computation length 12  @16:31:15.844
+Total time: 302.412 sec  @16:31:15.845
+EXITCODE: OK
+### paxos/len13.txt
+Step 0: picking a transition out of 1 transition(s)  @17:08:25.975
+Step 1: Transition #1 is disabled  @17:08:26.110
+Step 1: Transition #2 is disabled  @17:08:26.147
+Step 1: Transition #3 is disabled  @17:08:26.172
+Step 1: picking a transition out of 1 transition(s)  @17:08:26.172
+Step 2: Transition #1 is disabled  @17:08:26.279
+Step 2: Transition #2 is disabled  @17:08:26.318
+Step 2: Transition #3 is disabled  @17:08:26.347
+Step 2: picking a transition out of 1 transition(s)  @17:08:26.349
+Step 3: Transition #2 is disabled  @17:08:26.481
+Step 3: Transition #3 is disabled  @17:08:26.499
+Step 3: picking a transition out of 2 transition(s)  @17:08:26.500
+Step 4: Transition #3 is disabled  @17:08:26.728
+Step 4: picking a transition out of 3 transition(s)  @17:08:26.729
+Step 5: Transition #3 is disabled  @17:08:27.103
+Step 5: picking a transition out of 3 transition(s)  @17:08:27.105
+Step 6: picking a transition out of 4 transition(s)  @17:08:27.856
+Step 7: picking a transition out of 4 transition(s)  @17:08:29.125
+Step 8: picking a transition out of 4 transition(s)  @17:08:31.332
+Step 9: picking a transition out of 4 transition(s)  @17:08:39.400
+Step 10: picking a transition out of 4 transition(s)  @17:08:51.973
+Step 11: picking a transition out of 4 transition(s)  @17:09:40.547
+Step 12: picking a transition out of 4 transition(s)  @17:12:39.901
+Step 13: picking a transition out of 4 transition(s)  @17:22:04.134
+The outcome is: NoError  @17:22:04.196
+Checker reports no error up to computation length 13  @17:22:04.197
+Total time: 820.41 sec  @17:22:04.198
+EXITCODE: OK
+### paxos/len14.txt
+Step 0: picking a transition out of 1 transition(s)  @18:02:33.623
+Step 1: Transition #1 is disabled  @18:02:33.744
+Step 1: Transition #2 is disabled  @18:02:33.774
+Step 1: Transition #3 is disabled  @18:02:33.795
+Step 1: picking a transition out of 1 transition(s)  @18:02:33.796
+Step 2: Transition #1 is disabled  @18:02:33.886
+Step 2: Transition #2 is disabled  @18:02:33.923
+Step 2: Transition #3 is disabled  @18:02:33.952
+Step 2: picking a transition out of 1 transition(s)  @18:02:33.953
+Step 3: Transition #2 is disabled  @18:02:34.067
+Step 3: Transition #3 is disabled  @18:02:34.083
+Step 3: picking a transition out of 2 transition(s)  @18:02:34.084
+Step 4: Transition #3 is disabled  @18:02:34.307
+Step 4: picking a transition out of 3 transition(s)  @18:02:34.307
+Step 5: Transition #3 is disabled  @18:02:34.659
+Step 5: picking a transition out of 3 transition(s)  @18:02:34.660
+Step 6: picking a transition out of 4 transition(s)  @18:02:35.473
+Step 7: picking a transition out of 4 transition(s)  @18:02:36.566
+Step 8: picking a transition out of 4 transition(s)  @18:02:38.940
+Step 9: picking a transition out of 4 transition(s)  @18:02:43.088
+Step 10: picking a transition out of 4 transition(s)  @18:02:53.783
+Step 11: picking a transition out of 4 transition(s)  @18:03:56.523
+Step 12: picking a transition out of 4 transition(s)  @18:07:38.695
+Step 13: picking a transition out of 4 transition(s)  @18:21:42.577
+Step 14: picking a transition out of 4 transition(s)  @18:40:55.788
+The outcome is: NoError  @18:40:55.840
+Checker reports no error up to computation length 14  @18:40:55.840
+Total time: 2303.763 sec  @18:40:55.841
+EXITCODE: OK
+### fpaxos/len10.txt
+Step 0: picking a transition out of 1 transition(s)  @16:25:42.637
+Step 1: Transition #1 is disabled  @16:25:42.839
+Step 1: Transition #2 is disabled  @16:25:42.894
+Step 1: Transition #3 is disabled  @16:25:42.943
+Step 1: picking a transition out of 1 transition(s)  @16:25:42.944
+Step 2: Transition #1 is disabled  @16:25:43.106
+Step 2: Transition #2 is disabled  @16:25:43.153
+Step 2: Transition #3 is disabled  @16:25:43.188
+Step 2: picking a transition out of 1 transition(s)  @16:25:43.189
+Step 3: Transition #1 is disabled  @16:25:43.368
+Step 3: Transition #2 is disabled  @16:25:43.404
+Step 3: Transition #3 is disabled  @16:25:43.434
+Step 3: picking a transition out of 1 transition(s)  @16:25:43.436
+Step 4: Transition #2 is disabled  @16:25:43.613
+Step 4: Transition #3 is disabled  @16:25:43.632
+Step 4: picking a transition out of 2 transition(s)  @16:25:43.633
+Step 5: Transition #3 is disabled  @16:25:43.929
+Step 5: picking a transition out of 3 transition(s)  @16:25:43.929
+Step 6: Transition #3 is disabled  @16:25:44.559
+Step 6: picking a transition out of 3 transition(s)  @16:25:44.561
+Step 7: picking a transition out of 4 transition(s)  @16:25:46.546
+Step 8: picking a transition out of 4 transition(s)  @16:25:49.233
+Step 9: picking a transition out of 4 transition(s)  @16:25:54.893
+Step 10: picking a transition out of 4 transition(s)  @16:26:08.844
+The outcome is: NoError  @16:26:08.904
+Checker reports no error up to computation length 10  @16:26:08.904
+Total time: 28.373 sec  @16:26:08.905
+EXITCODE: OK
+### fpaxos/len12.txt
+Step 0: picking a transition out of 1 transition(s)  @16:26:11.309
+Step 1: Transition #1 is disabled  @16:26:11.475
+Step 1: Transition #2 is disabled  @16:26:11.510
+Step 1: Transition #3 is disabled  @16:26:11.543
+Step 1: picking a transition out of 1 transition(s)  @16:26:11.544
+Step 2: Transition #1 is disabled  @16:26:11.652
+Step 2: Transition #2 is disabled  @16:26:11.683
+Step 2: Transition #3 is disabled  @16:26:11.717
+Step 2: picking a transition out of 1 transition(s)  @16:26:11.718
+Step 3: Transition #1 is disabled  @16:26:11.829
+Step 3: Transition #2 is disabled  @16:26:11.855
+Step 3: Transition #3 is disabled  @16:26:11.876
+Step 3: picking a transition out of 1 transition(s)  @16:26:11.877
+Step 4: Transition #2 is disabled  @16:26:12.045
+Step 4: Transition #3 is disabled  @16:26:12.066
+Step 4: picking a transition out of 2 transition(s)  @16:26:12.067
+Step 5: Transition #3 is disabled  @16:26:12.410
+Step 5: picking a transition out of 3 transition(s)  @16:26:12.411
+Step 6: Transition #3 is disabled  @16:26:13.258
+Step 6: picking a transition out of 3 transition(s)  @16:26:13.261
+Step 7: picking a transition out of 4 transition(s)  @16:26:15.204
+Step 8: picking a transition out of 4 transition(s)  @16:26:19.184
+Step 9: picking a transition out of 4 transition(s)  @16:26:24.445
+Step 10: picking a transition out of 4 transition(s)  @16:26:38.742
+Step 11: picking a transition out of 4 transition(s)  @16:28:22.954
+Step 12: picking a transition out of 4 transition(s)  @16:32:58.057
+The outcome is: NoError  @16:32:58.112
+Checker reports no error up to computation length 12  @16:32:58.113
+Total time: 408.476 sec  @16:32:58.113
+EXITCODE: OK
+### fpaxos/len13.txt
+Step 0: picking a transition out of 1 transition(s)  @17:08:25.908
+Step 1: Transition #1 is disabled  @17:08:26.085
+Step 1: Transition #2 is disabled  @17:08:26.123
+Step 1: Transition #3 is disabled  @17:08:26.155
+Step 1: picking a transition out of 1 transition(s)  @17:08:26.156
+Step 2: Transition #1 is disabled  @17:08:26.268
+Step 2: Transition #2 is disabled  @17:08:26.312
+Step 2: Transition #3 is disabled  @17:08:26.346
+Step 2: picking a transition out of 1 transition(s)  @17:08:26.347
+Step 3: Transition #1 is disabled  @17:08:26.500
+Step 3: Transition #2 is disabled  @17:08:26.524
+Step 3: Transition #3 is disabled  @17:08:26.545
+Step 3: picking a transition out of 1 transition(s)  @17:08:26.546
+Step 4: Transition #2 is disabled  @17:08:26.699
+Step 4: Transition #3 is disabled  @17:08:26.718
+Step 4: picking a transition out of 2 transition(s)  @17:08:26.719
+Step 5: Transition #3 is disabled  @17:08:27.204
+Step 5: picking a transition out of 3 transition(s)  @17:08:27.205
+Step 6: Transition #3 is disabled  @17:08:28.005
+Step 6: picking a transition out of 3 transition(s)  @17:08:28.008
+Step 7: picking a transition out of 4 transition(s)  @17:08:29.131
+Step 8: picking a transition out of 4 transition(s)  @17:08:31.411
+Step 9: picking a transition out of 4 transition(s)  @17:08:40.851
+Step 10: picking a transition out of 4 transition(s)  @17:08:57.979
+Step 11: picking a transition out of 4 transition(s)  @17:10:11.432
+Step 12: picking a transition out of 4 transition(s)  @17:14:49.348
+Step 13: picking a transition out of 4 transition(s)  @17:24:47.732
+The outcome is: NoError  @17:24:47.793
+Checker reports no error up to computation length 13  @17:24:47.793
+Total time: 983.696 sec  @17:24:47.794
+EXITCODE: OK
+### fpaxos/len14.txt
+Step 0: picking a transition out of 1 transition(s)  @16:33:00.407
+Step 1: Transition #1 is disabled  @16:33:00.577
+Step 1: Transition #2 is disabled  @16:33:00.615
+Step 1: Transition #3 is disabled  @16:33:00.647
+Step 1: picking a transition out of 1 transition(s)  @16:33:00.648
+Step 2: Transition #1 is disabled  @16:33:00.751
+Step 2: Transition #2 is disabled  @16:33:00.790
+Step 2: Transition #3 is disabled  @16:33:00.813
+Step 2: picking a transition out of 1 transition(s)  @16:33:00.814
+Step 3: Transition #1 is disabled  @16:33:00.931
+Step 3: Transition #2 is disabled  @16:33:00.961
+Step 3: Transition #3 is disabled  @16:33:00.985
+Step 3: picking a transition out of 1 transition(s)  @16:33:00.986
+Step 4: Transition #2 is disabled  @16:33:01.164
+Step 4: Transition #3 is disabled  @16:33:01.185
+Step 4: picking a transition out of 2 transition(s)  @16:33:01.185
+Step 5: Transition #3 is disabled  @16:33:01.546
+Step 5: picking a transition out of 3 transition(s)  @16:33:01.547
+Step 6: Transition #3 is disabled  @16:33:02.277
+Step 6: picking a transition out of 3 transition(s)  @16:33:02.279
+Step 7: picking a transition out of 4 transition(s)  @16:33:03.515
+Step 8: picking a transition out of 4 transition(s)  @16:33:06.503
+Step 9: picking a transition out of 4 transition(s)  @16:33:12.924
+Step 10: picking a transition out of 4 transition(s)  @16:33:26.905
+Step 11: picking a transition out of 4 transition(s)  @16:34:24.351
+Step 12: picking a transition out of 4 transition(s)  @16:41:22.035
+Step 13: picking a transition out of 4 transition(s)  @16:50:20.386
+### caspaxos/len10.txt
+Step 0: picking a transition out of 1 transition(s)  @16:25:42.674
+Step 1: Transition #1 is disabled  @16:25:42.847
+Step 1: Transition #2 is disabled  @16:25:42.885
+Step 1: Transition #3 is disabled  @16:25:42.913
+Step 1: picking a transition out of 1 transition(s)  @16:25:42.914
+Step 2: Transition #1 is disabled  @16:25:43.022
+Step 2: Transition #2 is disabled  @16:25:43.050
+Step 2: Transition #3 is disabled  @16:25:43.072
+Step 2: picking a transition out of 1 transition(s)  @16:25:43.072
+Step 3: Transition #2 is disabled  @16:25:43.233
+Step 3: Transition #3 is disabled  @16:25:43.258
+Step 3: picking a transition out of 2 transition(s)  @16:25:43.259
+Step 4: Transition #3 is disabled  @16:25:43.542
+Step 4: picking a transition out of 3 transition(s)  @16:25:43.543
+Step 5: Transition #3 is disabled  @16:25:43.995
+Step 5: picking a transition out of 3 transition(s)  @16:25:43.997
+Step 6: picking a transition out of 4 transition(s)  @16:25:44.897
+Step 7: picking a transition out of 4 transition(s)  @16:25:46.052
+Step 8: picking a transition out of 4 transition(s)  @16:25:49.008
+Step 9: picking a transition out of 4 transition(s)  @16:25:55.861
+Step 10: picking a transition out of 4 transition(s)  @16:26:11.141
+The outcome is: NoError  @16:26:11.184
+Checker reports no error up to computation length 10  @16:26:11.185
+Total time: 30.607 sec  @16:26:11.185
+EXITCODE: OK
+### caspaxos/len12.txt
+Step 0: picking a transition out of 1 transition(s)  @16:26:13.691
+Step 1: Transition #1 is disabled  @16:26:13.846
+Step 1: Transition #2 is disabled  @16:26:13.883
+Step 1: Transition #3 is disabled  @16:26:13.921
+Step 1: picking a transition out of 1 transition(s)  @16:26:13.922
+Step 2: Transition #1 is disabled  @16:26:14.049
+Step 2: Transition #2 is disabled  @16:26:14.081
+Step 2: Transition #3 is disabled  @16:26:14.111
+Step 2: picking a transition out of 1 transition(s)  @16:26:14.112
+Step 3: Transition #2 is disabled  @16:26:14.273
+Step 3: Transition #3 is disabled  @16:26:14.295
+Step 3: picking a transition out of 2 transition(s)  @16:26:14.296
+Step 4: Transition #3 is disabled  @16:26:14.564
+Step 4: picking a transition out of 3 transition(s)  @16:26:14.565
+Step 5: Transition #3 is disabled  @16:26:15.034
+Step 5: picking a transition out of 3 transition(s)  @16:26:15.036
+Step 6: picking a transition out of 4 transition(s)  @16:26:15.980
+Step 7: picking a transition out of 4 transition(s)  @16:26:17.620
+Step 8: picking a transition out of 4 transition(s)  @16:26:20.664
+Step 9: picking a transition out of 4 transition(s)  @16:26:26.576
+Step 10: picking a transition out of 4 transition(s)  @16:26:43.838
+Step 11: picking a transition out of 4 transition(s)  @16:27:18.661
+Step 12: picking a transition out of 4 transition(s)  @16:29:25.684
+The outcome is: NoError  @16:29:25.733
+Checker reports no error up to computation length 12  @16:29:25.733
+Total time: 193.789 sec  @16:29:25.734
+EXITCODE: OK
+### caspaxos/len13.txt
+Step 0: picking a transition out of 1 transition(s)  @17:08:26.045
+Step 1: Transition #1 is disabled  @17:08:26.204
+Step 1: Transition #2 is disabled  @17:08:26.237
+Step 1: Transition #3 is disabled  @17:08:26.262
+Step 1: picking a transition out of 1 transition(s)  @17:08:26.262
+Step 2: Transition #1 is disabled  @17:08:26.359
+Step 2: Transition #2 is disabled  @17:08:26.385
+Step 2: Transition #3 is disabled  @17:08:26.408
+Step 2: picking a transition out of 1 transition(s)  @17:08:26.408
+Step 3: Transition #2 is disabled  @17:08:26.541
+Step 3: Transition #3 is disabled  @17:08:26.567
+Step 3: picking a transition out of 2 transition(s)  @17:08:26.568
+Step 4: Transition #3 is disabled  @17:08:26.863
+Step 4: picking a transition out of 3 transition(s)  @17:08:26.863
+Step 5: Transition #3 is disabled  @17:08:27.264
+Step 5: picking a transition out of 3 transition(s)  @17:08:27.265
+Step 6: picking a transition out of 4 transition(s)  @17:08:28.099
+Step 7: picking a transition out of 4 transition(s)  @17:08:29.638
+Step 8: picking a transition out of 4 transition(s)  @17:08:33.469
+Step 9: picking a transition out of 4 transition(s)  @17:08:40.262
+Step 10: picking a transition out of 4 transition(s)  @17:08:51.263
+Step 11: picking a transition out of 4 transition(s)  @17:09:28.780
+Step 12: picking a transition out of 4 transition(s)  @17:12:50.026
+Step 13: picking a transition out of 4 transition(s)  @17:21:50.347
+The outcome is: NoError  @17:21:50.399
+Checker reports no error up to computation length 13  @17:21:50.399
+Total time: 806.290 sec  @17:21:50.400
+EXITCODE: OK
+### caspaxos/len14.txt
+Step 0: picking a transition out of 1 transition(s)  @16:29:28.165
+Step 1: Transition #1 is disabled  @16:29:28.315
+Step 1: Transition #2 is disabled  @16:29:28.355
+Step 1: Transition #3 is disabled  @16:29:28.387
+Step 1: picking a transition out of 1 transition(s)  @16:29:28.387
+Step 2: Transition #1 is disabled  @16:29:28.496
+Step 2: Transition #2 is disabled  @16:29:28.520
+Step 2: Transition #3 is disabled  @16:29:28.546
+Step 2: picking a transition out of 1 transition(s)  @16:29:28.547
+Step 3: Transition #2 is disabled  @16:29:28.679
+Step 3: Transition #3 is disabled  @16:29:28.697
+Step 3: picking a transition out of 2 transition(s)  @16:29:28.698
+Step 4: Transition #3 is disabled  @16:29:29.034
+Step 4: picking a transition out of 3 transition(s)  @16:29:29.035
+Step 5: Transition #3 is disabled  @16:29:29.444
+Step 5: picking a transition out of 3 transition(s)  @16:29:29.446
+Step 6: picking a transition out of 4 transition(s)  @16:29:30.265
+Step 7: picking a transition out of 4 transition(s)  @16:29:31.686
+Step 8: picking a transition out of 4 transition(s)  @16:29:34.379
+Step 9: picking a transition out of 4 transition(s)  @16:29:38.448
+Step 10: picking a transition out of 4 transition(s)  @16:29:50.426
+Step 11: picking a transition out of 4 transition(s)  @16:30:50.716
+Step 12: picking a transition out of 4 transition(s)  @16:33:14.212
+Step 13: picking a transition out of 4 transition(s)  @16:42:38.831
+### zab/len10.txt
+Step 0: picking a transition out of 1 transition(s)  @16:25:42.838
+Step 1: Transition #1 is disabled  @16:25:43.081
+Step 1: Transition #2 is disabled  @16:25:43.134
+Step 1: Transition #3 is disabled  @16:25:43.169
+Step 1: Transition #4 is disabled  @16:25:43.191
+Step 1: Transition #5 is disabled  @16:25:43.223
+Step 1: Transition #6 is disabled  @16:25:43.281
+Step 1: picking a transition out of 1 transition(s)  @16:25:43.282
+Step 2: Transition #1 is disabled  @16:25:43.403
+Step 2: Transition #2 is disabled  @16:25:43.438
+Step 2: Transition #3 is disabled  @16:25:43.461
+Step 2: Transition #4 is disabled  @16:25:43.475
+Step 2: Transition #5 is disabled  @16:25:43.492
+Step 2: Transition #6 is disabled  @16:25:43.529
+Step 2: picking a transition out of 1 transition(s)  @16:25:43.530
+Step 3: Transition #2 is disabled  @16:25:43.657
+Step 3: Transition #3 is disabled  @16:25:43.674
+Step 3: Transition #4 is disabled  @16:25:43.684
+Step 3: Transition #5 is disabled  @16:25:43.700
+Step 3: Transition #6 is disabled  @16:25:43.737
+Step 3: picking a transition out of 2 transition(s)  @16:25:43.738
+Step 4: Transition #3 is disabled  @16:25:44.112
+Step 4: Transition #4 is disabled  @16:25:44.125
+Step 4: Transition #5 is disabled  @16:25:44.150
+Step 4: Transition #6 is disabled  @16:25:44.182
+Step 4: picking a transition out of 3 transition(s)  @16:25:44.183
+Step 5: Transition #3 is disabled  @16:25:44.740
+Step 5: Transition #4 is disabled  @16:25:44.756
+Step 5: Transition #5 is disabled  @16:25:44.771
+Step 5: Transition #6 is disabled  @16:25:44.810
+Step 5: picking a transition out of 3 transition(s)  @16:25:44.811
+Step 6: Transition #4 is disabled  @16:25:46.055
+Step 6: Transition #5 is disabled  @16:25:46.069
+Step 6: Transition #6 is disabled  @16:25:46.100
+Step 6: picking a transition out of 4 transition(s)  @16:25:46.101
+Step 7: Transition #5 is disabled  @16:25:48.527
+Step 7: Transition #6 is disabled  @16:25:48.556
+Step 7: picking a transition out of 5 transition(s)  @16:25:48.557
+Step 8: Transition #6 is disabled  @16:25:52.024
+Step 8: picking a transition out of 6 transition(s)  @16:25:52.025
+Step 9: Transition #6 is disabled  @16:26:01.360
+Step 9: picking a transition out of 6 transition(s)  @16:26:01.364
+Step 10: picking a transition out of 7 transition(s)  @16:26:19.030
+The outcome is: NoError  @16:26:19.091
+Checker reports no error up to computation length 10  @16:26:19.092
+Total time: 38.566 sec  @16:26:19.092
+EXITCODE: OK
+### zab/len13.txt
+Step 0: picking a transition out of 1 transition(s)  @16:26:21.698
+Step 1: Transition #1 is disabled  @16:26:21.892
+Step 1: Transition #2 is disabled  @16:26:21.936
+Step 1: Transition #3 is disabled  @16:26:21.963
+Step 1: Transition #4 is disabled  @16:26:21.981
+Step 1: Transition #5 is disabled  @16:26:22.010
+Step 1: Transition #6 is disabled  @16:26:22.059
+Step 1: picking a transition out of 1 transition(s)  @16:26:22.060
+Step 2: Transition #1 is disabled  @16:26:22.183
+Step 2: Transition #2 is disabled  @16:26:22.211
+Step 2: Transition #3 is disabled  @16:26:22.229
+Step 2: Transition #4 is disabled  @16:26:22.241
+Step 2: Transition #5 is disabled  @16:26:22.259
+Step 2: Transition #6 is disabled  @16:26:22.295
+Step 2: picking a transition out of 1 transition(s)  @16:26:22.296
+Step 3: Transition #2 is disabled  @16:26:22.442
+Step 3: Transition #3 is disabled  @16:26:22.459
+Step 3: Transition #4 is disabled  @16:26:22.469
+Step 3: Transition #5 is disabled  @16:26:22.487
+Step 3: Transition #6 is disabled  @16:26:22.521
+Step 3: picking a transition out of 2 transition(s)  @16:26:22.522
+Step 4: Transition #3 is disabled  @16:26:22.917
+Step 4: Transition #4 is disabled  @16:26:22.926
+Step 4: Transition #5 is disabled  @16:26:22.950
+Step 4: Transition #6 is disabled  @16:26:22.986
+Step 4: picking a transition out of 3 transition(s)  @16:26:22.987
+Step 5: Transition #3 is disabled  @16:26:23.682
+Step 5: Transition #4 is disabled  @16:26:23.699
+Step 5: Transition #5 is disabled  @16:26:23.714
+Step 5: Transition #6 is disabled  @16:26:23.757
+Step 5: picking a transition out of 3 transition(s)  @16:26:23.757
+Step 6: Transition #4 is disabled  @16:26:25.499
+Step 6: Transition #5 is disabled  @16:26:25.514
+Step 6: Transition #6 is disabled  @16:26:25.545
+Step 6: picking a transition out of 4 transition(s)  @16:26:25.546
+Step 7: Transition #5 is disabled  @16:26:28.349
+Step 7: Transition #6 is disabled  @16:26:28.378
+Step 7: picking a transition out of 5 transition(s)  @16:26:28.379
+Step 8: Transition #6 is disabled  @16:26:32.841
+Step 8: picking a transition out of 6 transition(s)  @16:26:32.842
+Step 9: Transition #6 is disabled  @16:26:42.794
+Step 9: picking a transition out of 6 transition(s)  @16:26:42.799
+Step 10: picking a transition out of 7 transition(s)  @16:26:57.849
+Step 11: picking a transition out of 7 transition(s)  @16:27:38.279
+Step 12: picking a transition out of 7 transition(s)  @16:29:08.929
+Step 13: picking a transition out of 7 transition(s)  @16:33:41.455
+The outcome is: NoError  @16:33:41.528
+Checker reports no error up to computation length 13  @16:33:41.528
+Total time: 441.754 sec  @16:33:41.529
+EXITCODE: OK
+### zab/len14.txt
+Step 0: picking a transition out of 1 transition(s)  @17:08:26.184
+Step 1: Transition #1 is disabled  @17:08:26.364
+Step 1: Transition #2 is disabled  @17:08:26.401
+Step 1: Transition #3 is disabled  @17:08:26.428
+Step 1: Transition #4 is disabled  @17:08:26.442
+Step 1: Transition #5 is disabled  @17:08:26.463
+Step 1: Transition #6 is disabled  @17:08:26.511
+Step 1: picking a transition out of 1 transition(s)  @17:08:26.512
+Step 2: Transition #1 is disabled  @17:08:26.617
+Step 2: Transition #2 is disabled  @17:08:26.643
+Step 2: Transition #3 is disabled  @17:08:26.660
+Step 2: Transition #4 is disabled  @17:08:26.670
+Step 2: Transition #5 is disabled  @17:08:26.690
+Step 2: Transition #6 is disabled  @17:08:26.729
+Step 2: picking a transition out of 1 transition(s)  @17:08:26.730
+Step 3: Transition #2 is disabled  @17:08:26.856
+Step 3: Transition #3 is disabled  @17:08:26.881
+Step 3: Transition #4 is disabled  @17:08:26.895
+Step 3: Transition #5 is disabled  @17:08:26.920
+Step 3: Transition #6 is disabled  @17:08:26.955
+Step 3: picking a transition out of 2 transition(s)  @17:08:26.956
+Step 4: Transition #3 is disabled  @17:08:27.307
+Step 4: Transition #4 is disabled  @17:08:27.318
+Step 4: Transition #5 is disabled  @17:08:27.340
+Step 4: Transition #6 is disabled  @17:08:27.372
+Step 4: picking a transition out of 3 transition(s)  @17:08:27.373
+Step 5: Transition #3 is disabled  @17:08:27.849
+Step 5: Transition #4 is disabled  @17:08:27.866
+Step 5: Transition #5 is disabled  @17:08:27.881
+Step 5: Transition #6 is disabled  @17:08:27.920
+Step 5: picking a transition out of 3 transition(s)  @17:08:27.921
+Step 6: Transition #4 is disabled  @17:08:29.045
+Step 6: Transition #5 is disabled  @17:08:29.059
+Step 6: Transition #6 is disabled  @17:08:29.089
+Step 6: picking a transition out of 4 transition(s)  @17:08:29.090
+Step 7: Transition #5 is disabled  @17:08:31.466
+Step 7: Transition #6 is disabled  @17:08:31.494
+Step 7: picking a transition out of 5 transition(s)  @17:08:31.495
+Step 8: Transition #6 is disabled  @17:08:37.179
+Step 8: picking a transition out of 6 transition(s)  @17:08:37.180
+Step 9: Transition #6 is disabled  @17:08:47.308
+Step 9: picking a transition out of 6 transition(s)  @17:08:47.312
+Step 10: picking a transition out of 7 transition(s)  @17:09:02.948
+Step 11: picking a transition out of 7 transition(s)  @17:09:42.359
+Step 12: picking a transition out of 7 transition(s)  @17:11:23.199
+Step 13: picking a transition out of 7 transition(s)  @17:15:24.604
+Step 14: picking a transition out of 7 transition(s)  @17:21:10.344
+The outcome is: NoError  @17:21:10.428
+Checker reports no error up to computation length 14  @17:21:10.428
+Total time: 766.350 sec  @17:21:10.429
+EXITCODE: OK
+### zab/len15.txt
+Step 0: picking a transition out of 1 transition(s)  @17:21:12.933
+Step 1: Transition #1 is disabled  @17:21:13.092
+Step 1: Transition #2 is disabled  @17:21:13.126
+Step 1: Transition #3 is disabled  @17:21:13.152
+Step 1: Transition #4 is disabled  @17:21:13.165
+Step 1: Transition #5 is disabled  @17:21:13.186
+Step 1: Transition #6 is disabled  @17:21:13.231
+Step 1: picking a transition out of 1 transition(s)  @17:21:13.232
+Step 2: Transition #1 is disabled  @17:21:13.333
+Step 2: Transition #2 is disabled  @17:21:13.358
+Step 2: Transition #3 is disabled  @17:21:13.376
+Step 2: Transition #4 is disabled  @17:21:13.386
+Step 2: Transition #5 is disabled  @17:21:13.403
+Step 2: Transition #6 is disabled  @17:21:13.440
+Step 2: picking a transition out of 1 transition(s)  @17:21:13.441
+Step 3: Transition #2 is disabled  @17:21:13.567
+Step 3: Transition #3 is disabled  @17:21:13.583
+Step 3: Transition #4 is disabled  @17:21:13.593
+Step 3: Transition #5 is disabled  @17:21:13.609
+Step 3: Transition #6 is disabled  @17:21:13.642
+Step 3: picking a transition out of 2 transition(s)  @17:21:13.643
+Step 4: Transition #3 is disabled  @17:21:13.943
+Step 4: Transition #4 is disabled  @17:21:13.954
+Step 4: Transition #5 is disabled  @17:21:13.978
+Step 4: Transition #6 is disabled  @17:21:14.011
+Step 4: picking a transition out of 3 transition(s)  @17:21:14.011
+Step 5: Transition #3 is disabled  @17:21:14.789
+Step 5: Transition #4 is disabled  @17:21:14.804
+Step 5: Transition #5 is disabled  @17:21:14.819
+Step 5: Transition #6 is disabled  @17:21:14.850
+Step 5: picking a transition out of 3 transition(s)  @17:21:14.851
+Step 6: Transition #4 is disabled  @17:21:15.710
+Step 6: Transition #5 is disabled  @17:21:15.726
+Step 6: Transition #6 is disabled  @17:21:15.758
+Step 6: picking a transition out of 4 transition(s)  @17:21:15.759
+Step 7: Transition #5 is disabled  @17:21:17.503
+Step 7: Transition #6 is disabled  @17:21:17.534
+Step 7: picking a transition out of 5 transition(s)  @17:21:17.535
+Step 8: Transition #6 is disabled  @17:21:21.943
+Step 8: picking a transition out of 6 transition(s)  @17:21:21.944
+Step 9: Transition #6 is disabled  @17:21:32.185
+Step 9: picking a transition out of 6 transition(s)  @17:21:32.189
+Step 10: picking a transition out of 7 transition(s)  @17:21:48.185
+Step 11: picking a transition out of 7 transition(s)  @17:22:24.095
+Step 12: picking a transition out of 7 transition(s)  @17:23:49.141
+Step 13: picking a transition out of 7 transition(s)  @17:28:14.806
+Step 14: picking a transition out of 7 transition(s)  @17:36:06.924
+Step 15: picking a transition out of 7 transition(s)  @17:45:00.189
+The outcome is: NoError  @17:45:00.284
+Checker reports no error up to computation length 15  @17:45:00.284
+Total time: 1429.172 sec  @17:45:00.285
+EXITCODE: OK
+### zab/len16.txt
+Step 0: picking a transition out of 1 transition(s)  @18:02:33.961
+Step 1: Transition #1 is disabled  @18:02:34.123
+Step 1: Transition #2 is disabled  @18:02:34.156
+Step 1: Transition #3 is disabled  @18:02:34.181
+Step 1: Transition #4 is disabled  @18:02:34.193
+Step 1: Transition #5 is disabled  @18:02:34.214
+Step 1: Transition #6 is disabled  @18:02:34.256
+Step 1: picking a transition out of 1 transition(s)  @18:02:34.257
+Step 2: Transition #1 is disabled  @18:02:34.354
+Step 2: Transition #2 is disabled  @18:02:34.379
+Step 2: Transition #3 is disabled  @18:02:34.395
+Step 2: Transition #4 is disabled  @18:02:34.405
+Step 2: Transition #5 is disabled  @18:02:34.421
+Step 2: Transition #6 is disabled  @18:02:34.456
+Step 2: picking a transition out of 1 transition(s)  @18:02:34.457
+Step 3: Transition #2 is disabled  @18:02:34.582
+Step 3: Transition #3 is disabled  @18:02:34.600
+Step 3: Transition #4 is disabled  @18:02:34.610
+Step 3: Transition #5 is disabled  @18:02:34.625
+Step 3: Transition #6 is disabled  @18:02:34.658
+Step 3: picking a transition out of 2 transition(s)  @18:02:34.659
+Step 4: Transition #3 is disabled  @18:02:34.994
+Step 4: Transition #4 is disabled  @18:02:35.005
+Step 4: Transition #5 is disabled  @18:02:35.027
+Step 4: Transition #6 is disabled  @18:02:35.063
+Step 4: picking a transition out of 3 transition(s)  @18:02:35.064
+Step 5: Transition #3 is disabled  @18:02:35.653
+Step 5: Transition #4 is disabled  @18:02:35.671
+Step 5: Transition #5 is disabled  @18:02:35.686
+Step 5: Transition #6 is disabled  @18:02:35.724
+Step 5: picking a transition out of 3 transition(s)  @18:02:35.725
+Step 6: Transition #4 is disabled  @18:02:36.316
+Step 6: Transition #5 is disabled  @18:02:36.330
+Step 6: Transition #6 is disabled  @18:02:36.359
+Step 6: picking a transition out of 4 transition(s)  @18:02:36.360
+Step 7: Transition #5 is disabled  @18:02:38.210
+Step 7: Transition #6 is disabled  @18:02:38.238
+Step 7: picking a transition out of 5 transition(s)  @18:02:38.239
+Step 8: Transition #6 is disabled  @18:02:43.312
+Step 8: picking a transition out of 6 transition(s)  @18:02:43.313
+Step 9: Transition #6 is disabled  @18:02:52.654
+Step 9: picking a transition out of 6 transition(s)  @18:02:52.658
+Step 10: picking a transition out of 7 transition(s)  @18:03:10.285
+Step 11: picking a transition out of 7 transition(s)  @18:03:52.438
+Step 12: picking a transition out of 7 transition(s)  @18:05:22.818
+Step 13: picking a transition out of 7 transition(s)  @18:09:26.815
+Step 14: picking a transition out of 7 transition(s)  @18:13:35.544
+Step 15: picking a transition out of 7 transition(s)  @18:24:34.662
+Step 16: picking a transition out of 7 transition(s)  @18:48:29.253
+The outcome is: NoError  @18:48:29.353
+Checker reports no error up to computation length 16  @18:48:29.354
+Total time: 2757.271 sec  @18:48:29.354
+EXITCODE: OK
+### fastpaxos/len10.txt
+Step 0: picking a transition out of 1 transition(s)  @16:25:42.519
+Step 1: Transition #1 is disabled  @16:25:42.600
+Step 1: Transition #3 is disabled  @16:25:42.654
+Step 1: Transition #4 is disabled  @16:25:42.677
+Step 1: Transition #5 is disabled  @16:25:42.699
+Step 1: picking a transition out of 2 transition(s)  @16:25:42.700
+Step 2: Transition #1 is disabled  @16:25:42.783
+Step 2: Transition #3 is disabled  @16:25:42.826
+Step 2: Transition #4 is disabled  @16:25:42.850
+Step 2: Transition #5 is disabled  @16:25:42.871
+Step 2: picking a transition out of 2 transition(s)  @16:25:42.873
+Step 3: Transition #1 is disabled  @16:25:42.941
+Step 3: Transition #4 is disabled  @16:25:43.014
+Step 3: Transition #5 is disabled  @16:25:43.033
+Step 3: picking a transition out of 3 transition(s)  @16:25:43.034
+Step 4: Transition #5 is disabled  @16:25:43.231
+Step 4: picking a transition out of 5 transition(s)  @16:25:43.232
+Step 5: Transition #5 is disabled  @16:25:43.518
+Step 5: picking a transition out of 5 transition(s)  @16:25:43.519
+Step 6: picking a transition out of 6 transition(s)  @16:25:43.959
+Step 7: picking a transition out of 6 transition(s)  @16:25:44.955
+Step 8: picking a transition out of 6 transition(s)  @16:25:47.738
+Step 9: picking a transition out of 6 transition(s)  @16:25:54.411
+Step 10: picking a transition out of 6 transition(s)  @16:26:13.967
+The outcome is: NoError  @16:26:13.996
+Checker reports no error up to computation length 10  @16:26:13.997
+Total time: 33.436 sec  @16:26:13.997
+EXITCODE: OK
+### fastpaxos/len11.txt
+Step 0: picking a transition out of 1 transition(s)  @16:26:16.482
+Step 1: Transition #1 is disabled  @16:26:16.549
+Step 1: Transition #3 is disabled  @16:26:16.590
+Step 1: Transition #4 is disabled  @16:26:16.609
+Step 1: Transition #5 is disabled  @16:26:16.627
+Step 1: picking a transition out of 2 transition(s)  @16:26:16.628
+Step 2: Transition #1 is disabled  @16:26:16.697
+Step 2: Transition #3 is disabled  @16:26:16.746
+Step 2: Transition #4 is disabled  @16:26:16.763
+Step 2: Transition #5 is disabled  @16:26:16.779
+Step 2: picking a transition out of 2 transition(s)  @16:26:16.780
+Step 3: Transition #1 is disabled  @16:26:16.835
+Step 3: Transition #4 is disabled  @16:26:16.900
+Step 3: Transition #5 is disabled  @16:26:16.912
+Step 3: picking a transition out of 3 transition(s)  @16:26:16.913
+Step 4: Transition #5 is disabled  @16:26:17.070
+Step 4: picking a transition out of 5 transition(s)  @16:26:17.071
+Step 5: Transition #5 is disabled  @16:26:17.309
+Step 5: picking a transition out of 5 transition(s)  @16:26:17.310
+Step 6: picking a transition out of 6 transition(s)  @16:26:17.733
+Step 7: picking a transition out of 6 transition(s)  @16:26:18.563
+Step 8: picking a transition out of 6 transition(s)  @16:26:21.326
+Step 9: picking a transition out of 6 transition(s)  @16:26:27.921
+Step 10: picking a transition out of 6 transition(s)  @16:26:46.141
+Step 11: picking a transition out of 6 transition(s)  @16:27:36.979
+The outcome is: NoError  @16:27:37.011
+Checker reports no error up to computation length 11  @16:27:37.012
+Total time: 82.254 sec  @16:27:37.012
+EXITCODE: OK

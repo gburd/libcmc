@@ -28,6 +28,15 @@ sender of each promise, which the `.cml` only counts, so its count is
 taken under a VIEW that forgets the sender (2,112 states without it).
 Gate: `make check-spec-calibration`.
 
+Apalache runs past `--length 10`, measured on one host
+(docs/measurements/2026-11-20-apalache-length.md): no violation up to
+14 steps for paxos, 13 for fpaxos and caspaxos, 16 for zab, and
+fastpaxos complete at 11.  Each step costs 2 to 3 times the last, so
+the full depths of paxos, fpaxos, caspaxos and zab are out of reach.
+apalache_gate's fastpaxos pass row now runs at length 11, its depth
+less one, so it covers every reachable state; the other rows stay at
+10 to fit the CI job.
+
 In `cmc --spec`, `and` and `or` short-circuit left to right as in TLC,
 so a guard such as `x > 0 and y / x == 2` or `i == N or f[i] == 0`
 protects its partial operation.  Before, both operands were evaluated
