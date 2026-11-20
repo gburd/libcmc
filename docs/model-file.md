@@ -40,6 +40,7 @@ timeouts = 1               # reads the environment may time out
 crashes  = 1               # node crashes
 drops    = 1               # messages the network may lose
 restarts = 1               # a crashed node may be relaunched
+short_writes = 1           # sends a full send buffer may cut short
 depth    = 40              # bound the search to this many actions
 
 [invariants]
@@ -93,6 +94,18 @@ Each budget counts over the whole run, from 0 (the default) to 255.
   after that reads return 0 and writes fail with `EPIPE` (and
   `SIGPIPE`), as Linux does.  This models a network
   partition or a reset peer, the failures a TCP program must survive.
+- `short_writes`: a send on a non-blocking connection may find the
+  send buffer full.  While the budget lasts, at each such send whose
+  connection still has bytes on their way to the peer, the search may
+  carry the send out whole, or make it return `EAGAIN`, or send only 1,
+  half, or all but one of its bytes and return that count.  Either way
+  the buffer is then full: further sends get `EAGAIN` and `poll` does
+  not report `POLLOUT` until the peer reads, as Linux does.  This is an
+  over-approximation in one direction: Linux fills a buffer only after
+  megabytes, so a buffer full after a few bytes can find a bug no real
+  load reaches, but never hides one.  Only those four counts are
+  offered, not every count.  A blocking send is never cut short (Linux
+  blocks it instead).
 - `restarts`: a crashed node is relaunched as a fresh process.  The
   surviving durable record (what it last reported on descriptor 193) is
   handed back to it: the new process's first read of descriptor 193

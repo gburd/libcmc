@@ -140,7 +140,7 @@ static struct
 	char		binary[4096];	/* [target] binary, resolved against the file's directory */
 	int			nodes;
 	int			client_write;	/* -1 = no client; else the value it writes to node 0 */
-	int			timeouts, crashes, drops, restarts;
+	int			timeouts, crashes, drops, restarts, short_writes;
 	int			max_write;		/* largest single write a node may make (<= MSGLEN) */
 	char		args[512];		/* extra argv after the node id, space-separated (e.g. flags) */
 	long		depth;			/* -1 = unbounded */
@@ -238,6 +238,8 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.crashes = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "drops"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.drops = (int) x; }
+		else if (!strcmp(sect, "environment") && !strcmp(k, "short_writes"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.short_writes = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "restarts"))
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.restarts = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
@@ -727,8 +729,10 @@ static int g_unchecked_node, g_weak_seen;
  * BK_NEWBORN is the new thread before its first instruction, and
  * BK_CLONED the parent at the clone's return.  BK_CONNWAIT is a call,
  * not yet carried out, whose answer depends on whether a non-blocking
- * connect's handshake has completed (see connwait()). */
-enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9 };
+ * connect's handshake has completed (see connwait()).  BK_SHORTW is a
+ * write, not yet carried out, that the search may cut short (see
+ * shortwait()). */
+enum { BK_RECV = 1, BK_ACCEPT = 2, BK_POLL = 4, BK_FUTEX = 5, BK_DONE = 6, BK_NEWBORN = 7, BK_CLONED = 8, BK_CONNWAIT = 9, BK_SHORTW = 10 };
 #define TIMER_PEER (-3)					/* a synthetic peer: a fired election timer */
 #define POLL_LISTENER (-4)				/* A_WAKE target: a BK_POLL node's listener fd */
 
@@ -861,6 +865,7 @@ typedef struct {
 	int connecting, nbdial;
 	int lport;					/* the dialler's local port, for getsockname and getpeername */
 	int shut_wr[2], shut_rd[2];	/* shutdown() of this end's sending, receiving side */
+	int full[2];				/* this end's send buffer is full (a SHORT write): writes EAGAIN, no POLLOUT */
 } Conn;
 static Conn conns[MAXCONNS];
 
@@ -952,6 +957,7 @@ local_ready(Node *nd, int fd, short events)
 	{
 		const Conn *cn = &conns[nd->cconn[cs]];
 		if (cn->connecting) return 0;
+		if (cn->full[nd->cend[cs]] && !cn->reset && !cn->err[nd->cend[cs]]) events &= ~POLLOUT;
 		if (!cn->refused && !cn->reset && cn->shut_rd[nd->cend[cs]])
 			return (short) ((events & (POLLIN | POLLOUT)) | (cn->shut_wr[nd->cend[cs]] ? POLLHUP : 0));
 		if (cn->refused)
@@ -1014,7 +1020,7 @@ static Msg bag[MAXMSG];
 static unsigned char rep_src[MAXREP], rep_val[MAXREP]; static int nrep;
 
 /* environment budgets left on this path; part of the fingerprint */
-typedef struct { int timeouts, crashes, drops, restarts; } Budget;
+typedef struct { int timeouts, crashes, drops, restarts, short_writes; } Budget;
 static Budget bud;
 
 /* M5b: the logical clock the checker owns.  It starts at a base and
@@ -1952,6 +1958,11 @@ static int serve(Node *nd, Thread *th);
 static void put_read(Node *nd, Thread *th, const unsigned char *body, int k);
 static int carry_out(Node *nd, Thread *th);
 static int connwait(const Node *nd, long nr, const __u64 *a);
+static int shortwait(Node *nd, long nr, const __u64 *a);
+static int read_iov(Node *nd, uint64_t addr, long cnt, int *total);
+/* -1, or the count a SHORT action makes the write being carried out
+ * return (0 for EAGAIN) */
+static int g_short = -1;
 static void birth(Node *nd, Thread *th);
 static void reap_tid(pid_t tid);
 
@@ -2056,6 +2067,59 @@ run_connwait(Node *nd, Thread *th)
 	carry_out(nd, th);
 }
 
+/* Would write call nr of node nd, on a non-blocking connection a peer
+ * reads, be a point where its send buffer may be full?  While the
+ * short_writes budget lasts, such a write is parked unserved and the
+ * search chooses: carry it out whole (RUN), or cut it short (SHORT,
+ * see short_counts()).  A node with more than one thread is not
+ * offered this (its writes already park as visible calls). */
+static int
+shortwait(Node *nd, long nr, const __u64 *a)
+{
+	if (bud.short_writes <= 0 || node_multi(nd)) return 0;
+	if (nr != SYS_write && nr != SYS_sendto && nr != SYS_writev && nr != SYS_sendmsg) return 0;
+	int fd = (int) a[0], cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	if (cs < 0 || !nd->cnonblock[cs] || nd->cconn[cs] < 0 || nd->cpeer[cs] < 0) return 0;
+	const Conn *cn = &conns[nd->cconn[cs]];
+	int e = nd->cend[cs];
+	return !cn->connecting && !cn->full[e] && !cn->reset && !cn->refused && !cn->err[e] &&
+		!cn->shut_wr[e] && !cn->closed[1 - e] && conn_has_data(nd->cconn[cs], 1 - e);
+}
+
+/* The length of the write thread th is parked in (BK_SHORTW), as its
+ * arguments give it: a[2], or its iovec array's total. */
+static int
+parked_write_len(Node *nd, const Thread *th)
+{
+	uint64_t iov = th->args[1]; long cnt = (long) th->args[2];
+	int total = 0;
+	if (th->nr == SYS_write || th->nr == SYS_sendto) return (int) th->args[2];
+	if (th->nr == SYS_sendmsg)
+	{
+		struct msghdr mh;
+		if (cr_read(nd->pid, th->args[1], &mh, sizeof mh) != sizeof mh) return 0;
+		iov = (uint64_t) (uintptr_t) mh.msg_iov; cnt = (long) mh.msg_iovlen;
+	}
+	return read_iov(nd, iov, cnt, &total) ? 0 : total;
+}
+
+/* The counts a SHORT action may cut a write of len bytes to: 0 (the
+ * buffer is full: EAGAIN), and a prefix of 1, len / 2 and len - 1
+ * bytes, each once.  Returns how many, written to out[4]. */
+static int
+short_counts(int len, int *out)
+{
+	int n = 0, c[3] = {1, len / 2, len - 1};
+	out[n++] = 0;
+	for (int i = 0; i < 3; i++)
+	{
+		int dup = c[i] < 1 || c[i] >= len;
+		for (int j = 1; j < n; j++) dup |= out[j] == c[i];
+		if (!dup) out[n++] = c[i];
+	}
+	return n;
+}
+
 /* Service one ready notification on node nd without blocking the search.
  * Returns 1 if it did something, 0 if nd had no pending notification.
  * serve() carries the call out.  In a node with one thread its answer is
@@ -2092,6 +2156,11 @@ try_pending_for(Node *nd)
 	if (connwait(nd, nr, a))
 	{
 		th->block_kind = BK_CONNWAIT; th->block_id = g_req->id;
+		return 1;
+	}
+	if (shortwait(nd, nr, a))
+	{
+		th->block_kind = BK_SHORTW; th->block_id = g_req->id;
 		return 1;
 	}
 	return carry_out(nd, th);
@@ -2728,7 +2797,7 @@ serve(Node *nd, Thread *th)
 			if (len < 0 || len > M.max_write) die(1, "node %d writes %d bytes in one call; the limit is %d (raise [target] max_write, up to %d)", nd->id, len, M.max_write, MSGLEN);
 			if (c < 0) { g_resp->val = len; break; }	/* a timer fd has no reader */
 			Conn *cn = &conns[c];
-			if (cn->connecting)
+			if (cn->connecting || (cn->full[e] && !cn->err[e] && !cn->reset))
 			{
 				if (!nd->cnonblock[cs]) die(3, "node %d: a blocking write to a socket whose non-blocking connect has not completed is not modelled", nd->id);
 				g_resp->error = -EAGAIN; break;
@@ -2761,6 +2830,14 @@ serve(Node *nd, Thread *th)
 			 * model does not do */
 			if (got == 0 && len > 0) { g_resp->error = -EFAULT; break; }
 			if (got < (size_t) len) cr_fail(nd->id, "write sends from a buffer that ends");
+			/* a SHORT action: the send buffer fills after g_short bytes
+			 * (none: EAGAIN), and stays full until the peer reads */
+			if (g_short >= 0)
+			{
+				cn->full[e] = 1;
+				if (g_short == 0) { g_resp->error = -EAGAIN; break; }
+				len = g_short;
+			}
 			if (peer == -1)			/* reply to the client: ghost log */
 			{
 				if (len >= 2 && buf[0] == 'A')
@@ -4027,6 +4104,7 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 	const Conn *cn = &conns[c];
 	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5) |
 		 (cn->connecting << 6) | (cn->nbdial << 7));
+	PUTC(cn->full[e] | (cn->full[1 - e] << 1));
 	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : cn->err[e] == ECONNREFUSED ? 3 : 0);
 	PUTC(cn->shut_wr[e] | (cn->shut_rd[e] << 1) | (cn->shut_wr[1 - e] << 2) | (cn->shut_rd[1 - e] << 3));
 	for (int last = -1;;)
@@ -4145,7 +4223,7 @@ world_fp(uint64_t fp[2])
 	 * bytes cannot occur: conn_maybe_free() discards it */
 	PUT(nrep);
 	for (int i = 0; i < nrep; i++) { PUT(rep_src[i]); PUT(rep_val[i]); }
-	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts);
+	PUT(bud.timeouts); PUT(bud.crashes); PUT(bud.drops); PUT(bud.restarts); PUT(bud.short_writes);
 	PUT8(logical_ns);
 #undef PUT8
 #undef PUT
@@ -4159,13 +4237,13 @@ reset_world(void)
 	memset(bag, 0, sizeof bag); memset(conns, 0, sizeof conns);
 	nrep = 0; logical_ns = CLK_BASE; g_fault_node = -1; g_race_node = -1;
 	bud.timeouts = M.timeouts; bud.crashes = M.crashes; bud.drops = M.drops;
-	bud.restarts = M.restarts;
+	bud.restarts = M.restarts; bud.short_writes = M.short_writes;
 }
 
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -4295,8 +4373,16 @@ enum_actions(Act *out)
 			}
 			if (th->block_kind == BK_FUTEX) continue;	/* woken by another thread's step */
 			if (th->block_kind == BK_DONE || th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED ||
-				th->block_kind == BK_CONNWAIT)
-			{ ADD(A_RUN, d, -1, ti); continue; }
+				th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW)
+			{
+				ADD(A_RUN, d, -1, ti);
+				if (th->block_kind == BK_SHORTW)
+				{
+					int ks[4], nk = short_counts(parked_write_len(nd, th), ks);
+					for (int j = 0; j < nk; j++) ADD2(A_SHORT, d, -1, ti, ks[j]);
+				}
+				continue;
+			}
 			int p = th->block_peer;
 			if (conn_head(th->block_conn, th->block_end) >= 0) ADD(A_DELIVER, d, p, ti);
 			else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, p, ti);
@@ -4502,6 +4588,17 @@ apply(const Act *a)
 			int k = deliver(nd, th, bag[h].body, bag[h].len);
 			if (k < bag[h].len) { memmove(bag[h].body, bag[h].body + k, (size_t) (bag[h].len - k)); bag[h].len -= k; }
 			else bag[h].used = 0;
+			/* the reader made room: a writer whose buffer was full may
+			 * write again, and a poll for POLLOUT there is answered */
+			Conn *rc = &conns[th->block_conn];
+			int we = 1 - th->block_end;
+			if (rc->full[we])
+			{
+				rc->full[we] = 0;
+				Node *wn = rc->node[we] >= 0 ? &N[rc->node[we]] : NULL;
+				for (int ti = 0; wn && wn->alive && ti < wn->nth; ti++)
+					if (wn->th[ti].inuse && wn->th[ti].block_kind == BK_POLL) poll_recheck(wn, &wn->th[ti]);
+			}
 			break;
 		}
 		case A_EOF: deliver(nd, th, NULL, 0); break;
@@ -4537,8 +4634,14 @@ apply(const Act *a)
 		case A_WAKE: poll_wake(nd, th, a->peer, a->arg); break;
 		case A_RUN:
 			if (th->block_kind == BK_NEWBORN || th->block_kind == BK_CLONED) run_stopped(nd, th);
-			else if (th->block_kind == BK_CONNWAIT) run_connwait(nd, th);
+			else if (th->block_kind == BK_CONNWAIT || th->block_kind == BK_SHORTW) run_connwait(nd, th);
 			else run_held(nd, th);
+			break;
+		case A_SHORT:
+			bud.short_writes--;
+			g_short = a->arg;
+			run_connwait(nd, th);
+			g_short = -1;
 			break;
 		case A_CRASH: bud.crashes--; crash_node(nd); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
@@ -4677,10 +4780,12 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short"};
 	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
 	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);
 	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
+	else if (a->kind == A_SHORT && a->arg == 0) snprintf(b, n, "full n%d t%d (EAGAIN)", a->node, a->thr);
+	else if (a->kind == A_SHORT) snprintf(b, n, "short n%d t%d (%d bytes)", a->node, a->thr, a->arg);
 	else if (a->kind == A_RESTART) snprintf(b, n, "restart n%d", a->node);
 	else if (a->kind == A_TIMEOUT) snprintf(b, n, "timeout n%d", a->node);
 	else if (a->kind == A_DROP) snprintf(b, n, "reset n%d<->n%d", a->peer, a->node);
@@ -4912,6 +5017,7 @@ cmc_proc_main(const CmcProcOptions *po)
 		   M.nodes == 1 ? "" : "s", po->simulate ? "random simulation" : "breadth-first search");
 	printf("  environment: client_write %d, timeouts %d, crashes %d, drops %d, restarts %d",
 		   M.client_write, M.timeouts, M.crashes, M.drops, M.restarts);
+	if (M.short_writes) printf(", short_writes %d", M.short_writes);
 	if (depth >= 0) printf(", depth %ld", depth);
 	printf("\n");
 	fflush(stdout);

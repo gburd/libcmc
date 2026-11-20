@@ -466,6 +466,19 @@ discards it.
 Drop budget is left: a connection carrying bytes is reset.
 Its queues are discarded and each end's next call fails with
 .Er ECONNRESET .
+.It CONNECT
+A non-blocking
+.Fn connect
+is still handshaking: it completes, into the peer's backlog or refused.
+.It SHORT
+Short-write budget is left and a node is about to send on a
+non-blocking connection whose earlier bytes are still in flight: the
+send gets
+.Er EAGAIN
+or sends only 1, half, or all but one of its bytes, and the send
+buffer is full until the peer reads.
+Any buffer can fill this way, which no real load needs; the search
+finds more, never less.
 .It RESTART
 Restart budget is left and a node has crashed: it is relaunched as a
 fresh process.

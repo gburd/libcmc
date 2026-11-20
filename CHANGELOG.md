@@ -43,6 +43,13 @@ at a socket shut both ways draw.  A dup shares the connection and its
 `ECONNREFUSED` was left out of the world encoding; it is in now.  Gate:
 proc_gate sockapi iov, shut, dup and opts, each against a native run.
 
+A full send buffer is a budgeted choice, `[environment] short_writes =
+N`.  While it lasts, a send on a non-blocking connection with bytes
+still in flight may get `EAGAIN` or send a prefix (1 byte, half, or all
+but one), and the buffer then stays full, with no `POLLOUT`, until the
+peer reads.  On 2.1.0 every send succeeded whole, so a writer that
+ignored a short count passed.  Gate: proc_gate shortw.
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

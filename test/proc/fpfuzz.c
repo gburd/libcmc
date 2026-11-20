@@ -362,8 +362,9 @@ m_conn_flag(void)
 	for (int c = 0; c < MAXCONNS; c++)
 		if (conns[c].used && conns[c].accepted)
 		{
-			switch (pick(9))
+			switch (pick(10))
 			{
+				case 9: conns[c].full[pick(2)] ^= 1; break;
 				case 7: conns[c].shut_wr[pick(2)] ^= 1; break;
 				case 8: conns[c].shut_rd[pick(2)] ^= 1; break;
 				case 4: conns[c].connecting ^= 1; break;
@@ -465,7 +466,10 @@ m_plain(void)
 static int
 m_budget(void)
 {
-	bud.timeouts++;
+	if (pick(2))
+		bud.timeouts++;
+	else
+		bud.short_writes++;
 	return 1;
 }
 

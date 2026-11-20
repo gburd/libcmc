@@ -756,6 +756,18 @@ for m in iov shut dup opts; do
 	expect_by 60 "sockapi $m: cmc answers as Linux does" 0 "No error has been found" --model-file "$NB/sa-$m.model"
 done
 
+echo "-- short writes: a full send buffer as a budgeted choice"
+# shortw.c sends on a non-blocking socket; the correct writer resends
+# after a short write or EAGAIN, the -DBUG one ignores the count, which
+# loses bytes only when the buffer fills.  On 2.1.0 a send always
+# succeeded whole, so the bug passed.
+$CC -O1 -no-pie -w -o "$B/proc/shortw" "$T/shortw.c" || { echo "proc_gate: shortw.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/shortw-bug" "$T/shortw.c" || { echo "proc_gate: shortw.c -DBUG does not build"; fail=1; }
+sed 's/short_writes = 2/short_writes = 0/' "$T/shortw.model" > "$OUT/shortw0.model"
+expect_by 120 "shortw: a writer that resends holds"            0 "No error has been found" $(run shortw shortw)
+expect_by 120 "shortw: a writer that ignores the count is caught" 1 "whole is violated" $(run shortw shortw-bug)
+expect_by 120 "shortw: the bug needs a full buffer"           0 "No error has been found" $(runx "$OUT/shortw0.model" shortw-bug)
+
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end
 # the check as named, or records a corner whose answer is Linux's
