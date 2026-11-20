@@ -541,7 +541,7 @@ static int sp_load_into(const char *path){
 			CPY(V->name,nm,"var name");
 			if(dom[0]=='['){ /* [DOM -> RANGE] : a function variable */
 				V->is_fun=1; char *arrow=strstr(dom,"->"); if(!arrow){ fprintf(stderr,"cmc: %s:%d: function var needs ->\n",path,ln); goto bad; }
-				*arrow=0; char *d=sp_trim(dom+1); char *r=sp_trim(arrow+2); char *rb=strrchr(r,']'); if(rb)*rb=0; r=sp_trim(r);
+				*arrow=0; char *d=sp_trim(dom+1); char *r=sp_trim(arrow+2); char *rb=strrchr(r,']'); if(!rb){ fprintf(stderr,"cmc: %s:%d: function var needs ]\n",path,ln); goto bad; } *rb=0; r=sp_trim(r);
 				CPY(V->fdom,d,"function domain"); CPY(V->dom,r,"function range");
 			} else { V->is_fun=0; CPY(V->dom,dom,"var domain"); V->fdom[0]=0; }
 			S.nvar++; in_action=0; continue;
@@ -572,9 +572,10 @@ static int sp_load_into(const char *path){
 			rest=sp_trim(rest);
 			/* an optional [TAG] gate before the colon */
 			char *tb=strrchr(rest,'[');
-			if(tb && strchr(tb,']')){ char *te=strchr(tb,']'); *te=0; CPY(cur->tag,sp_trim(tb+1),"action tag"); *tb=0; rest=sp_trim(rest); }
+			if(tb && !strchr(tb,']')){ fprintf(stderr,"cmc: %s:%d: action tag needs ]\n",path,ln); goto bad; }
+			if(tb){ char *te=strchr(tb,']'); *te=0; CPY(cur->tag,sp_trim(tb+1),"action tag"); *tb=0; rest=sp_trim(rest); }
 			char *lp=strchr(rest,'(');
-			if(lp){ *lp=0; char *params=lp+1; char *pe=strrchr(params,')'); if(pe)*pe=0;
+			if(lp){ *lp=0; char *params=lp+1; char *pe=strrchr(params,')'); if(!pe){ fprintf(stderr,"cmc: %s:%d: action parameters need )\n",path,ln); goto bad; } *pe=0;
 				CPY(cur->name,sp_trim(rest),"action name");
 				/* parse  p in SET, q in SET */
 				char *save=NULL; for(char *t=strtok_r(params,",",&save); t; t=strtok_r(NULL,",",&save)){

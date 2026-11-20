@@ -21,6 +21,7 @@
  *   rstignore  the same with SIGPIPE ignored: node 0 can record 2 (or 1, if
  *              node 1 reads and closes before the second byte arrives)
  *   rsthandler the same with a SIGPIPE handler (refused)
+ *   rstblock   the same with SIGPIPE blocked (refused)
  *   fork       node 0 forks; the child exits at once (refused)
  *   writev     a writev() longer than max_write (refused)
  *   sendmsg    a sendmsg() with ancillary data (refused)
@@ -154,6 +155,14 @@ main(int argc, char **argv)
 			signal(SIGPIPE, SIG_IGN);
 		else if (!strcmp(mode, "rsthandler"))
 			signal(SIGPIPE, on_pipe);
+		else if (!strcmp(mode, "rstblock"))
+		{
+			sigset_t	m;
+
+			sigemptyset(&m);
+			sigaddset(&m, SIGPIPE);
+			sigprocmask(SIG_BLOCK, &m, NULL);
+		}
 		int s = socket(AF_INET, SOCK_STREAM, 0);
 		unsigned char b;
 

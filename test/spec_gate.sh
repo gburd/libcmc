@@ -299,6 +299,14 @@ typed "an overflowing product" "integer overflow in \\*" "4611686018427387904 * 
 typed "an overflowing sum" "integer overflow in +" "9223372036854775807 + 1 == 0"
 typed "an overflowing difference" "integer overflow in -" "(0 - 9223372036854775807) - 2 == 0"
 typed "a primed variable read" "primed variable" "x' == 0"
+typed "a function literal without ->" "expected -> in function literal" "[i in {0, 1} - 1] == f"
+typed "an empty-domain literal that shadows a var" "redeclares" "[x in {} -> 0] == f"
+typed "a broken body over an empty domain" "expected )" "[i in {} -> (0] == f"
+typed "an integer left of or" "expected a boolean in or, not an integer" "x or TRUE"
+typed "a skipped quantifier still binds its name" "redeclares" "FALSE and (all x in 0 .. 1 : TRUE) or TRUE"
+typed "an identifier past the name limit" "unknown identifier" "$(printf '%062d' 0 | tr 0 a) == 0"
+typed "a range with one dot" "expected a set (LO .. HI" "x in 0 . 1"
+typed "an unknown name with an underscore" "unknown identifier" "x_ == 0"
 # the values the evaluator computes, each pinned by the verdict it gives
 value() {	# value DESC WANT EXPR: invariant EXPR holds (0) or is violated (1)
 	printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\nvar g : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> i] and g == [i in 0 .. 1 -> 0]\ninvariant i: %s\n' "$3" > "$OUT/value.cml"
@@ -329,6 +337,14 @@ value "or skips a set past its limit" 0 "TRUE or x in 0 .. 99"
 value "and skips a function literal" 0 "not (FALSE and [i in 0 .. 1 -> 1 / i] == f)"
 value "and skips an except outside the domain" 0 "x == 1 and [x except [0] = 1] == f or TRUE"
 value "an evaluated operand still errs" 1 "x == 0 and f[0] == 1"
+# a skipped operand is parsed, not evaluated: no error from its values
+value "and skips a literal over a set" 0 "not (FALSE and [i in {0, 1} -> 0] == f)"
+value "and skips membership of a scalar" 0 "not (FALSE and x in 0)"
+value "and skips a mixed comparison" 0 "FALSE and {0} == 1 or TRUE"
+value "and skips each arithmetic error" 0 "FALSE and 9223372036854775807 * 2 + 1 / 0 + (0 - 1) / 1 + 1 / (0 - 2) == 0 or TRUE"
+value "and skips each mod error" 0 "FALSE and 1 mod 0 + (0 - 1) mod 2 + 1 mod (0 - 2) == 0 or TRUE"
+value "and skips an overflow in -" 0 "FALSE and (0 - 9223372036854775807) - 2 == 0 or TRUE"
+value "and skips a two-key except" 0 "FALSE and [f except [0] = 1, [1] = 1] == f or TRUE"
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
 expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml"
@@ -358,6 +374,13 @@ bad "a when outside an action"      "when outside action"      "$V\nwhen x == 0\
 bad "an action parameter without in" "action param needs 'in'" "$V\naction a(i):\n  x' = 1\n$I"
 bad "a line that is nothing"        "cannot parse: x = 1"      "$V\nx = 1\n$I"
 bad "an extends that does not load" "cannot extend nosuch"     "extends nosuch\n$V\n$I"
+bad "a function var without ]"     "function var needs ]"     "var f : [0 .. 1 -> 0 .. 1\ninit f == [i in 0 .. 1 -> 0]\n$I"
+bad "an action tag without ]"       "action tag needs ]"       "$V\naction a [BUG:\n  x' = 1\n$I"
+bad "action parameters without )"   "action parameters need )" "$V\naction a(i in 0 .. 1:\n  x' = i\n$I"
+bad "an assignment without a prime"  "cannot parse: x = 1"      "$V\naction a:\n  x = 1\n$I"
+bad "a prime only after the ="      "cannot parse: x == 1 or x'" "$V\naction a:\n  x == 1 or x'\n$I"
+bad "an extends of a missing .cml"  "cannot open .*nosuch.cml" "extends nosuch.cml\n$V\n$I"
+bad "an extends of a missing absolute path" "cannot open /nonexistent/nosuch.cml" "extends /nonexistent/nosuch\n$V\n$I"
 bad "a spec with no variables"      "no variables"             "init x == 0\n$I"
 bad "a spec with no init"           "no init"                  "var x : 0 .. 1\n$I"
 bad "a spec with no invariant"      "no invariant or property" "$V"
@@ -550,6 +573,12 @@ obs "a reply's value is observed"             1 "rejected at step 1" "4 * (count
 obs "an unknown field is an error"            3 "unknown field" "node[0].hi" 0
 obs "node with no [ is an error"              3 "expected \[ after node" "node 0" 0
 obs "node[i] with no index or field"          3 "needs \[k\] or .field" "node[0] + 1" 0
+obs "node[] of a set is an error"              3 "expected an integer in node\[\]" "node[{0}][0]" 0
+obs "node[0 with no ] is an error"              3 "expected \]" "node[0 [0]" 0
+obs "node[0][] of a set is an error"            3 "expected an integer in node\[\]\[\]" "node[0][{0}]" 0
+obs "node[0][0 with no ] is an error"           3 "expected \]" "node[0][0 + 1" 0
+obs "a skipped node read is not made"           0 "accepted 2" "node[0][0] + (count i in {} : node[i][0] == 0)" 0 1
+obs "r outside replies is not a reply"          3 "unknown identifier" "r + 1" 0
 obs "a reply field other than src or val"     3 "reply has .src and .val" "count r in replies : r.dst == 0" 1
 # an observed state outside the declared domains is refused, even where
 # the invariant holds (x : 0 .. 9, invariant x <= 3 fails first, so TRUE)

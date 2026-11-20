@@ -33,6 +33,7 @@
 #include <sys/socket.h>
 #include <sys/syscall.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -77,9 +78,12 @@ addr(int port)
 static int
 listener(int port)
 {
-	int			s = socket(AF_INET, SOCK_STREAM, 0);
+	int			s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
 	struct sockaddr_in a = addr(port);
 
+	/* natively, modes run one after another on one port, and a dial of
+	 * the last one may still hold it in TIME_WAIT */
+	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
 	bind(s, (struct sockaddr *) &a, sizeof a);
 	listen(s, 8);
 	return s;
@@ -109,6 +113,23 @@ badbuf(void)
 		code(syscall(SYS_ppoll, NULL, 0, ts, NULL, 8));
 	}
 	code(syscall(SYS_gettimeofday, NULL, NULL));
+	{
+		/* on a connection: a vector write from a bad buffer, and a
+		 * sendmsg or recvmsg whose msghdr is unreadable; and the state
+		 * hook written from a bad buffer, and with nothing */
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+		int			c = socket(AF_INET, SOCK_STREAM, 0);
+		struct iovec iov = {BAD, 1};
+
+		code(connect(c, (struct sockaddr *) &me, sizeof me));
+		(void) ls;
+		code(writev(c, &iov, 1));
+		code(syscall(SYS_sendmsg, c, BAD, 0));
+		code(syscall(SYS_recvmsg, c, BAD, 0));
+		code(syscall(SYS_write, 3, BAD, 1));
+		code(syscall(SYS_write, 3, "", 0));
+	}
 }
 
 /* eventfd: counter, nonblocking read of zero, a write that is not 8
@@ -183,6 +204,53 @@ polls(void)
 	code(fcntl(ls, F_GETFD) == FD_CLOEXEC ? 0 : -1);
 }
 
+/* poll's answer for the fds it does not wait on: a negative fd is
+ * skipped, a socket never dialled is POLLOUT | POLLHUP, and a connection
+ * shut for reading is readable at once, and hung up once shut both ways */
+static void
+pollmore(void)
+{
+	int			ls = listener(BASE);
+	struct sockaddr_in me = addr(BASE);
+	int			c = socket(AF_INET, SOCK_STREAM, 0), p = socket(AF_INET, SOCK_STREAM, 0);
+	struct pollfd q[3] = {{-1, POLLIN, 0}, {p, POLLIN | POLLOUT, 0}, {c, POLLIN, 0}};
+
+	connect(c, (struct sockaddr *) &me, sizeof me);
+	code(accept(ls, NULL, NULL));
+	code(shutdown(c, SHUT_RD));
+	code(poll(q, 3, 0));
+	code(q[0].revents == 0 ? 0 : -1);
+	rec[nrec++] = (unsigned char) q[1].revents;
+	rec[nrec++] = (unsigned char) q[2].revents;
+	code(shutdown(c, SHUT_WR));
+	q[2].events = POLLIN | POLLOUT;
+	code(poll(q + 2, 1, 0));
+	rec[nrec++] = (unsigned char) q[2].revents;
+}
+
+/* the socket calls on a kernel fd (a pipe) go to the kernel, which
+ * answers ENOTSOCK; and a dup of one is the kernel's too */
+static void
+kernelsock(void)
+{
+	int			pf[2], v = 1;
+	socklen_t	l = sizeof v;
+	struct sockaddr_in sa;
+	socklen_t	sl = sizeof sa;
+
+	code(pipe(pf));
+	code(shutdown(pf[0], SHUT_RD));
+	code(getsockname(pf[0], (struct sockaddr *) &sa, &sl));
+	code(getpeername(pf[0], (struct sockaddr *) &sa, &sl));
+	code(setsockopt(pf[0], SOL_SOCKET, SO_KEEPALIVE, &v, sizeof v));
+	code(getsockopt(pf[0], SOL_SOCKET, SO_KEEPALIVE, &v, &l));
+	int			d = dup(pf[1]);
+
+	code(d >= 0 && d < 500 ? 0 : -1);
+	code(write(d, "k", 1));
+	code(close(d));
+}
+
 /* the clock, gettimeofday and getrandom past its 256-byte answer */
 static void
 clocks(void)
@@ -230,6 +298,43 @@ connects(void)
 	code(connect(t, (struct sockaddr *) &far, sizeof far));
 }
 
+/* the waits that return at once: a zero or past timeout, or a bad
+ * argument (select's timeval is counted down to zero on expiry), for
+ * select, nanosleep, clock_nanosleep, pselect6, ppoll and a timed futex
+ * wait */
+static void
+sleeperrs(void)
+{
+	struct
+	{
+		long long	sec, usec;
+	}			tv = {0, 1000}, badtv = {0, -1};
+	struct timespec zero = {0, 0}, badts = {0, -1};
+
+	code(syscall(SYS_select, 0, NULL, NULL, NULL, &tv));
+	code(tv.sec == 0 && tv.usec == 0 ? 0 : -1);
+	code(syscall(SYS_select, 0, NULL, NULL, NULL, &badtv));	/* EINVAL */
+	code(syscall(SYS_select, 0, NULL, NULL, NULL, BAD));	/* EFAULT */
+	code(syscall(SYS_select, 1, NULL, NULL, NULL, &zero));
+	code(syscall(SYS_nanosleep, &zero, NULL));
+	code(syscall(SYS_nanosleep, &badts, NULL));	/* EINVAL */
+	code(syscall(SYS_nanosleep, BAD, NULL));	/* EFAULT */
+	code(syscall(SYS_clock_nanosleep, CLOCK_BOOTTIME, 0, &zero, NULL));
+	code(syscall(SYS_clock_nanosleep, CLOCK_REALTIME, TIMER_ABSTIME, &zero, NULL));
+	code(syscall(SYS_pselect6, 0, NULL, NULL, NULL, &zero, NULL));
+	code(syscall(SYS_ppoll, NULL, 0, &badts, NULL, 8));	/* EINVAL */
+	{
+		/* a timed futex wait whose word matches: a bad timeout, and one
+		 * already due, return at once */
+		static uint32_t w;
+
+		code(syscall(SYS_futex, &w, FUTEX_WAIT_PRIVATE, 0, BAD, NULL, 0));	/* EFAULT */
+		code(syscall(SYS_futex, &w, FUTEX_WAIT_PRIVATE, 0, &badts, NULL, 0));	/* EINVAL */
+		code(syscall(SYS_futex, &w, FUTEX_WAIT_PRIVATE, 0, &zero, NULL, 0));	/* ETIMEDOUT */
+		code(syscall(SYS_futex, &w, FUTEX_WAIT_BITSET_PRIVATE, 0, &zero, NULL, FUTEX_BITSET_MATCH_ANY));
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -251,9 +356,12 @@ main(int argc, char **argv)
 	else if (!strcmp(mode, "eventfd")) eventfds();
 	else if (!strcmp(mode, "epoll")) epolls();
 	else if (!strcmp(mode, "poll")) polls();
+	else if (!strcmp(mode, "pollmore")) pollmore();
+	else if (!strcmp(mode, "kernelsock")) kernelsock();
 	else if (!strcmp(mode, "clock")) clocks();
 	else if (!strcmp(mode, "futex")) futexes();
 	else if (!strcmp(mode, "connect")) connects();
+	else if (!strcmp(mode, "sleeperr")) sleeperrs();
 	else if (!strcmp(mode, "efdwrite4"))
 	{
 		int			e = eventfd(0, 0);
@@ -513,6 +621,105 @@ main(int argc, char **argv)
 		static uint32_t w1, w2;
 
 		code(syscall(SYS_futex, &w1, FUTEX_REQUEUE_PRIVATE, 1, 1, &w2, 0));
+	}
+	else if (!strcmp(mode, "shutlisten"))
+		code(shutdown(listener(BASE), SHUT_RD));
+	else if (!strcmp(mode, "duplisten"))
+		code(dup(listener(BASE)));
+	else if (!strcmp(mode, "dupopen") || !strcmp(mode, "namefresh"))
+	{
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE), sa;
+		socklen_t	l = sizeof sa;
+		int			c = socket(AF_INET, SOCK_STREAM, 0);
+
+		if (!strcmp(mode, "namefresh")) code(getsockname(c, (struct sockaddr *) &sa, &l));
+		code(connect(c, (struct sockaddr *) &me, sizeof me));
+		code(dup2(c, ls));
+	}
+	else if (!strcmp(mode, "setopt") || !strcmp(mode, "getopt"))
+	{
+		int			v = 1, s = socket(AF_INET, SOCK_STREAM, 0);
+		socklen_t	l = sizeof v;
+
+		if (!strcmp(mode, "setopt")) code(setsockopt(s, SOL_SOCKET, SO_PRIORITY, &v, sizeof v));
+		else code(getsockopt(s, SOL_SOCKET, SO_PRIORITY, &v, &l));
+	}
+	else if (!strcmp(mode, "efdwritev") || !strcmp(mode, "efdreadv"))
+	{
+		uint64_t	v = 1;
+		struct iovec iov = {&v, sizeof v};
+		int			e = eventfd(1, 0);
+
+		code(!strcmp(mode, "efdwritev") ? writev(e, &iov, 1) : readv(e, &iov, 1));
+	}
+	else if (!strcmp(mode, "sendname") || !strcmp(mode, "recvflags") || !strcmp(mode, "manyriov"))
+	{
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+		int			c = socket(AF_INET, SOCK_STREAM, 0);
+		char		b[40];
+		struct iovec iov[40];
+		struct msghdr mh = {.msg_iov = iov, .msg_iovlen = 1};
+
+		for (int i = 0; i < 40; i++) { iov[i].iov_base = b + i; iov[i].iov_len = 1; }
+		code(connect(c, (struct sockaddr *) &me, sizeof me));
+		(void) ls;
+		if (!strcmp(mode, "sendname")) { mh.msg_name = &me; mh.msg_namelen = sizeof me; code(sendmsg(c, &mh, 0)); }
+		else if (!strcmp(mode, "recvflags")) code(recvmsg(c, &mh, MSG_PEEK));
+		else code(readv(c, iov, 40));
+	}
+	else if (!strcmp(mode, "flocksock"))
+		code(syscall(SYS_flock, socket(AF_INET, SOCK_STREAM, 0), 1));
+	else if (!strcmp(mode, "byhandle"))
+		code(syscall(SYS_open_by_handle_at, AT_FDCWD, BAD, O_RDWR));
+	else if (!strcmp(mode, "openhow"))
+		code(syscall(SYS_openat2, AT_FDCWD, "/dev/null", BAD, 24));
+	else if (!strcmp(mode, "manyfds"))
+		for (int i = 0; i < 300; i++)
+			code(socket(AF_INET, SOCK_STREAM, 0));
+	else if (!strcmp(mode, "manyconn"))
+	{
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+
+		(void) ls;
+		for (int i = 0; i < 20; i++)
+			code(connect(socket(AF_INET, SOCK_STREAM, 0), (struct sockaddr *) &me, sizeof me));
+	}
+	else if (!strcmp(mode, "manywatch"))
+	{
+		int			ep = epoll_create1(0);
+		struct epoll_event ev = {EPOLLIN, {0}};
+
+		int			ls = listener(BASE);
+		struct sockaddr_in me = addr(BASE);
+
+		code(epoll_ctl(ep, EPOLL_CTL_ADD, ls, &ev));
+		for (int i = 0; i < 16; i++)
+		{
+			int			c = socket(AF_INET, SOCK_STREAM, 0);
+
+			code(connect(c, (struct sockaddr *) &me, sizeof me));
+			code(epoll_ctl(ep, EPOLL_CTL_ADD, c, &ev));
+		}
+		code(epoll_wait(ep, &ev, 1, 0));
+	}
+	else if (!strncmp(mode, "early", 5))
+	{
+		/* a non-blocking connect not yet complete, then a shutdown, or a
+		 * blocking read, write or connect */
+		struct sockaddr_in a = addr(BASE + 1);
+		int			s = socket(AF_INET, SOCK_STREAM, 0);
+		char		b = 'x';
+
+		fcntl(s, F_SETFL, O_NONBLOCK);
+		code(connect(s, (struct sockaddr *) &a, sizeof a));	/* EINPROGRESS */
+		if (!strcmp(mode, "earlyshut")) code(shutdown(s, SHUT_WR));
+		fcntl(s, F_SETFL, 0);
+		if (!strcmp(mode, "earlyread")) code(read(s, &b, 1));
+		if (!strcmp(mode, "earlywrite")) code(write(s, &b, 1));
+		if (!strcmp(mode, "earlydial")) code(connect(s, (struct sockaddr *) &a, sizeof a));
 	}
 	else if (!strcmp(mode, "notconnpipe"))
 	{

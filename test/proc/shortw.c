@@ -5,7 +5,9 @@
  * poll() for POLLOUT after EAGAIN and sending the rest after a short
  * write, as an event loop must.  Built with -DBUG it sends the body once
  * and ignores the count, which loses bytes only when the buffer fills,
- * so cmc catches it only with a short_writes budget.
+ * so cmc catches it only with a short_writes budget.  The [target] arg
+ * picks the call that sends: send (the default), writev or sendmsg, each
+ * of two pieces.
  *
  * Node 1 reads until end of stream and records what arrived:
  * [done][count][bytes...] on fd 3, done 1 once the stream ended.
@@ -20,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #define BASE 20000
@@ -36,16 +39,30 @@ emit(int done, const unsigned char *b, int n)
 	(void) !write(3, out, (size_t) n + 3);
 }
 
+static const char *how = "send";	/* the [target] arg: send, writev or sendmsg */
+
+/* one send of n bytes of b by the call how names */
+static ssize_t
+send1(int s, const char *b, int n)
+{
+	struct iovec iov[2] = {{(void *) b, (size_t) n / 2}, {(void *) (b + n / 2), (size_t) (n - n / 2)}};
+	struct msghdr mh = {.msg_iov = iov, .msg_iovlen = 2};
+
+	if (!strcmp(how, "writev")) return writev(s, iov, 2);
+	if (!strcmp(how, "sendmsg")) return sendmsg(s, &mh, MSG_NOSIGNAL);
+	return send(s, b, (size_t) n, MSG_NOSIGNAL);
+}
+
 /* send all of b, as an event loop does on a non-blocking socket */
 static void
 send_all(int s, const char *b, int n)
 {
 #ifdef BUG
-	(void) !send(s, b, (size_t) n, MSG_NOSIGNAL);
+	(void) !send1(s, b, n);
 #else
 	while (n > 0)
 	{
-		ssize_t		k = send(s, b, (size_t) n, MSG_NOSIGNAL);
+		ssize_t		k = send1(s, b, n);
 
 		if (k < 0 && errno == EAGAIN)
 		{
@@ -69,6 +86,8 @@ main(int argc, char **argv)
 	struct sockaddr_in a;
 	unsigned char got[8];
 	int			n = 0, one = 1;
+
+	if (argc > 2) how = argv[2];
 
 	memset(&a, 0, sizeof a);
 	a.sin_family = AF_INET;
