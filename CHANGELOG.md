@@ -5,6 +5,17 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A crash no longer loses a message its peer has read part of, or that a
+`poll` or `epoll_wait` has reported to the peer, nor any message
+before it: those bytes are in the peer's kernel.  A crash after a
+short read made the rest of the message vanish and the peer read EOF
+mid-message, a spurious violation.  The rest of a message read in
+part is also readable at once: a non-blocking read of it got EAGAIN
+and a poll did not report it.  Whole messages the peer has not touched
+may still be lost, which over-approximates Linux on loopback (cmc(7)).
+No example's state count changes.  Gate: proc_gate inkernel partial,
+pollwake and nbrest.
+
 A blocking `connect` after a send earlier in the step, to a node that
 has not read those bytes, stops so that node may react first; it may
 exit, and Linux then refuses the dial.  A non-blocking `accept` with

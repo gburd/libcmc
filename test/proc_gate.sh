@@ -1072,6 +1072,25 @@ for m in reconn nbaccept; do
 	done
 done
 
+# inkernel.c: bytes node 1 has started to read, or a poll has reported,
+# are in its kernel: node 0's crash cannot lose them (partial: a crash
+# made node 1's second read EOF; pollwake: a crash after the wake had a
+# second way, losing "ab"), and the rest of a part-read message is
+# readable at once (nbrest: a non-blocking read could get EAGAIN)
+$CC -O1 -no-pie -w -o "$B/proc/inkernel" "$T/inkernel.c" || { echo "proc_gate: inkernel.c does not build"; fail=1; }
+ik() {	# ik MODE DESC EXIT NEEDLE ENV INVARIANTS
+	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[invariants]\n%s\n' \
+		"$B/proc/inkernel" "$1" "$5" "$6" > "$OUT/ik-$1.model"
+	expect_by 60 "inkernel $1: $2" "$3" "$4" --model-file "$OUT/ik-$1.model"
+}
+ik partial "a crash keeps a message the peer has started to read" 0 "No error has been found" \
+	"crashes = 1" 'not1 = "node[1][0] != 1"'
+ik pollwake "a crash after a poll wake keeps what it reported" 0 "23 distinct states" \
+	"crashes = 1" 'any = "node[1][0] < 9"'
+ik nbrest "the rest of a part-read message is readable at once" 0 "No error has been found" \
+	"timeouts = 0" 'linux = "node[1][0] != 1"
+reached = "eventually node[1][0] == 4"'
+
 echo "-- partitions: a cut link holds segments back until it heals"
 # partitions = N lets the search cut a directed link between two nodes
 # and heal it later; bytes, FINs and handshakes on it wait.  The counts

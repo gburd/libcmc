@@ -1021,6 +1021,8 @@ local_port(const Node *nd, int fd)
  * done (shut, its FIN read, or reset) reports as Linux does, measured
  * by proc_gate's sockapi revents.  Whether a connection is readable
  * otherwise is the search's (WAKE), not this. */
+static int head_pinned(Node *nd, int fd);
+
 static short
 local_ready(Node *nd, int fd, short events)
 {
@@ -1050,7 +1052,9 @@ local_ready(Node *nd, int fd, short events)
 		}
 	}
 	unsigned out_ev = writable(nd, fd);
-	if ((events & POLLOUT) && out_ev) return (short) out_ev;
+	short in_ev = (events & POLLIN) && head_pinned(nd, fd) ? POLLIN : 0;
+	if ((events & POLLOUT) && out_ev) return (short) (out_ev | in_ev);
+	if (in_ev) return in_ev;
 	if (es >= 0 && nd->efdval[es] > 0 && (events & POLLIN)) return POLLIN;
 	return 0;
 }
@@ -1094,8 +1098,11 @@ cfd_del(Node *nd, int k)
 }
 
 /* message bag: bytes queued on connection conn toward its end `to`; a
- * zero-length eof entry is the FIN that ends the stream */
-typedef struct { int used, conn, to, len, seq, eof; unsigned char body[MSGLEN]; } Msg;
+ * zero-length eof entry is the FIN that ends the stream.  A message is
+ * pinned once the reader has read part of it or a poll has reported
+ * it: its bytes are in the reader's kernel then, so the sender's crash
+ * cannot lose them, and the reader can read them at once. */
+typedef struct { int used, conn, to, len, seq, eof, pinned; unsigned char body[MSGLEN]; } Msg;
 static Msg bag[MAXMSG];
 
 /* ghost reply log */
@@ -1529,7 +1536,7 @@ bag_add(int conn, int to, const unsigned char *b, int len, int eof)
 	for (int i = 0; i < MAXMSG; i++)
 		if (!bag[i].used)
 		{
-			bag[i].used = 1; bag[i].conn = conn; bag[i].to = to; bag[i].len = len; bag[i].eof = eof;
+			bag[i].used = 1; bag[i].conn = conn; bag[i].to = to; bag[i].len = len; bag[i].eof = eof; bag[i].pinned = 0;
 			bag[i].seq = conns[conn].seq[to]++;
 			if (len > 0) memcpy(bag[i].body, b, (size_t) len);
 			return;
@@ -1550,6 +1557,16 @@ conn_next(int conn, int to, int after)
 	return best;
 }
 static int conn_head(int conn, int to) { return conn < 0 ? -1 : conn_next(conn, to, -1); }
+
+/* Is the oldest message toward node nd's connection fd pinned (see
+ * Msg): in nd's kernel, so readable at once, with no search choice? */
+static int
+head_pinned(Node *nd, int fd)
+{
+	int cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	int h = cs >= 0 ? conn_head(nd->cconn[cs], nd->cend[cs]) : -1;
+	return h >= 0 && bag[h].pinned;
+}
 
 /* does connection conn hold unread bytes (not just a FIN) toward `to`? */
 static int
@@ -3847,7 +3864,8 @@ serve(Node *nd, Thread *th)
 			 * runs it (RUN: nothing arrived yet, EAGAIN).  Otherwise, or
 			 * once RUN carries it out (th->now), it is EAGAIN at once. */
 			int cs = cfd_slot(nd, fd);
-			if (cs >= 0 && nd->cnonblock[cs] && (th->poll_woke_fd < 0 || cfd_slot(nd, th->poll_woke_fd) != cs))
+			if (cs >= 0 && nd->cnonblock[cs] && !head_pinned(nd, fd) &&
+				(th->poll_woke_fd < 0 || cfd_slot(nd, th->poll_woke_fd) != cs))
 			{
 				if (!th->now && !node_multi(nd) && fd_may_change(nd, fd))
 				{
@@ -5082,7 +5100,7 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 		int h = conn_next(c, e, last);
 		if (h < 0) break;
 		last = bag[h].seq;
-		PUTC(bag[h].eof ? 2 : 1); PUTC(bag[h].len); PUTC(bag[h].len >> 8);
+		PUTC((bag[h].eof ? 2 : 1) | (bag[h].pinned << 2)); PUTC(bag[h].len); PUTC(bag[h].len >> 8);
 		for (int k = 0; k < bag[h].len; k++) PUTC(bag[h].body[k]);
 	}
 	PUTC(0);
@@ -5357,7 +5375,8 @@ enum_expire(Act *out, int *c)
 }
 
 /* Messages node d has sent on connection end (c, e) that its peer has
- * not read, toward the other end: data and a FIN alike.  0 when the
+ * not read, toward the other end, and that a crash of d may lose: data
+ * and a FIN alike, after the last pinned one (see Msg).  0 when the
  * peer is the client, d itself or already closed, whose queues a crash
  * leaves alone. */
 static int
@@ -5366,8 +5385,10 @@ crash_queue(int d, int c, int e)
 	const Conn *cn = &conns[c];
 	int m = 0;
 	if (!cn->used || cn->node[e] != d || cn->node[1 - e] < 0 || cn->node[1 - e] == d || cn->closed[1 - e]) return 0;
-	for (int i = 0; i < MAXMSG; i++)
-		if (bag[i].used && bag[i].conn == c && bag[i].to == 1 - e) m++;
+	/* a pinned message is in the reader's kernel, and so is every one
+	 * before it: only the messages after the last pinned one count */
+	for (int last = -1, h; (h = conn_next(c, 1 - e, last)) >= 0; last = bag[h].seq)
+		m = bag[h].pinned ? 0 : m + 1;
 	return m;
 }
 
@@ -5403,12 +5424,13 @@ net_crash(int d, long choice)
 		{
 			int m = crash_queue(d, c, e);
 			if (m == 0) continue;
-			int keep = m - (int) (choice % (m + 1)), k = 0;
+			int lose = (int) (choice % (m + 1)), k = 0, total = 0;
 			choice /= m + 1;
+			for (int last = -1, h; (h = conn_next(c, 1 - e, last)) >= 0; last = bag[h].seq) total++;
 			for (int last = -1, h; (h = conn_next(c, 1 - e, last)) >= 0; k++)
 			{
 				last = bag[h].seq;
-				if (k < keep) continue;
+				if (k < total - lose) continue;
 				if (bag[h].eof) conns[c].gone[e] = 1;
 				bag[h].used = 0;
 			}
@@ -5633,6 +5655,11 @@ poll_wake(Node *nd, Thread *th, int target, int at)
 		if (match && hit < 0) hit = k;
 	}
 	if (hit < 0) die(1, "poll wake on node %d found no polled fd for target %d", nd->id, target);
+	/* the poll reports the message at the head of a woken channel: it is
+	 * in this node's kernel now */
+	int wcs = target >= -1 ? cfd_slot(nd, th->pollfds[hit]) : -1;
+	int wh = wcs >= 0 ? conn_head(nd->cconn[wcs], nd->cend[wcs]) : -1;
+	if (wh >= 0) bag[wh].pinned = 1;
 	Thread *old = cap_begin(th);
 	if (th->poll_now)
 	{
@@ -5836,7 +5863,11 @@ apply(const Act *a)
 				break;
 			}
 			int k = deliver(nd, th, bag[h].body, bag[h].len);
-			if (k < bag[h].len) { memmove(bag[h].body, bag[h].body + k, (size_t) (bag[h].len - k)); bag[h].len -= k; }
+			if (k < bag[h].len)
+			{
+				memmove(bag[h].body, bag[h].body + k, (size_t) (bag[h].len - k));
+				bag[h].len -= k; bag[h].pinned = 1;
+			}
 			else bag[h].used = 0;
 			/* the reader made room: a writer whose buffer was full may
 			 * write again, and a poll for POLLOUT there is answered */

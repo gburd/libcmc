@@ -638,6 +638,16 @@ that loses power loses what it had not transmitted.
 For each connection to another node, any prefix of the node's unread
 messages there survives (none lost, the default, up to all of them,
 FIN included), one CRASH action for each combination.
+A message the peer has read part of, or that a
+.Fn poll
+or
+.Fn epoll_wait
+has reported to it, is in the peer's kernel: it and every message
+before it survive, and the rest of it is readable at once.
+Losing any whole message the peer has not touched over-approximates
+Linux, where on loopback (and on a fast link) the bytes are usually in
+the peer's kernel by the time the write returns; a program that
+survives the loss is safe in both.
 The trace names a loss
 .Pq Ql crash n0 (unsent bytes lost: way 1) .
 No invariant is checked at such a point, since a program may report its
