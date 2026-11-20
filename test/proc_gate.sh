@@ -67,6 +67,7 @@ $CC -O1 -no-pie -w -DSINGLE -o "$B/proc/durack-single" "$T/durack.c" || { echo "
 $CC -O1 -no-pie -w -o "$B/proc/midmerge" "$T/midmerge.c" || { echo "proc_gate: midmerge.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/ackfirst" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/ackfirst-bug" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -DWRITEV -o "$B/proc/ackfirst-writev" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c -DWRITEV does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/fslog" "$T/fslog.c" || { echo "proc_gate: fslog.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/fslog-bug" "$T/fslog.c" || { echo "proc_gate: fslog.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG2 -o "$B/proc/fslog-bug2" "$T/fslog.c" || { echo "proc_gate: fslog.c -DBUG2 does not build"; fail=1; }
@@ -400,6 +401,9 @@ expect "durack: a crash between a durable write and its ack" 0 "No error has bee
 expect "durack-single: a crash between two calls of one step" 0 "No error has been found" $(run durack durack-single)
 expect "ackfirst: durable before the ack holds"            0 "No error has been found" $(run ackfirst ackfirst)
 expect "ackfirst: an ack before the durable write is lost" 1 "acked_durable is violated" $(run ackfirst ackfirst-bug)
+# a writev() of the durable record is a crash point like write(); a
+# pwrite() on it is the kernel's ESPIPE (a pipe), with no effect
+expect "ackfirst: a crash between a durable writev and the ack" 1 "durable_then_ack is violated" $(run ackwritev ackfirst-writev)
 # a world held mid-step is never merged on its (stale) state hook, so a
 # crash budget cannot hide a violation reachable without one
 expect "midmerge: the violation is found without a crash"   1 "notfirst is violated" $(run midmerge midmerge) --crashes 0

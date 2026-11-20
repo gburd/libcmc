@@ -1,0 +1,11 @@
+# A model file for test/proc/ackfirst.c -DWRITEV: a writev() to the
+# durable record is a crash point, so the node can crash with v durable
+# and its ack not yet sent (node[0][0] is 5 only once crashed).
+[target]
+binary = ackfirst-writev
+nodes = 1
+[environment]
+client_write = 5
+crashes = 1
+[invariants]
+durable_then_ack = "node[0][0] != 5 or some r in replies : r.val == 5"

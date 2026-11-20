@@ -551,7 +551,11 @@ not only where a node waits.
 While crash budget is left, a single-threaded node stops right after
 each write or send on a checker-owned descriptor, each close of one,
 each connect (the connection already waits in the peer's backlog), and
-each durable write to descriptor 193, and each change or
+each durable
+.Fn write
+or
+.Fn writev
+to descriptor 193, and each change or
 .Fn fsync
 of a modelled file; the search may then crash it there
 or run it on

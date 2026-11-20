@@ -2402,8 +2402,8 @@ crash_point(const Node *nd, long nr, const __u64 *a)
 	int fd = (int) a[0];
 	switch (nr)
 	{
-		case SYS_write: return fd >= 500 || fd == DURABLE_FD;
-		case SYS_sendto: case SYS_close: case SYS_writev: case SYS_sendmsg:
+		case SYS_write: case SYS_writev: return fd >= 500 || fd == DURABLE_FD;
+		case SYS_sendto: case SYS_close: case SYS_sendmsg:
 		case SYS_shutdown: case SYS_connect:
 			return fd >= 500;
 		default: return 0;
@@ -2440,7 +2440,7 @@ kernel_fd_call(long nr, const __u64 *a)
 	{
 		case SYS_write: case SYS_writev:
 			if (fd == 1 || fd == 2) return 0;
-			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) return 0;
+			if (fd == 3 || fd == DURABLE_FD) return 0;
 			break;
 		case SYS_ioctl:
 			if (fd >= 0 && fd <= 2 && (a[1] == TCGETS || a[1] == TCGETS2)) return 0;
@@ -2478,18 +2478,27 @@ kernel_fd_call(long nr, const __u64 *a)
  * pipe as before, so the record checks (too long, left unfinished)
  * apply unchanged.  A write of at most PIPE_BUF bytes into a pipe with
  * room for them is whole, which poll's POLLOUT promises. */
+static void hook_put(Node *nd, int fd, const unsigned char *buf, size_t len);
 static void
 serve_hook(Node *nd, const __u64 *a)
 {
 	unsigned char buf[MSGLEN];
 	size_t		len = (size_t) a[2];
-	int			w = (int) a[0] == 3 ? nd->hook_w[0] : nd->hook_w[1];
 
 	if (len > sizeof buf)
 		die(3, "node %d writes %zu bytes to its state hook in one call; the limit is %zu", nd->id, len, sizeof buf);
 	size_t		got = cr_read(nd->pid, a[1], buf, len);
 	if (got == 0 && len > 0) { g_resp->error = -EFAULT; return; }
 	if (got < len) cr_fail(nd->id, "a state-hook write sends from a buffer that ends");
+	hook_put(nd, (int) a[0], buf, len);
+}
+
+/* The len bytes at buf, written to state hook fd (3 or DURABLE_FD) of
+ * node nd as one record write; the answer is the length. */
+static void
+hook_put(Node *nd, int fd, const unsigned char *buf, size_t len)
+{
+	int			w = fd == 3 ? nd->hook_w[0] : nd->hook_w[1];
 	struct pollfd pf = {w, POLLOUT, 0};
 	if (len > 0 && (poll(&pf, 1, 0) != 1 || !(pf.revents & POLLOUT)))
 		die(1, "node %d writes more state records between two quiescent points than the checker's pipe holds", nd->id);
@@ -3372,6 +3381,17 @@ serve(Node *nd, Thread *th)
 		{
 			int fd = (int) a[0];
 			if (nr == SYS_write && (fd == 3 || fd == DURABLE_FD)) { serve_hook(nd, a); break; }
+			if (nr == SYS_writev && (fd == 3 || fd == DURABLE_FD))
+			{
+				/* a vector record write: one record, gathered, so a
+				 * durable one is a crash point like write() */
+				unsigned char hbuf[MSGLEN]; int hlen = 0;
+				int err = read_iov(nd, a[1], (long) a[2], &hlen);
+				if (!err) err = gather_iov(nd, (int) a[2], hlen, hbuf);
+				if (err) { g_resp->error = err; break; }
+				hook_put(nd, fd, hbuf, (size_t) hlen);
+				break;
+			}
 			if (fd < 500) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; break; } /* not ours (stdout, libs) */
 			/* writev and sendmsg gather their iovec array into vbuf and
 			 * go the way of write and sendto; sendmsg's flags are
@@ -5672,7 +5692,7 @@ act_name(const Act *a, char *b, size_t n)
 static void
 print_trace(const int *seq, int len)
 {
-	char nm[48];
+	char nm[96];
 	Act a[MAXACT]; int na, n = 0, k = 0;
 	for (int pass = 0; pass < 2; pass++)
 	{

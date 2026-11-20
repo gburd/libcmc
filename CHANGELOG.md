@@ -24,6 +24,13 @@ peer an empty connection.  The guide's server grows from 26 to 30
 distinct states, and its counterexample gains a `run`.  Gate: proc_gate
 conncrash, and the guide's trace in docs_gate.
 
+A writev() to the durable record (fd 193) or the state hook is served
+by the checker as one record write, as write() is, and on fd 193 it is
+a crash point.  It went to the kernel pipe, so a crash could not fall
+between it and the next send.  A pwrite() there stays the kernel's
+ESPIPE.  Gate: proc_gate "a crash between a durable writev and the
+ack".
+
 Hand-written TLA+ twins for `fpaxos.cml`, `caspaxos.cml`, `zab.cml` and
 `fastpaxos.cml` (examples/spec/*.tla, in the style of `paxos.tla`), each
 cited to its paper.  Single-worker TLC gives the same distinct-state
