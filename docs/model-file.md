@@ -156,6 +156,48 @@ Each budget counts over the whole run, from 0 (the default) to 255.
 
 `--crashes`, `--drops` and `--timeouts` override the budgets.
 
+### `[files]`
+
+Optional.  It gives each node a file system that the checker models,
+in the same way it owns the node's sockets.  Paths outside the
+directory work as they do without this section: a node can only read
+them.
+
+- `dir = /data`: the modelled directory.  It starts empty on every
+  node and does not exist on the host, because the checker answers
+  every call on a path under it and every call on a descriptor it
+  opened there.  The calls it answers are `open`, `openat` and `creat`
+  (with `O_CREAT`, `O_EXCL`, `O_TRUNC`, `O_APPEND`, any access mode,
+  and `O_RDONLY|O_DIRECTORY` for a directory); `read`, `pread64`,
+  `write`, `pwrite64`, `lseek`, `ftruncate`, `fsync`, `fdatasync` and
+  `close`; `fstat`, `stat`, `lstat`, `newfstatat`, `statx`, `access`
+  and `faccessat`; `mkdir`; `unlink`; and `rename` or `renameat` within
+  one directory.  Anything else under the directory ends the check
+  (exit 3).  That includes `O_DIRECT`, `O_SYNC`, `mmap` of a modelled
+  file, links, xattrs, `rmdir`, `chdir`, listing a directory, and a rename
+  between directories.  A node with more than one thread that uses the
+  files also ends the check.
+- `eio = N`: the budget of failures.  A write or `ftruncate` may fail
+  with `EIO`, and its change is undone.  An `fsync` may also fail, and
+  then it forgets the file's unsynced writes, as Linux does after a
+  writeback error.  A read still returns those writes, but a crash
+  loses them, and a later `fsync` succeeds without saving them.
+- `enospc = N`: the same for `ENOSPC`, on a write or `ftruncate`.
+- `bytes = N`: the most each node's files may hold, from 1 to 4096,
+  counting each file's contents now, its contents on disk and its
+  unsynced writes.  The default is 1024.  A node whose files grow past
+  it ends the check (exit 3).
+
+A crash keeps, for each file and each directory, what its last `fsync`
+saved plus a prefix of the changes made since then, and the search tries
+every prefix.  A create, an unlink or a rename changes the directory,
+so it survives a crash only after an `fsync` of that directory.  The
+files outlive a crash and a restart: a restarted node reads what the
+crash kept.  Every change to a modelled file is a point where a crash
+can fall, and so is every `fsync`.  A path with a `..` part ends the
+check while the section is present, and so does a crash that could
+leave one node's files in more than 256 ways (sync more often).
+
 ## The state hook
 
 The checker reads a node's state from what the node reports.  After

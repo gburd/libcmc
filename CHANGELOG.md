@@ -157,6 +157,22 @@ drift 200), sleeps (one row per call, three select and clock refusals,
 four timer refusals), timedwait (signal and timeout each win), and
 unmodelled pollto (now fires).
 
+A node can keep its durable state in files.  A model file's new
+`[files]` section names a directory (`dir = /data`) that the checker
+models for each node, in the same way it owns the node's sockets.  The
+checker answers the open, read, write, seek, truncate, fsync, stat,
+mkdir, unlink and rename calls there, and holds the contents in the
+world.  A crash keeps each file's and each directory's synced contents
+plus a prefix of its later changes, chosen by the search, so a create
+or a rename survives a crash only once its directory is synced.  The
+`eio` and `enospc` budgets make a write or an fsync fail, and a failed
+fsync forgets the unsynced data.  A `bytes` budget bounds each node's
+files.  Calls the model does not have on these files end the check
+(exit 3), among them `O_DIRECT`, `mmap`, links and xattrs.  Paths
+outside the directory keep the read-only behaviour.  Gates: proc_gate
+rows fslog (a missing directory fsync and a missing fdatasync are each
+caught) and fsfail (EIO, ENOSPC, the bytes budget, and the refusals).
+
 ## 2.1.0 (2026-11-19)
 
 Closes the four gaps 2.0.0 documented in the process engine (a

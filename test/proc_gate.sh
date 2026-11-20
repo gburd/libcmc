@@ -66,6 +66,10 @@ done
 $CC -O1 -no-pie -w -DSINGLE -o "$B/proc/durack-single" "$T/durack.c" || { echo "proc_gate: durack.c -DSINGLE does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/ackfirst" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/ackfirst-bug" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/fslog" "$T/fslog.c" || { echo "proc_gate: fslog.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG -o "$B/proc/fslog-bug" "$T/fslog.c" || { echo "proc_gate: fslog.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -DBUG2 -o "$B/proc/fslog-bug2" "$T/fslog.c" || { echo "proc_gate: fslog.c -DBUG2 does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/fsfail" "$T/fsfail.c" || { echo "proc_gate: fsfail.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/syncpoint-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -DC11 -DBUG -o "$B/proc/syncpoint-c11-bug" "$T/syncpoint.c" -lpthread || { echo "proc_gate: syncpoint.c -DC11 -DBUG does not build"; fail=1; }
 # A multi-threaded node passes only when built with the race runtime:
@@ -395,6 +399,37 @@ expect "durack: a crash between a durable write and its ack" 0 "No error has bee
 expect "durack-single: a crash between two calls of one step" 0 "No error has been found" $(run durack durack-single)
 expect "ackfirst: durable before the ack holds"            0 "No error has been found" $(run ackfirst ackfirst)
 expect "ackfirst: an ack before the durable write is lost" 1 "acked_durable is violated" $(run ackfirst ackfirst-bug)
+
+echo "-- a modelled file system (plan 2.2, item 3)"
+# fslog keeps its log in files under the model's [files] dir: pwrite and
+# fdatasync for the log, a control file renamed into place and the
+# directory fsynced, then the ack.  A crash keeps each file's synced
+# bytes and a chosen prefix of the rest, and a rename only once its
+# directory is synced.  -DBUG skips the directory fsync, -DBUG2 the
+# fdatasync; each loses an acked value at a crash and a restart.
+expect "fslog: synced log and control file hold"   0 "No error has been found" $(run fslog fslog)
+expect "fslog: no directory fsync is caught"       1 "acked_durable is violated" $(run fslog fslog-bug)
+expect "fslog: no fdatasync is caught"             1 "acked_durable is violated" $(run fslog fslog-bug2)
+expect "fslog: the bugs need the crash"            0 "No error has been found" $(run fslog fslog-bug2) --crashes 0
+# fsfail: a write or fsync may fail (eio, enospc).  A failed fsync
+# forgets the unwritten data, so retrying the fsync alone loses an acked
+# value at a crash (retry); writing again first does not (rewrite).
+# Past the bytes budget, and on the calls the model does not have, the
+# check ends (exit 3).
+ffm() {	# ffm MODE [sed script]: fsfail.model with args = MODE
+	sed "s/^args = .*/args = $1/;${2:-}" "$T/fsfail.model" > "$OUT/ff-$1.model"
+	echo "--model-file $OUT/ff-$1.model --binary $B/proc/fsfail"
+}
+expect "fsfail: rewrite after EIO holds"            0 "No error has been found" $(ffm rewrite)
+expect "fsfail: an fsync retried after EIO loses"   1 "acked_durable is violated" $(ffm retry)
+expect "fsfail: the loss needs the EIO"             0 "No error has been found" $(ffm retry 's/^eio = 1/eio = 0/')
+expect "fsfail: rewrite after ENOSPC holds"         0 "No error has been found" $(ffm rewrite 's/^eio = 1/enospc = 1/')
+expect "fsfail: past the bytes budget is refused"   3 "past the model's \[files\] bytes" $(ffm big)
+expect "fsfail: O_DIRECT is refused"                3 "which are not modelled (O_DIRECT" $(ffm odirect)
+expect "fsfail: mmap of a modelled file is refused" 3 "maps modelled file fd" $(ffm mmap)
+expect "fsfail: link is refused"                    3 "is not modelled (links" $(ffm link)
+expect "fsfail: an xattr read is refused"           3 "on modelled file fd 501 is not modelled" $(ffm xattr)
+expect "fsfail: a rename out of the model is refused" 3 "between a modelled and an unmodelled path" $(ffm cross)
 # threadpos: worlds with a multi-threaded node are never merged, since a
 # thread's record cannot tell apart two iterations of one loop (loop), a
 # thread born on the stack of one already joined (seq), or memory that
@@ -424,7 +459,7 @@ printf '#include "cmc.h"\nint main(int argc, char **argv) { return cmc_main(argc
 # it compiles the engine, so it takes the build's CFLAGS (a word list)
 # shellcheck disable=SC2086
 if $CC -std=c11 -D_POSIX_C_SOURCE=200809L -O1 -w ${CFLAGS:-} -DCMC_TREE_CAP=200 -I"$HERE/include" -o "$B/cap200/cmc" \
-	"$B/cap200/main.c" "$HERE/src/cmc_cli.c" "$HERE/src/cmc_proc.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc.c"; then
+	"$B/cap200/main.c" "$HERE/src/cmc_cli.c" "$HERE/src/cmc_proc.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc_fs.c" "$HERE/src/cmc.c"; then
 	CMC=$B/cap200/cmc
 	export CMC_PRELOAD="$B/cmc-preload.so"
 	expect_by 120 "tree bound: an endless thread stops at the built-in bound" 2 "200 worlds with a multi-threaded node were searched without merging" --model-file "$OUT/tp-spin.model"
@@ -1109,16 +1144,24 @@ restarts = 1"
 # the whitebox drivers include the engine source, so they take its CFLAGS
 # (a --coverage build measures it through them); node binaries do not
 # shellcheck disable=SC2086
-if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fingerprint" "$T/fingerprint.c" "$HERE/src/cmc_spec.c"; then
+if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fingerprint" "$T/fingerprint.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc_fs.c"; then
 	if "$B/proc/fingerprint" > "$OUT/fp.txt" 2>&1; then echo "ok   the world encoding separates differing futures"
 	else echo "FAIL the world encoding"; sed 's/^/     /' "$OUT/fp.txt"; fail=1; fi
 else echo "proc_gate: fingerprint.c does not build"; fail=1; fi
+
+# the modelled file system on its own (plan 2.2, item 3): what a crash
+# keeps, a failed fsync, a failed write, an unlinked open file, errors
+# shellcheck disable=SC2086
+if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -o "$B/proc/fsmodel" "$T/fsmodel.c" "$HERE/src/cmc_fs.c"; then
+	if "$B/proc/fsmodel" > "$OUT/fsmodel.txt" 2>&1; then echo "ok   the file model keeps what a crash keeps"
+	else echo "FAIL the file model"; sed 's/^/     /' "$OUT/fsmodel.txt"; fail=1; fi
+else echo "proc_gate: fsmodel.c does not build"; fail=1; fi
 
 # the same, over random worlds (soundness plan, Phase 5): a mutation of
 # any future-relevant field changes the encoding, and slot order, tids
 # and allocation positions do not
 # shellcheck disable=SC2086
-if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fpfuzz" "$T/fpfuzz.c" "$HERE/src/cmc_spec.c"; then
+if $CC -std=c11 -O1 -w ${CFLAGS:-} -I"$HERE/src" -I"$HERE/include" -o "$B/proc/fpfuzz" "$T/fpfuzz.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc_fs.c"; then
 	if "$B/proc/fpfuzz" > "$OUT/fpfuzz.txt" 2>&1; then echo "ok   the world encoding holds over random worlds ($(tail -1 "$OUT/fpfuzz.txt" | cut -d' ' -f4-))"
 	else echo "FAIL the world encoding over random worlds"; sed 's/^/     /' "$OUT/fpfuzz.txt"; fail=1; fi
 else echo "proc_gate: fpfuzz.c does not build"; fail=1; fi

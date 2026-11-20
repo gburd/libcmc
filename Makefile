@@ -64,11 +64,13 @@ $(B)/cmc.o: src/cmc.c include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 $(B)/cmc_cli.o: src/cmc_cli.c src/cmc_proc.h src/cmc_spec.h include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(B)/cmc_proc.o: src/cmc_proc.c src/cmc_proc.h | $(B)
+$(B)/cmc_proc.o: src/cmc_proc.c src/cmc_proc.h src/cmc_fs.h | $(B)
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+$(B)/cmc_fs.o: src/cmc_fs.c src/cmc_fs.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 $(B)/cmc_spec.o: src/cmc_spec.c src/cmc_spec.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o $(B)/cmc_spec.o
+$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o $(B)/cmc_spec.o $(B)/cmc_fs.o
 	$(AR) rcs $@ $^
 $(B)/cmc-preload.so: src/cmc_preload.c | $(B)
 	$(CC) $(ALL_CFLAGS) -fPIC -shared -o $@ $<

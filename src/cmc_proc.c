@@ -71,12 +71,15 @@
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/user.h>				/* user_regs_struct, for trace_stop() */
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "cmc_fs.h"
 
 #ifndef SECCOMP_FILTER_FLAG_NEW_LISTENER
 #define SECCOMP_FILTER_FLAG_NEW_LISTENER (1UL << 3)
@@ -97,6 +100,12 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
 #endif
 #ifndef SYS_removexattrat
 #define SYS_removexattrat 466
+#endif
+#ifndef SYS_getxattrat
+#define SYS_getxattrat 464
+#endif
+#ifndef SYS_listxattrat
+#define SYS_listxattrat 465
 #endif
 #ifndef SYS_file_setattr
 #define SYS_file_setattr 469
@@ -125,9 +134,12 @@ static int seccomp(unsigned op, unsigned flags, void *a) { return (int) syscall(
  * one crash per node and one drop per channel.  With up to MAXTHREAD
  * threads the per-thread term dominates, so the bound scales by it.
  * One restart per node also fits the trailing MAXNODES * (MAXNODES + 1)
- * term alongside the per-node crashes. */
-#define MAXACT (MAXNODES * MAXTHREAD * (MAXPOLL + MAXNODES + 4) + MAXNODES * (MAXNODES + 1) + MAXNODES * 2 * MAXNODES)
+ * term alongside the per-node crashes.  A crash of a node with modelled
+ * files is up to FS_MAXCRASH actions. */
+#define MAXACT (MAXNODES * MAXTHREAD * (MAXPOLL + MAXNODES + 4) + MAXNODES * (MAXNODES + 1) + MAXNODES * 2 * MAXNODES + MAXNODES * FS_MAXCRASH)
 #define MAXINV 8
+#define FS_BYTES_DEFAULT 1024	/* a node's file bytes, all files and every kept version */
+#define FS_BYTES_MAX 4096
 #define MAXFIELD 16				/* named byte offsets in [fields] */
 
 /* =================================================================== */
@@ -149,6 +161,11 @@ static struct
 	int			ninv;
 	Field		field[MAXFIELD];/* [fields] name = byte offset, for node[i].name */
 	int			nfield;
+	/* [files]: the directory whose files the checker models (empty: none),
+	 * the EIO and ENOSPC budgets, and each node's byte budget */
+	char		fsdir[256];
+	int			eio, enospc;
+	long		fsbytes;
 }			M;
 
 static char *trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=s+strlen(s); while(e>s&&isspace((unsigned char)e[-1]))*--e=0; return s; }
@@ -184,7 +201,7 @@ load_model(const char *path)
 
 	if (!f) { fprintf(stderr, "cmc: cannot open model file %s: %s\n", path, strerror(errno)); return -1; }
 	memset(&M, 0, sizeof M);
-	M.nodes = 1; M.client_write = -1; M.depth = -1; M.max_write = MSGLEN_DEFAULT;
+	M.nodes = 1; M.client_write = -1; M.depth = -1; M.max_write = MSGLEN_DEFAULT; M.fsbytes = FS_BYTES_DEFAULT;
 	while (fgets(line, sizeof line, f))
 	{
 		ln++;
@@ -195,8 +212,8 @@ load_model(const char *path)
 			char *e = strchr(s, ']');
 			if (!e || *trim(e + 1)) { fprintf(stderr, "cmc: %s:%d: malformed section header\n", path, ln); goto bad; }
 			*e = 0;
-			if (strcmp(s + 1, "target") && strcmp(s + 1, "environment") && strcmp(s + 1, "invariants") && strcmp(s + 1, "fields"))
-			{ fprintf(stderr, "cmc: %s:%d: unknown section [%s] (target, environment, fields, invariants)\n", path, ln, s + 1); goto bad; }
+			if (strcmp(s + 1, "target") && strcmp(s + 1, "environment") && strcmp(s + 1, "invariants") && strcmp(s + 1, "fields") && strcmp(s + 1, "files"))
+			{ fprintf(stderr, "cmc: %s:%d: unknown section [%s] (target, environment, fields, files, invariants)\n", path, ln, s + 1); goto bad; }
 			snprintf(sect, sizeof sect, "%s", s + 1);
 			continue;
 		}
@@ -249,6 +266,21 @@ load_model(const char *path)
 		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.restarts = (int) x; }
 		else if (!strcmp(sect, "environment") && !strcmp(k, "depth"))
 		{ if (int_value(path, ln, k, v, 0, 1000000, &x)) goto bad; M.depth = x; }
+		else if (!strcmp(sect, "files") && !strcmp(k, "dir"))
+		{
+			/* an absolute directory, kept without a trailing slash */
+			size_t dl = strlen(v);
+			while (dl > 1 && v[dl - 1] == '/') v[--dl] = 0;
+			if (*v != '/' || dl < 2 || dl >= sizeof M.fsdir || strstr(v, "/.") || strstr(v, "//"))
+			{ fprintf(stderr, "cmc: %s:%d: dir must be an absolute directory other than / (no . or .. parts)\n", path, ln); goto bad; }
+			snprintf(M.fsdir, sizeof M.fsdir, "%s", v);
+		}
+		else if (!strcmp(sect, "files") && !strcmp(k, "eio"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.eio = (int) x; }
+		else if (!strcmp(sect, "files") && !strcmp(k, "enospc"))
+		{ if (int_value(path, ln, k, v, 0, 255, &x)) goto bad; M.enospc = (int) x; }
+		else if (!strcmp(sect, "files") && !strcmp(k, "bytes"))
+		{ if (int_value(path, ln, k, v, 1, FS_BYTES_MAX, &x)) goto bad; M.fsbytes = x; }
 		else if (!strcmp(sect, "fields"))
 		{
 			/* name = byte offset, so an invariant can say node[i].epoch
@@ -285,6 +317,8 @@ load_model(const char *path)
 	}
 	fclose(f);
 	if (!seen_nodes) { fprintf(stderr, "cmc: %s: [target] nodes is required\n", path); return -1; }
+	if (!M.fsdir[0] && (M.eio || M.enospc))
+	{ fprintf(stderr, "cmc: %s: [files] eio and enospc need a dir\n", path); return -1; }
 	if (M.ninv == 0) { fprintf(stderr, "cmc: %s: no invariant to check ([invariants] is empty)\n", path); return -1; }
 	/* every invariant must parse before the search starts */
 	for (int i = 0; i < M.ninv; i++)
@@ -720,6 +754,12 @@ typedef struct {
 	int threaded;				/* this process has run more than one thread (world_threaded) */
 	int race_ok;				/* the race runtime announced itself in this process */
 	int execd;					/* the launch's own exec of the binary has run */
+	/* the node's modelled files ([files] dir), which outlive its process;
+	 * and, while its thread is held after a write, truncation or fsync of
+	 * one, what failing that call instead would undo (undo_kind 'w' for a
+	 * write or truncation, 's' for an fsync; 0 for none) */
+	Fs fs;
+	FsUndo undo; int undo_kind;
 } Node;
 
 static Node N[MAXNODES];
@@ -994,8 +1034,9 @@ local_ready(Node *nd, int fd, short events)
 }
 
 /* Linux's errno for socket call nr on owned fd fd of the wrong kind, or
- * 0 when the call applies to it: ENOTSOCK on an eventfd or an epoll
- * instance, EBADF on nothing open, and the state errors of a socket
+ * 0 when the call applies to it: ENOTSOCK on an eventfd, an epoll
+ * instance or a modelled file, EBADF on nothing open, and the state
+ * errors of a socket
  * (connect on a connected or listening socket is EISCONN; listen on a
  * connection, accept on anything but the listener, and bind on a
  * connection are EINVAL).  read, write, recvfrom and sendto on a plain
@@ -1005,8 +1046,8 @@ wrong_kind(Node *nd, long nr, int fd)
 {
 	int k = fd_kind(nd, fd);
 
+	if (k == K_EFD || k == K_EPOLL || (k == K_NONE && fs_isfd(&nd->fs, fd))) return ENOTSOCK;
 	if (k == K_NONE) return EBADF;
-	if (k == K_EFD || k == K_EPOLL) return ENOTSOCK;
 	switch (nr)
 	{
 		case SYS_connect: return k == K_LISTEN ? EISCONN : 0;
@@ -1039,7 +1080,7 @@ static Msg bag[MAXMSG];
 static unsigned char rep_src[MAXREP], rep_val[MAXREP]; static int nrep;
 
 /* environment budgets left on this path; part of the fingerprint */
-typedef struct { int timeouts, crashes, drops, restarts, short_writes, partitions; } Budget;
+typedef struct { int timeouts, crashes, drops, restarts, short_writes, partitions, eio, enospc; } Budget;
 static Budget bud;
 /* The network's cut links: cut[a][b] holds back every segment from node
  * a to node b (bytes, FINs and handshakes wait, as TCP retransmits
@@ -1160,6 +1201,7 @@ install_filter(void)
 		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_KILL_PROCESS),
 		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, nr)),
 #define OWN(n) BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,(n),0,1), BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_USER_NOTIF)
+#define FSX(n) OWN(M.fsdir[0] ? (unsigned) (n) : 0xffffffffU)
 		OWN(SYS_socket), OWN(SYS_setsockopt), OWN(SYS_bind), OWN(SYS_listen),
 		OWN(SYS_connect), OWN(SYS_accept), OWN(SYS_accept4),
 		OWN(SYS_read), OWN(SYS_write), OWN(SYS_recvfrom), OWN(SYS_sendto),
@@ -1210,7 +1252,27 @@ install_filter(void)
 		OWN(SYS_rt_tgsigqueueinfo), OWN(SYS_pidfd_open), OWN(SYS_pidfd_send_signal),
 		OWN(SYS_lseek), OWN(SYS_fsync), OWN(SYS_fdatasync), OWN(SYS_ftruncate),
 		OWN(SYS_fallocate), OWN(SYS_flock), OWN(SYS_sync_file_range),
+		/* with a modelled directory, the calls that read a file's
+		 * metadata or name, which the checker answers for its files
+		 * (mfs_call); without one they go to the kernel unseen, as
+		 * before (FSX matches no call then) */
+		FSX(SYS_stat), FSX(SYS_lstat), FSX(SYS_fstat), FSX(SYS_newfstatat), FSX(SYS_statx),
+		FSX(SYS_access), FSX(SYS_faccessat), FSX(SYS_faccessat2), FSX(SYS_readlink),
+		FSX(SYS_readlinkat), FSX(SYS_chdir), FSX(SYS_fchdir), FSX(SYS_getdents64),
+		FSX(SYS_getdents), FSX(SYS_getxattr), FSX(SYS_lgetxattr), FSX(SYS_fgetxattr),
+		FSX(SYS_listxattr), FSX(SYS_llistxattr), FSX(SYS_flistxattr), FSX(SYS_getxattrat),
+		FSX(SYS_listxattrat), FSX(SYS_statfs), FSX(SYS_fstatfs),
+#undef FSX
 #undef OWN
+		/* mmap: notify only when its fd (args[4]) is a checker-owned one,
+		 * 500 up to INT_MAX (an anonymous map passes -1) */
+		BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K, SYS_mmap, 0, 5),
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, args[4])),
+		BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K, 500, 0, 1),
+		BPF_JUMP(BPF_JMP|BPF_JGE|BPF_K, 0x80000000U, 0, 1),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_ALLOW),
+		BPF_STMT(BPF_RET|BPF_K, SECCOMP_RET_USER_NOTIF),
+		BPF_STMT(BPF_LD|BPF_W|BPF_ABS, offsetof(struct seccomp_data, nr)),
 		/* sendmsg: notify only when its fd (the low word of args[0]) is a
 		 * checker-owned one, 500 or above; install_trace_filter() catches
 		 * the rest once the listener has been sent */
@@ -1746,6 +1808,411 @@ fs_call(const Node *nd, long nr, const __u64 *a)
 	return 1;
 }
 
+/* Is path under the modelled directory ([files] dir)?  If so, rel gets
+ * it relative to that directory ("" for the directory itself) with its
+ * "." parts and repeated slashes removed, and the answer is 1.  A path
+ * outside it is 0, and keeps the read-only file system.  path is
+ * absolute.  A ".." part is refused, wherever it is, and so is a name
+ * longer than the model's component limit. */
+static int
+mfs_path(const Node *nd, const char *path, char *rel)
+{
+	char norm[2 * FS_PATHMAX];
+	size_t dl = strlen(M.fsdir), n = 0;
+
+	if (!M.fsdir[0]) return 0;
+	/* path without its empty and "." parts, as "/a/b" */
+	for (const char *p = path; *p;)
+	{
+		while (*p == '/') p++;
+		const char *e = p;
+		while (*e && *e != '/') e++;
+		size_t len = (size_t) (e - p);
+		if (len == 2 && p[0] == '.' && p[1] == '.')
+			die(3, "node %d: path %s has a .. part, which is not modelled while a [files] dir is", nd->id, path);
+		if (len > 0 && !(len == 1 && *p == '.'))
+		{
+			norm[n++] = '/';
+			memcpy(norm + n, p, len); n += len;
+		}
+		p = e;
+	}
+	norm[n] = 0;
+	if (strncmp(norm, M.fsdir, dl) || (norm[dl] && norm[dl] != '/')) return 0;
+	const char *r = norm[dl] ? norm + dl + 1 : norm + dl;
+	for (const char *p = r; *p;)
+	{
+		const char *e = strchr(p, '/');
+		size_t len = e ? (size_t) (e - p) : strlen(p);
+		if (len >= FS_NAME)
+			die(3, "node %d: path %s has a name longer than %d bytes, which is not modelled", nd->id, path, FS_NAME - 1);
+		p += len + (e != NULL);
+	}
+	strcpy(rel, r);
+	return 1;
+}
+
+/* Set when a call on the modelled files is one the search may crash
+ * the node after, or fail (see mfs_hold()); try_pending_for() holds its
+ * answer then. */
+static int g_fs_hold;
+
+/* Answer g_resp with r, a modelled call's result: a count, or a negative
+ * errno.  A model limit or an operation the model does not have ends the
+ * check, and so does a node whose files outgrow [files] bytes. */
+static void
+mfs_answer(const Node *nd, long nr, long r)
+{
+	if (r == FS_LIMIT)
+		die(3, "node %d: system call %ld on a modelled file passes a limit of the file model (%d files, %d entries a directory, %d unsynced operations a file, %d bytes a file)",
+			nd->id, nr, FS_MAXINO, FS_MAXENT, FS_MAXOP, FS_FILEMAX);
+	if (r == FS_NOTMOD)
+		die(3, "node %d: system call %ld on a modelled file is not modelled (a rename between directories, or of a directory)", nd->id, nr);
+	if (fs_bytes(&nd->fs) > M.fsbytes)
+		die(3, "node %d: its modelled files hold %ld bytes, past the model's [files] bytes = %ld", nd->id, fs_bytes(&nd->fs), M.fsbytes);
+	if (r < 0) g_resp->error = (int) r;
+	else g_resp->val = r;
+}
+
+/* Write a stat for modelled inode ino (size, kind) to addr, as the
+ * kernel's struct stat (x86-64), or statx's when sx is set. */
+static int
+mfs_put_stat(const Node *nd, uint64_t addr, int ino, long size, int isdir, int sx)
+{
+	unsigned mode = isdir ? S_IFDIR | 0755 : S_IFREG | 0644;
+	if (sx)
+	{
+		struct statx x; memset(&x, 0, sizeof x);
+		x.stx_mask = STATX_BASIC_STATS; x.stx_blksize = 4096; x.stx_nlink = 1;
+		x.stx_mode = (uint16_t) mode; x.stx_ino = (uint64_t) ino + 1;
+		x.stx_size = (uint64_t) size; x.stx_blocks = (uint64_t) (size + 511) / 512;
+		return cr_write(nd->pid, addr, &x, sizeof x) == sizeof x ? 0 : -EFAULT;
+	}
+	struct stat st; memset(&st, 0, sizeof st);
+	st.st_mode = mode; st.st_ino = (ino_t) ino + 1; st.st_nlink = 1; st.st_blksize = 4096;
+	st.st_size = size; st.st_blocks = (size + 511) / 512;
+	return cr_write(nd->pid, addr, &st, sizeof st) == sizeof st ? 0 : -EFAULT;
+}
+
+/* The modelled open flags for Linux open flags fl, or -1 for a flag the
+ * model does not have: O_DIRECT, O_TMPFILE, O_PATH, O_SYNC, O_DSYNC, a
+ * directory opened other than O_RDONLY, or an access mode of 3. */
+static int
+mfs_flags(uint64_t fl)
+{
+	int acc = (int) (fl & O_ACCMODE), f = 0;
+	uint64_t known = O_ACCMODE | O_CREAT | O_EXCL | O_TRUNC | O_APPEND | O_DIRECTORY | O_CLOEXEC |
+		O_NOCTTY | O_LARGEFILE | O_NOFOLLOW | O_NOATIME;
+
+	if (fl & ~known) return -1;
+	if (acc == 3) return -1;
+	if ((fl & O_DIRECTORY) && acc != O_RDONLY) return -1;
+	if (acc != O_WRONLY) f |= FS_O_READ;
+	if (acc != O_RDONLY) f |= FS_O_WRITE;
+	if (fl & O_CREAT) f |= FS_O_CREAT;
+	if (fl & O_EXCL) f |= FS_O_EXCL;
+	if (fl & O_TRUNC) f |= FS_O_TRUNC;
+	if (fl & O_APPEND) f |= FS_O_APPEND;
+	if (fl & O_DIRECTORY) f |= FS_O_DIRECTORY;
+	return f;
+}
+
+/* An open of a modelled path rel with Linux flags fl: the fd is the
+ * node's next checker-owned number, so it can never meet a kernel fd. */
+static void
+mfs_open(Node *nd, long nr, const char *rel, uint64_t fl)
+{
+	int f = mfs_flags(fl);
+
+	if (f < 0)
+		die(3, "node %d: opens modelled file %s/%s with flags %#llo, which are not modelled (O_DIRECT, O_SYNC, O_TMPFILE and O_PATH are not)",
+			nd->id, M.fsdir, rel, (unsigned long long) fl);
+	int fd = nd->next_fd;
+	(void) fd_flags(nd, fd);
+	long r = fs_open(&nd->fs, rel, f, fd);
+	if (r >= 0)
+	{
+		nd->next_fd++;
+		*fd_flags(nd, fd) = (fl & O_CLOEXEC) ? FD_CX : 0;
+		g_fs_hold = (f & (FS_O_CREAT | FS_O_TRUNC)) != 0;	/* the open may have changed a directory or a file */
+	}
+	mfs_answer(nd, nr, r);
+}
+
+/* The path argument of a path call nr (its index in a), the dirfd it is
+ * relative to (AT_FDCWD for the calls without one), and for a rename or
+ * a link the second path's index and dirfd; -1 when nr takes no path. */
+static int
+mfs_path_arg(long nr, const __u64 *a, int *dirfd, int *second, int *dirfd2)
+{
+	*dirfd = *dirfd2 = AT_FDCWD; *second = -1;
+	switch (nr)
+	{
+		case SYS_open: case SYS_creat: case SYS_mkdir: case SYS_unlink: case SYS_rmdir:
+		case SYS_stat: case SYS_lstat: case SYS_access: case SYS_readlink: case SYS_chdir:
+		case SYS_getxattr: case SYS_lgetxattr: case SYS_listxattr: case SYS_llistxattr:
+		case SYS_statfs: case SYS_truncate: case SYS_mknod: case SYS_chmod: case SYS_chown:
+		case SYS_lchown: case SYS_utime: case SYS_utimes: case SYS_setxattr: case SYS_lsetxattr:
+		case SYS_removexattr: case SYS_lremovexattr: case SYS_link:
+			if (nr == SYS_link) *second = 1;
+			return 0;
+		case SYS_rename:
+			*second = 1;
+			return 0;
+		case SYS_symlink:
+			return 1;
+		case SYS_openat: case SYS_openat2: case SYS_mkdirat: case SYS_unlinkat: case SYS_newfstatat:
+		case SYS_statx: case SYS_faccessat: case SYS_faccessat2: case SYS_readlinkat:
+		case SYS_getxattrat: case SYS_listxattrat: case SYS_mknodat: case SYS_fchmodat:
+		case SYS_fchmodat2: case SYS_fchownat: case SYS_futimesat: case SYS_utimensat:
+		case SYS_setxattrat: case SYS_removexattrat: case SYS_file_setattr:
+			*dirfd = (int) a[0];
+			return 1;
+		case SYS_renameat: case SYS_renameat2: case SYS_linkat:
+			*dirfd = (int) a[0]; *second = 3; *dirfd2 = (int) a[2];
+			return 1;
+		case SYS_symlinkat:
+			*dirfd = (int) a[1];
+			return 2;
+		default:
+			return -1;
+	}
+}
+
+/* Is nr one of the calls the filter sends only while the model has a
+ * directory (FSX)?  Outside that directory they go on to the kernel. */
+static int
+mfs_extra(long nr)
+{
+	switch (nr)
+	{
+		case SYS_stat: case SYS_lstat: case SYS_fstat: case SYS_newfstatat: case SYS_statx:
+		case SYS_access: case SYS_faccessat: case SYS_faccessat2: case SYS_readlink:
+		case SYS_readlinkat: case SYS_chdir: case SYS_fchdir: case SYS_getdents64:
+		case SYS_getdents: case SYS_getxattr: case SYS_lgetxattr: case SYS_fgetxattr:
+		case SYS_listxattr: case SYS_llistxattr: case SYS_flistxattr: case SYS_getxattrat:
+		case SYS_listxattrat: case SYS_statfs: case SYS_fstatfs: case SYS_mmap:
+			return 1;
+		default:
+			return 0;
+	}
+}
+
+/* A stat-like call nr on modelled path rel (fd-based when rel is NULL):
+ * stat, lstat, newfstatat and statx write the metadata; access and
+ * faccessat say whether it exists; readlink says it is no link. */
+static void
+mfs_stat_call(Node *nd, long nr, const __u64 *a, int fd, const char *rel)
+{
+	long size; int isdir;
+	int ino = fs_stat(&nd->fs, fd, rel, &size, &isdir);
+
+	if (ino < 0) { mfs_answer(nd, nr, ino); return; }
+	switch (nr)
+	{
+		case SYS_stat: case SYS_lstat: case SYS_fstat:
+			mfs_answer(nd, nr, mfs_put_stat(nd, a[1], ino, size, isdir, 0)); return;
+		case SYS_newfstatat:
+			mfs_answer(nd, nr, mfs_put_stat(nd, a[2], ino, size, isdir, 0)); return;
+		case SYS_statx:
+			mfs_answer(nd, nr, mfs_put_stat(nd, a[4], ino, size, isdir, 1)); return;
+		case SYS_readlink: case SYS_readlinkat:
+			mfs_answer(nd, nr, -EINVAL); return;
+		default:
+			mfs_answer(nd, nr, 0); return;
+	}
+}
+
+/* Carry out path call nr on modelled path rel (and rel2, a rename's
+ * target).  Returns 1. */
+static int
+mfs_path_do(Node *nd, long nr, const __u64 *a, const char *rel, const char *rel2)
+{
+	switch (nr)
+	{
+		case SYS_open: mfs_open(nd, nr, rel, a[1]); return 1;
+		case SYS_openat: mfs_open(nd, nr, rel, a[2]); return 1;
+		case SYS_creat: mfs_open(nd, nr, rel, O_CREAT | O_WRONLY | O_TRUNC); return 1;
+		case SYS_mkdir: case SYS_mkdirat:
+			g_fs_hold = 1; mfs_answer(nd, nr, fs_mkdir(&nd->fs, rel)); return 1;
+		case SYS_unlink:
+			g_fs_hold = 1; mfs_answer(nd, nr, fs_unlink(&nd->fs, rel)); return 1;
+		case SYS_unlinkat:
+			if (a[2] & ~(uint64_t) AT_REMOVEDIR) { mfs_answer(nd, nr, -EINVAL); return 1; }
+			if (a[2]) break;
+			g_fs_hold = 1; mfs_answer(nd, nr, fs_unlink(&nd->fs, rel)); return 1;
+		case SYS_rename: case SYS_renameat:
+			g_fs_hold = 1; mfs_answer(nd, nr, fs_rename(&nd->fs, rel, rel2)); return 1;
+		case SYS_renameat2:
+			if (a[4]) break;
+			g_fs_hold = 1; mfs_answer(nd, nr, fs_rename(&nd->fs, rel, rel2)); return 1;
+		case SYS_stat: case SYS_lstat: case SYS_newfstatat: case SYS_statx:
+		case SYS_access: case SYS_faccessat: case SYS_faccessat2:
+		case SYS_readlink: case SYS_readlinkat:
+			mfs_stat_call(nd, nr, a, -1, rel); return 1;
+		default:
+			break;
+	}
+	die(3, "node %d: system call %ld on modelled path %s/%s is not modelled (links, xattrs, rmdir, metadata changes, chdir and statfs are not)",
+		nd->id, nr, M.fsdir, rel);
+	return 1;
+}
+
+/* The flags word of an *at call that can take AT_EMPTY_PATH, or 0. */
+static uint64_t
+at_flags(long nr, const __u64 *a)
+{
+	if (nr == SYS_newfstatat) return a[3];
+	if (nr == SYS_statx || nr == SYS_faccessat2) return a[nr == SYS_statx ? 2 : 3];
+	return 0;
+}
+
+/* Read path argument k of call nr into buf and resolve it against the
+ * model: 1 with rel set when it is a modelled path, 0 when it is not.
+ * A relative path is joined to the node's working directory, or to the
+ * directory a kernel dirfd names, as the kernel would resolve it (the
+ * working directory is never a modelled one: chdir there is refused).
+ * A path relative to a modelled directory fd is not modelled. */
+static int
+mfs_arg(Node *nd, const __u64 *a, int k, int dirfd, char *buf, char *rel)
+{
+	char link[64], base[FS_PATHMAX], full[2 * FS_PATHMAX];
+
+	fs_path(nd, a[k], buf);
+	if (buf[0] == '/') return mfs_path(nd, buf, rel);
+	if (dirfd != AT_FDCWD && fs_isfd(&nd->fs, dirfd))
+		die(3, "node %d: path %s relative to modelled directory fd %d is not modelled; use an absolute path", nd->id, buf, dirfd);
+	if (dirfd == AT_FDCWD) snprintf(link, sizeof link, "/proc/%d/cwd", (int) nd->pid);
+	else snprintf(link, sizeof link, "/proc/%d/fd/%d", (int) nd->pid, dirfd);
+	ssize_t n = readlink(link, base, sizeof base - 1);
+	if (n <= 0 || base[0] != '/') return 0;	/* no such kernel fd, or no directory: the kernel fails it */
+	base[n] = 0;
+	snprintf(full, sizeof full, "%s/%s", base, buf);
+	return mfs_path(nd, full, rel);
+}
+
+/* A path call on the modelled directory.  Returns 1 when it answered nr
+ * (g_resp holds the answer), 0 when nr names no modelled path, and the
+ * caller treats it as before. */
+static int
+mfs_path_call(Node *nd, long nr, const __u64 *a)
+{
+	char buf[FS_PATHMAX], rel[FS_PATHMAX], buf2[FS_PATHMAX], rel2[FS_PATHMAX];
+	int dirfd, second, dirfd2;
+	int k = mfs_path_arg(nr, a, &dirfd, &second, &dirfd2);
+
+	if (k < 0 || !M.fsdir[0]) return 0;
+	/* fstat as glibc makes it: an empty path and AT_EMPTY_PATH, on dirfd */
+	if (dirfd != AT_FDCWD && (at_flags(nr, a) & AT_EMPTY_PATH) && fs_path(nd, a[k], buf)[0] == 0)
+	{
+		if (!fs_isfd(&nd->fs, dirfd)) return 0;
+		mfs_stat_call(nd, nr, a, dirfd, NULL);
+		return 1;
+	}
+	int in1 = mfs_arg(nd, a, k, dirfd, buf, rel);
+	int in2 = second >= 0 && mfs_arg(nd, a, second, dirfd2, buf2, rel2);
+	if (in1 != in2 && second >= 0)
+		die(3, "node %d: system call %ld links or renames between a modelled and an unmodelled path (%s, %s)", nd->id, nr, buf, buf2);
+	if (!in1) return 0;
+	return mfs_path_do(nd, nr, a, rel, rel2);
+}
+
+/* Copy n bytes (at most FS_FILEMAX) between the node and buf: in from
+ * the node for a write, out to it for a read.  -EFAULT for an address
+ * the node does not own, as the kernel answers. */
+static long
+mfs_io(Node *nd, long nr, const __u64 *a, long off)
+{
+	static unsigned char buf[FS_FILEMAX];
+	long n = (long) a[2], r;
+	int fd = (int) a[0];
+	int wr = nr == SYS_write || nr == SYS_pwrite64;
+
+	if (n < 0) return -EINVAL;
+	if (n > FS_FILEMAX) n = FS_FILEMAX;
+	if (wr)
+	{
+		size_t got = cr_read(nd->pid, a[1], buf, (size_t) n);
+		if (got < (size_t) n) return -EFAULT;
+		r = fs_write(&nd->fs, fd, buf, n, off, &nd->undo);
+		if (r >= 0) { nd->undo_kind = 'w'; g_fs_hold = 1; }
+		return r;
+	}
+	r = fs_read(&nd->fs, fd, buf, n, off);
+	if (r > 0 && cr_write(nd->pid, a[1], buf, (size_t) r) != (size_t) r) return -EFAULT;
+	return r;
+}
+
+/* A call on a modelled file's fd.  Returns 1 when fd is one (g_resp
+ * holds the answer), else 0. */
+static int
+mfs_fd_call(Node *nd, long nr, const __u64 *a)
+{
+	int fd = (int) (nr == SYS_mmap ? a[4] : a[0]);
+	int d1, d2, k2;
+	long r = 0;
+
+	/* a call with a path is mfs_path_call()'s, even on a modelled dirfd */
+	if (mfs_path_arg(nr, a, &d1, &k2, &d2) >= 0) return 0;
+	if (!fs_isfd(&nd->fs, fd)) return 0;
+	switch (nr)
+	{
+		case SYS_read: case SYS_write: r = mfs_io(nd, nr, a, -1); break;
+		case SYS_pread64: case SYS_pwrite64:
+			r = (long) a[3] < 0 ? -EINVAL : mfs_io(nd, nr, a, (long) a[3]); break;
+		case SYS_lseek: r = fs_lseek(&nd->fs, fd, (long) a[1], (int) a[2]); break;
+		case SYS_ftruncate:
+			r = fs_ftruncate(&nd->fs, fd, (long) a[1], &nd->undo);
+			if (r == 0) { nd->undo_kind = 'w'; g_fs_hold = 1; }
+			break;
+		case SYS_fsync: case SYS_fdatasync:
+			r = fs_fsync(&nd->fs, fd, &nd->undo);
+			if (r == 0) { nd->undo_kind = 's'; g_fs_hold = 1; }
+			break;
+		case SYS_fstat:
+			mfs_stat_call(nd, nr, a, fd, NULL); return 1;
+		case SYS_close:
+			r = fs_close(&nd->fs, fd);
+			if (r == 0) *fd_flags(nd, fd) = 0;
+			break;
+		case SYS_fcntl:
+			/* FD_CLOEXEC is inert (a node does not exec), as for a socket */
+			if ((int) a[1] == F_GETFD) r = (*fd_flags(nd, fd) & FD_CX) ? FD_CLOEXEC : 0;
+			else if ((int) a[1] == F_SETFD) { *fd_flags(nd, fd) = (a[2] & FD_CLOEXEC) ? FD_CX : 0; r = 0; }
+			else die(3, "node %d: fcntl %d on modelled file fd %d is not modelled", nd->id, (int) a[1], fd);
+			break;
+		case SYS_mmap:
+			die(3, "node %d: maps modelled file fd %d into memory, which is not modelled (its writes would bypass the checker)", nd->id, fd);
+			return 1;
+		default:
+			die(3, "node %d: system call %ld on modelled file fd %d is not modelled", nd->id, nr, fd);
+			return 1;
+	}
+	mfs_answer(nd, nr, r);
+	return 1;
+}
+
+/* The modelled file system's part of serve(): a call on a modelled fd
+ * or path is answered here (1), anything else is left to serve() (0),
+ * except that a metadata call outside the model (mfs_extra()) goes on to
+ * the kernel, as it would without a [files] section.  The files are
+ * modelled for a node with one thread; in one with more, two threads'
+ * order on a file would be a schedule the search does not enumerate, so
+ * that is refused. */
+static int
+mfs_call(Node *nd, long nr, const __u64 *a)
+{
+	int done;
+
+	g_fs_hold = 0; nd->undo_kind = 0;
+	if (!M.fsdir[0]) return 0;
+	done = mfs_fd_call(nd, nr, a) || mfs_path_call(nd, nr, a);
+	if (done && node_multi(nd))
+		die(3, "node %d: a node with more than one thread uses its modelled files (system call %ld), which is not modelled", nd->id, nr);
+	if (!done && mfs_extra(nr)) { g_resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE; return 1; }
+	return done;
+}
+
 /* A node that forks becomes two processes the model cannot tell apart,
  * sharing one listener and its connections, and the child survives the
  * check.  End the check before the fork happens (the call is never
@@ -2191,6 +2658,30 @@ short_counts(int len, int *out)
 	return n;
 }
 
+/* Does the modelled-file call nd just carried out end its step?  Each
+ * call that changes a modelled file or directory is a point where a
+ * crash may fall (while one is in the budget): a crash keeps a prefix of
+ * each file's unsynced operations, so a crash after a later call covers
+ * an earlier one, except across an fsync, which this makes a point too.
+ * A write or truncation is also a point while EIO or ENOSPC is in the
+ * budget, and an fsync while EIO is: the search may make it fail
+ * (A_FAIL) instead.  nd->undo_kind stays set only while it is held. */
+static int
+mfs_hold(Node *nd)
+{
+	int h = 0;
+
+	if (g_fs_hold && !node_multi(nd))
+	{
+		if (bud.crashes > 0) h = 1;
+		if (nd->undo_kind == 'w' && bud.eio + bud.enospc > 0) h = 1;
+		if (nd->undo_kind == 's' && bud.eio > 0) h = 1;
+	}
+	if (!h || g_resp->error) nd->undo_kind = 0;
+	g_fs_hold = 0;
+	return h;
+}
+
 /* Service one ready notification on node nd without blocking the search.
  * Returns 1 if it did something, 0 if nd had no pending notification.
  * serve() carries the call out.  In a node with one thread its answer is
@@ -2251,6 +2742,7 @@ carry_out(Node *nd, Thread *th)
 	int parked = serve(nd, th);
 	g_cap = NULL;
 	if (parked) return 1;
+	if (mfs_hold(nd)) { hold = 1; th->sp = stack_pointer(nd, th); }
 	if (!hold)
 	{
 		if (ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_resp) != 0 && errno != ENOENT) {}
@@ -2596,6 +3088,8 @@ static int
 serve(Node *nd, Thread *th)
 {
 	long nr = g_req->data.nr; __u64 *a = g_req->data.args;
+
+	if (mfs_call(nd, nr, a)) return 0;
 
 	switch (nr)
 	{
@@ -3202,6 +3696,7 @@ serve(Node *nd, Thread *th)
 			int epfd = (int) a[0]; int op = (int) a[1]; int fd = (int) a[2];
 			int eps = ep_slot(nd, epfd);
 			if (eps < 0) die(1, "node %d: epoll_ctl on fd %d, which is no epoll instance", nd->id, epfd);
+			if (fs_isfd(&nd->fs, fd)) { g_resp->error = -EPERM; break; }	/* Linux: a regular file */
 			Epoll *e = &nd->ep[eps];
 			/* struct epoll_event is packed on x86-64: 4-byte events then an
 			 * 8-byte data union, 12 bytes with no padding */
@@ -3326,6 +3821,9 @@ serve(Node *nd, Thread *th)
 			{
 				pfs[i].revents = 0;
 				int fd = pfs[i].fd;
+				if (fd < 0) continue;
+				if (fs_isfd(&nd->fs, fd))
+					die(3, "node %d polls modelled file fd %d, which is not modelled", nd->id, fd);
 				/* a closed owned fd is ready at once with POLLNVAL, as on Linux */
 				pfs[i].revents = local_ready(nd, fd, pfs[i].events);
 				if (pfs[i].revents) ready++;
@@ -3670,7 +4168,21 @@ run_held(Node *nd, Thread *th)
 	memset(g_ans, 0, g_sz.seccomp_notif_resp); g_ans->id = th->block_id;
 	g_ans->val = th->held_val; g_ans->error = th->held_err; g_ans->flags = th->held_flags;
 	ioctl(nd->listener, SECCOMP_IOCTL_NOTIF_SEND, g_ans);
-	th->block_kind = 0; th->held_len = 0;
+	th->block_kind = 0; th->held_len = 0; nd->undo_kind = 0;
+}
+
+/* A_FAIL: the held write, truncation or fsync of a modelled file fails
+ * instead, with EIO (arg 0) or ENOSPC (arg 1), and the node runs on.  Its
+ * change is undone; a failed fsync also forgets the file's unsynced
+ * operations, so what it did not write is lost at a crash, as on Linux
+ * after a writeback error. */
+static void
+fail_held(Node *nd, Thread *th, int arg)
+{
+	fs_undo(&nd->fs, &nd->undo, nd->undo_kind == 's');
+	if (arg == 0) bud.eio--; else bud.enospc--;
+	th->held_val = 0; th->held_err = arg == 0 ? -EIO : -ENOSPC;
+	run_held(nd, th);
 }
 
 /* A_RUN of a thread held in a ptrace stop by a clone (a newborn, or its
@@ -4275,6 +4787,9 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 	return n;
 }
 
+/* one node's file system encoding, before it goes into the world */
+static unsigned char fs_buf[65536];
+
 static void
 world_fp(uint64_t fp[2])
 {
@@ -4295,6 +4810,20 @@ world_fp(uint64_t fp[2])
 		PUT(nd->durable_len);
 		for (int k = 0; k < nd->durable_len; k++) PUT(nd->durable[k]);
 		PUT(nd->durable_read_off);
+		/* its modelled files, which a crash keeps (in part), and what a
+		 * failure of the call it is held at would undo */
+		PUT(nd->undo_kind);
+		if (nd->undo_kind)
+		{
+			PUT(nd->undo.ino); PUT(nd->undo.fdslot); PUT8(nd->undo.off);
+			int r = fs_encode_ino(&nd->undo.copy, fp128, fs_buf, (int) sizeof fs_buf);
+			uint64_t h[2]; fp128(fs_buf, (size_t) r, h); PUT8(h[0]); PUT8(h[1]);
+		}
+		{
+			int r = fs_encode(&nd->fs, fp128, fs_buf, (int) sizeof fs_buf);
+			if (r < 0) die(1, "file system encoding overflow on node %d", i);	/* GCOVR_EXCL_LINE: bounded by the FS_ limits */
+			for (int k = 0; k < r; k++) PUT(fs_buf[k]);
+		}
 		if (!nd->alive) { PUT(0); continue; }
 		static unsigned char tb[1 + MAXTHREAD * (2 + THREC_MAX)];
 		int tl = encode_threads(nd, tb, (int) sizeof tb);
@@ -4382,6 +4911,7 @@ world_fp(uint64_t fp[2])
 	PUT(bud.partitions);
 	for (int i = 0; i < M.nodes; i++) for (int j = 0; j < M.nodes; j++) PUT(g_cut[i][j]);
 	for (int i = 0; i < M.nodes; i++) PUT8(g_clk[i]);
+	PUT(bud.eio); PUT(bud.enospc);
 #undef PUT8
 #undef PUT
 	g_world_len = n;
@@ -4397,12 +4927,14 @@ reset_world(void)
 	bud.restarts = M.restarts; bud.short_writes = M.short_writes; bud.partitions = M.partitions;
 	memset(g_cut, 0, sizeof g_cut);
 	for (int i = 0; i < MAXNODES; i++) g_clk[i] = CLK_BASE;
+	bud.eio = M.eio; bud.enospc = M.enospc;
+	for (int i = 0; i < M.nodes; i++) { fs_init(&N[i].fs); N[i].undo_kind = 0; }
 }
 
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL, A_EXPIRE };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL, A_EXPIRE, A_FAIL };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -4521,6 +5053,17 @@ enum_expire(Act *out, int *c)
 	}
 }
 
+/* A CRASH of node d, once for each way its modelled files can be left
+ * (fs_crash_choices()): the action's arg picks one. */
+static void
+add_crashes(Act *out, int *c, int d)
+{
+	long n = fs_crash_choices(&N[d].fs);
+	if (n == FS_LIMIT)
+		die(3, "node %d: a crash could leave its modelled files in more than %d ways; sync them more often", d, FS_MAXCRASH);
+	for (long k = 0; k < n; k++) add_act(out, c, A_CRASH, d, -1, -1, (int) k);
+}
+
 static int
 enum_actions(Act *out)
 {
@@ -4538,7 +5081,13 @@ enum_actions(Act *out)
 		{
 			for (int ti = 0; ti < N[d].nth; ti++)
 				if (N[d].th[ti].inuse && N[d].th[ti].block_kind == BK_DONE) ADD(A_RUN, d, -1, ti);
-			if (bud.crashes > 0) ADD(A_CRASH, d, -1, -1);
+			if (bud.crashes > 0) add_crashes(out, &c, d);
+			for (int ti = 0; ti < N[d].nth; ti++)
+				if (N[d].th[ti].inuse && N[d].th[ti].block_kind == BK_DONE && N[d].undo_kind)
+				{
+					if (bud.eio > 0) ADD2(A_FAIL, d, -1, ti, 0);
+					if (bud.enospc > 0 && N[d].undo_kind == 'w') ADD2(A_FAIL, d, -1, ti, 1);
+				}
 			return c;
 		}
 	}
@@ -4631,7 +5180,7 @@ enum_actions(Act *out)
 	enum_expire(out, &c);
 	if (bud.crashes > 0)
 		for (int d = 0; d < M.nodes; d++)
-			if (N[d].alive) ADD(A_CRASH, d, -1, -1);
+			if (N[d].alive) add_crashes(out, &c, d);
 	if (bud.drops > 0)
 		for (int ci = 0; ci < MAXCONNS; ci++)
 		{
@@ -4930,7 +5479,8 @@ apply(const Act *a)
 			run_connwait(nd, th);
 			g_short = -1;
 			break;
-		case A_CRASH: bud.crashes--; crash_node(nd); break;
+		case A_CRASH: bud.crashes--; crash_node(nd); fs_crash(&nd->fs, a->arg); nd->undo_kind = 0; break;
+		case A_FAIL: fail_held(nd, th, a->arg); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
 		case A_RESTART:
 			bud.restarts--;
@@ -5068,8 +5618,10 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal", "expire"};
-	if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal", "expire", "fail"};
+	if (a->kind == A_CRASH && a->arg > 0) snprintf(b, n, "crash n%d (files kept: way %d)", a->node, a->arg);
+	else if (a->kind == A_CRASH) snprintf(b, n, "crash n%d", a->node);
+	else if (a->kind == A_FAIL) snprintf(b, n, "fail n%d t%d (%s)", a->node, a->thr, a->arg ? "ENOSPC" : "EIO");
 	else if (a->kind == A_STEP) snprintf(b, n, "step n%d", a->node);
 	else if (a->kind == A_RUN) snprintf(b, n, "run n%d t%d", a->node, a->thr);
 	else if (a->kind == A_CUT || a->kind == A_HEAL) snprintf(b, n, "%s n%d->n%d", k[a->kind], a->node, a->peer);

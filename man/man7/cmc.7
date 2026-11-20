@@ -174,9 +174,10 @@ file share its offset.
 Writes to stdout and stderr are allowed, as is the C library's query
 of whether one of them is a terminal.
 .Pp
-The file system is read-only to a node: durable state goes through
-descriptor 193, which the world holds and a crash keeps, and a file a
-node wrote would outlive a crash and every replay outside the world.
+Outside a directory the model names (below), the file system is
+read-only to a node: durable state goes through descriptor 193, which
+the world holds and a crash keeps, and a file a node wrote would
+outlive a crash and every replay outside the world.
 .Fn open ,
 .Fn openat ,
 .Fn openat2
@@ -220,6 +221,42 @@ on any file,
 and
 .Fn io_uring_setup ,
 whose operations would bypass the checker.
+.Pp
+A model file's
+.Li [files]
+section names a directory whose files the checker models, as it owns
+sockets (see the model file reference).
+Under that directory each node has its own files, held in the world.
+Each file keeps its contents now, its contents on disk as of its last
+.Fn fsync
+or
+.Fn fdatasync ,
+and the changes made since, in order.
+A directory keeps its entries in the same way, so a create, an unlink
+or a rename reaches the disk only through an
+.Fn fsync
+of the directory.
+Every change and every
+.Fn fsync
+is a point where a crash can fall.
+A crash keeps each file's and each directory's disk contents plus a
+prefix of its changes, and the search tries every prefix.
+With an
+.Li eio
+or
+.Li enospc
+budget a write or truncation may fail instead and be undone, and with
+.Li eio
+an
+.Fn fsync
+may fail too, which forgets the unsynced changes, as Linux does after
+a writeback error.
+A call the model does not have on a path or descriptor there ends the
+check (exit 3): among others
+.Dv O_DIRECT ,
+.Fn mmap ,
+links, xattrs, a rename between directories, and a node with more
+than one thread.
 .Pp
 A node is one process running one program, and its channels to other
 processes end the check (exit 3): a second
@@ -513,13 +550,24 @@ A crash can fall between any two calls that reach outside the process,
 not only where a node waits.
 While crash budget is left, a single-threaded node stops right after
 each write or send on a checker-owned descriptor, each close of one, and
-each durable write to descriptor 193; the search may then crash it there
+each durable write to descriptor 193, and each change or
+.Fn fsync
+of a modelled file; the search may then crash it there
 or run it on
 .Pq Sy RUN .
+A crash with modelled files is one action for each way the files can be
+left.
 No invariant is checked at such a point, since a program may report its
 state only after its effects; the crash that follows is checked.
 A write to the volatile state hook is not such a point, since a crash
 discards it.
+.It FAIL
+.Li eio
+or
+.Li enospc
+budget is left: a write, truncation or
+.Fn fsync
+of a modelled file the node is stopped at fails instead.
 .It DROP
 Drop budget is left: a connection carrying bytes is reset.
 Its queues are discarded and each end's next call fails with
