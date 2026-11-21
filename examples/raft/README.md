@@ -81,13 +81,13 @@ cmc --model-file examples/raft/raft.model --binary ./raft --crashes 1
 
 ```
 Model checking completed. No error has been found.
-44205 states generated, 15391 distinct states found, 0 states left on queue.
+500016 states generated, 204859 distinct states found, 0 states left on queue.
 ```
 
-(about three minutes on one core of an EC2 host, single-threaded; each
-state is a fresh run of all three processes; measured before a
-mid-step dial became a point where any running node may act first,
-which multiplies the count, so expect several times as many now).
+(about 80 minutes on one core of a shared host, single-threaded; each
+state is a fresh run of all three processes.  The crash adds points
+inside a step where the search may crash a node or let another act
+first, which is most of the growth.)
 
 ## The planted bug
 
