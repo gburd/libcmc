@@ -939,6 +939,7 @@ typedef struct {
 	int shut_wr[2], shut_rd[2];	/* shutdown() of this end's sending, receiving side */
 	int full[2];				/* this end's send buffer is full (a SHORT write): writes EAGAIN, no POLLOUT */
 	unsigned long long syn_dl;	/* a non-blocking dial's SYN deadline, on the dialler's clock (fire_syn()) */
+	int rstq[2];				/* an RST is on its way to this end, behind bytes queued toward it (A_RST) */
 } Conn;
 static Conn conns[MAXCONNS];
 
@@ -2303,6 +2304,18 @@ rst_notify(int conn, int e)
 	}
 }
 
+/* The RST toward end e of connection conn arrives: the connection is
+ * reset, end e has the reset's errno to report once its queued bytes
+ * are read, and a thread waiting on it is told. */
+static void
+rst_arrive(int conn, int e)
+{
+	Conn *cn = &conns[conn];
+	cn->rstq[e] = 0;
+	cn->reset = 1; cn->err[e] = reset_errno(conn, e);
+	rst_notify(conn, e);
+}
+
 /* Close end e of connection conn.  dead says the end's host crashed:
  * nothing is sent, so the peer learns nothing until it writes (the
  * search's EOF action models a peer that notices).  A live close sends a
@@ -2323,8 +2336,10 @@ end_close(int conn, int e, int dead)
 		{
 			conn_discard_to(conn, e);
 			rst_path(cn->node[e], cn->node[1 - e]);
-			cn->reset = 1; cn->err[1 - e] = reset_errno(conn, 1 - e);
-			rst_notify(conn, 1 - e);
+			/* bytes this end sent are still queued toward the other: the
+			 * RST follows them, and arrives when the search says (A_RST) */
+			if (cn->node[1 - e] >= 0 && conn_head(conn, 1 - e) >= 0) cn->rstq[1 - e] = 1;
+			else rst_arrive(conn, 1 - e);
 		}
 		else if (!cn->shut_wr[e]) bag_add(conn, 1 - e, NULL, 0, 1);
 	}
@@ -2613,7 +2628,7 @@ may_change(int c, int e)
 	if (c < 0) return 0;
 	const Conn *cn = &conns[c];
 	if (cn->reset || cn->refused || cn->connecting) return 0;
-	if (conn_head(c, e) >= 0) return 1;
+	if (conn_head(c, e) >= 0 || cn->rstq[e]) return 1;
 	if (bud.drops > 0 && (conn_has_data(c, 0) || conn_has_data(c, 1))) return 1;
 	int p = cn->node[1 - e];
 	return p >= 0 && N[p].alive && !cn->closed[1 - e];
@@ -2722,6 +2737,7 @@ rst_may_come(Node *nd, int fd)
 	int c = nd->cconn[cs], e = nd->cend[cs], p = nd->cpeer[cs];
 	const Conn *cn = &conns[c];
 	if (cn->reset || cn->refused || cn->connecting || cn->err[e]) return 0;
+	if (cn->rstq[e]) return 1;
 	if (bud.drops > 0 && (conn_has_data(c, 0) || conn_has_data(c, 1))) return 1;
 	if (p < 0) return 0;
 	if (N[p].alive) return !cn->closed[1 - e] && conn_has_data(c, 1 - e);
@@ -5104,7 +5120,7 @@ put_conn_end(unsigned char *w, size_t n, size_t cap, int c, int e)
 	const Conn *cn = &conns[c];
 	PUTC(cn->closed[1 - e] | (cn->gone[1 - e] << 1) | (cn->reset << 2) | (cn->eof[e] << 3) | (cn->accepted << 4) | (cn->refused << 5) |
 		 (cn->connecting << 6) | (cn->nbdial << 7));
-	PUTC(cn->full[e] | (cn->full[1 - e] << 1));
+	PUTC(cn->full[e] | (cn->full[1 - e] << 1) | ((cn->rstq[e] && !cn->reset) << 2) | ((cn->rstq[1 - e] && !cn->reset) << 3));
 	PUTC(cn->err[e] == ECONNRESET ? 1 : cn->err[e] == EPIPE ? 2 : cn->err[e] == ECONNREFUSED ? 3 :
 		 cn->err[e] == ETIMEDOUT ? 4 : 0);
 	PUTC(cn->shut_wr[e] | (cn->shut_rd[e] << 1) | (cn->shut_wr[1 - e] << 2) | (cn->shut_rd[1 - e] << 3));
@@ -5275,7 +5291,7 @@ reset_world(void)
 /* One step the search can take at a quiescent point.  The list is
  * rebuilt in the same order on every replay, so an index names an
  * action; the shortcut keeps action lists small enough to replay. */
-enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL, A_EXPIRE, A_FAIL };
+enum { A_ACCEPT, A_DELIVER, A_EOF, A_TIMEOUT, A_CRASH, A_DROP, A_WAKE, A_RESTART, A_RUN, A_STEP, A_CONNECT, A_SHORT, A_CUT, A_HEAL, A_EXPIRE, A_FAIL, A_RST };
 /* an enabled action; arg is the polled index of a channel WAKE, the
  * connection of a DROP, and -1 otherwise */
 typedef struct { int kind, node, peer, thr, arg; } Act;
@@ -5661,6 +5677,12 @@ enum_actions(Act *out)
 			if (!cn->used || cn->reset || cn->node[0] < 0) continue;
 			if (conn_has_data(ci, 0) || conn_has_data(ci, 1)) ADD2(A_DROP, cn->node[1], cn->node[0], -1, ci);
 		}
+	/* an RST behind bytes a closed end sent (end_close()) arrives at the
+	 * other end, before or after the reader has taken those bytes */
+	for (int ci = 0; ci < MAXCONNS; ci++)
+		for (int e = 0; conns[ci].used && e < 2; e++)
+			if (conns[ci].rstq[e] && !conns[ci].reset && !conns[ci].closed[e] && CONN_UP(ci, e))
+				ADD2(A_RST, conns[ci].node[e], conns[ci].node[1 - e], -1, ci * 2 + e);
 	/* the network cuts a directed link between two nodes (budgeted),
 	 * or heals one it cut, and the segments held on it may move again */
 	for (int x = 0; x < M.nodes; x++)
@@ -6026,6 +6048,7 @@ apply(const Act *a)
 		}
 		case A_FAIL: fail_held(nd, th, a->arg); break;
 		case A_DROP: bud.drops--; reset_conn(a->arg); break;
+		case A_RST: rst_arrive(a->arg / 2, a->arg % 2); break;
 		case A_RESTART:
 			bud.restarts--;
 			break_peer_links(a->node);	/* the old process's connections are gone */
@@ -6157,7 +6180,7 @@ unmet_eventually(void)
 static const char *
 act_name(const Act *a, char *b, size_t n)
 {
-	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal", "expire", "fail"};
+	static const char *k[] = {"accept", "deliver", "eof", "timeout", "crash", "drop", "wake", "restart", "run", "step", "connect", "short", "cut", "heal", "expire", "fail", "rst"};
 	if (a->kind == A_CRASH && a->arg > 0)
 	{
 		long nf = fs_crash_choices(&N[a->node].fs), f = a->arg % nf, q = a->arg / nf;

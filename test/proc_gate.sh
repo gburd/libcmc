@@ -1091,6 +1091,12 @@ for m in redial:2 dialbk:2 relay:3; do
 	done
 done
 
+# an RST that follows bytes node 1 sent arrives after them: a poll may
+# report POLLIN alone first (it reported the RST with the first POLLIN)
+for v in 1 25; do
+	ms rstdata "the RST arrives after the bytes before it ($v)" 1 "not$v is violated" \
+		"[invariants]\\nnot$v = \"node[0][0] != $v\""
+done
 # inkernel.c: bytes node 1 has started to read, or a poll has reported,
 # are in its kernel: node 0's crash cannot lose them (partial: a crash
 # made node 1's second read EOF; pollwake: a crash after the wake had a

@@ -708,6 +708,10 @@ and
 as Linux reports them.
 .It HEAL(a, b)
 The link from a to b is cut: it heals, and what waited may move.
+.It RST
+A node closed a connection with bytes it had not read, and bytes it
+sent are still queued toward the peer: its RST arrives there, behind
+those bytes.
 .It RESTART
 Restart budget is left and a node has crashed: it is relaunched as a
 fresh process.
@@ -1059,6 +1063,12 @@ A read gets at most one write.
 Each TCP connection has its own queue in each direction.
 .Fn close
 sends the peer a FIN, or an RST if bytes were left unread.
+An RST sent behind bytes still on their way to the peer arrives after
+them, when the search says
+.Pq Ql rst n1->n0 ,
+so the peer may first see the bytes alone
+.Pq Dv POLLIN
+and only later the reset.
 After an RST the bytes already sent toward an end are still read, in
 order; then the reset is reported once, as
 .Er ECONNRESET ,

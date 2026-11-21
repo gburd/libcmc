@@ -15,6 +15,10 @@
  *   nbaccept  a non-blocking accept on node 0's own listener: 1 if node
  *             1's dial is there (node 1 dials back once it has read),
  *             else 2; both are reachable
+ *   rstdata   node 1 sends "b" before its close: poll(POLLIN) reports
+ *             POLLIN alone (1) while "b" is there and the RST is still
+ *             on its way, or POLLIN|POLLERR|POLLHUP (25) once it is in
+ *             (natively, SPIN makes node 1 wait before its close)
  * Node 0 reports the value as node[0][0] and then waits.  Natively, SPIN
  * in the environment makes node 0 spin after its write, standing for
  * its being descheduled, so node 1 acts first.
@@ -97,6 +101,12 @@ peer(const char *mode)
 		(void) !read(d, &b, 1);
 		exit(0);
 	}
+	if (!strcmp(mode, "rstdata"))
+	{
+		(void) !write(x, "b", 1);
+		if (getenv("SPIN"))
+			usleep(300000);
+	}
 	close(x);
 	while ((x = accept(ls, NULL, NULL)) >= 0)
 		close(x);
@@ -135,7 +145,7 @@ main(int argc, char **argv)
 	int			ok = write(s, "0a", 2) == 2;
 
 	spin();
-	if (!strcmp(mode, "rstwake"))
+	if (!strcmp(mode, "rstwake") || !strcmp(mode, "rstdata"))
 	{
 		struct pollfd p = {s, POLLIN, 0};
 

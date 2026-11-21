@@ -5,6 +5,17 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+An RST sent by a `close` behind bytes still on their way to the peer
+arrives after them, as a search action (`rst n1->n0`), not at once.
+Linux delivers the bytes first, and a reader can see `POLLIN` alone
+before the reset comes in (measured: with a pause before the close,
+`epoll_wait` gives `EPOLLIN`, then the read 1 byte, then
+`ECONNRESET`).  Since a59d6d9 reported the reset's `POLLERR` and
+`POLLHUP` with the first `POLLIN`, that state was unreachable, so a
+loop that handles `POLLIN` and only later meets the error was not
+checked on that path.  No example's state count changes.  Gate:
+proc_gate midstep rstdata.
+
 A blocking `connect` after a call with an effect earlier in the step
 stops while the dialled node is running or its host may restart, and
 a non-blocking `accept` with nothing waiting stops while any other
