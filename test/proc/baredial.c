@@ -8,6 +8,8 @@
  *   dialbk  node 0 dials node 1 (no bytes), then a non-blocking accept
  *           on its own listener: node 1 accepts and dials back (1), or
  *           not yet (2)
+ *   pollbk  as dialbk, but a zero-timeout poll(POLLIN) of the listener
+ *           instead of the accept
  *   relay   three nodes: node 0 writes "q" to node 2, then dials node
  *           1; node 2 tells node 1, which exits, so the dial is refused
  *           (1) or not (2)
@@ -21,6 +23,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,7 +99,7 @@ peer(int id, const char *mode)
 	}
 	else if (!strcmp(mode, "relay"))
 		(void) !read(x, &b, 1);
-	else if (!strcmp(mode, "dialbk"))
+	else if (!strcmp(mode, "dialbk") || !strcmp(mode, "pollbk"))
 		(void) !read(dial(20000), &b, 1);
 	exit(0);
 }
@@ -112,7 +115,7 @@ main(int argc, char **argv)
 	emit(0);
 	if (id != 0)
 		peer(id, mode);
-	if (!strcmp(mode, "dialbk"))
+	if (!strcmp(mode, "dialbk") || !strcmp(mode, "pollbk"))
 		ls = lsn(20000);
 	if (!strcmp(mode, "relay"))
 	{
@@ -129,6 +132,13 @@ main(int argc, char **argv)
 	{
 		fcntl(ls, F_SETFL, O_NONBLOCK);
 		emit(accept(ls, NULL, NULL) >= 0 ? 1 : 2);
+	}
+	else if (!strcmp(mode, "pollbk"))
+	{
+		struct pollfd p = {ls, POLLIN, 0};
+
+		poll(&p, 1, 0);
+		emit(p.revents & POLLIN ? 1 : 2);
 	}
 	else
 		emit(dial(20001) < 0 ? 1 : 2);

@@ -5,6 +5,15 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A zero-timeout `poll` or `epoll_wait` of the listener mid-step stops,
+as a non-blocking `accept` does, while any other node can still act:
+a dial may come first.  It answered at once, so a loop that polls its
+listener right after dialling a peer never saw the peer's dial back.
+raft goes from 10309 to 10320 distinct states and hc at depth 12 from
+12570 to 12715, at depth 15 from 46184 to 49539.  The planted hc
+bug's seed 1 now finds it at walk 583.  Gate: proc_gate baredial
+pollbk.
+
 A blocking `connect` from a node with more than one thread to a
 crashed host, or across a cut link, waits and times out as from a
 single-threaded node.  95459af had extended a refusal (exit 3) from

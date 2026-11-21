@@ -103,8 +103,8 @@ has many more interleavings to try.  Bounded runs, measured on a
 
 | `--depth` | distinct states | time |
 |---|---|---|
-| 12 | 12,570 | 112 s |
-| 15 | 46,184 | 429 s |
+| 12 | 12,715 | 108 s |
+| 15 | 49,539 | 458 s |
 
 Each is INCOMPLETE with no violation found.  Before 2.2 the full search
 finished: 36,331 distinct states at depth 89, in about 13 minutes.
@@ -145,14 +145,14 @@ cmc --model-file examples/hc/hc.model --binary ./hc-bug \
 ```
 
 ```
-Walk 2164 (seed 1):
+Walk 583 (seed 1):
 Error: Invariant agreement is violated.
 ```
 
-The violation needs a long schedule (115 actions, twelve of them
+The violation needs a long schedule (119 actions, twelve of them
 timeouts), so simulation reaches it where the exhaustive search does
-not; a fixed seed makes it reproducible, in about 20 seconds.  Seeds
-1, 2 and 3 each find it within 30,000 walks.
+not; a fixed seed makes it reproducible, in about 5 seconds.  Seeds 1
+and 2 each find it within 30,000 walks.
 
 ## What this shows
 

@@ -206,7 +206,7 @@ expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(
 # checks a shorter run is INCOMPLETE rather than a pass.
 expect "hc: a bounded run is not a pass" 2 "INCOMPLETE" $(runx "$HERE/examples/hc/hc.model" hc) --depth 12
 if [ "${CMC_SLOW:-0}" = 1 ]; then
-	expect_by 2400 "hc: agreement holds to depth 15" 2 "46184 distinct states" $(runx "$HERE/examples/hc/hc.model" hc) --depth 15
+	expect_by 2400 "hc: agreement holds to depth 15" 2 "49539 distinct states" $(runx "$HERE/examples/hc/hc.model" hc) --depth 15
 	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 1 --walks 30000 --depth 600
 fi
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
@@ -1079,10 +1079,11 @@ done
 
 # baredial.c: a dialled node acts on a bare connect (accepts and exits,
 # or dials back), and a third node relays a message to the one node 0
-# dials next; node 0's second connect or non-blocking accept may find
-# either outcome (each reached only the one with no reaction)
+# dials next; node 0's second connect, non-blocking accept or listener
+# poll may find either outcome (each reached only the one with no
+# reaction)
 $CC -O1 -no-pie -w -o "$B/proc/baredial" "$T/baredial.c" || { echo "proc_gate: baredial.c does not build"; fail=1; }
-for m in redial:2 dialbk:2 relay:3; do
+for m in redial:2 dialbk:2 pollbk:2 relay:3; do
 	for v in 1 2; do
 		printf '[target]\nbinary = %s\nnodes = %s\nargs = %s\n[invariants]\nnot%s = "node[0][0] != %s"\n' \
 			"$B/proc/baredial" "${m#*:}" "${m%:*}" $v $v > "$OUT/bd-${m%:*}-$v.model"

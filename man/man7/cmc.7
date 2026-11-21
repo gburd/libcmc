@@ -97,9 +97,13 @@ restart: it may accept, exit, crash or be cut off first, in reaction
 to anything, a bare dial with no bytes or a message relayed through a
 third node included.
 So does a non-blocking
-.Fn accept
-with nothing waiting while any other node can still act, which may
-dial first.
+.Fn accept ,
+or a
+.Fn poll
+or
+.Fn epoll_wait
+that returns at once over the listener, with nothing waiting while
+any other node can still act, which may dial first.
 No invariant is checked at such a point, and it is never merged.
 Elsewhere other nodes do not act inside a step: what the node computes
 between two calls touches only its own memory, so it commutes with

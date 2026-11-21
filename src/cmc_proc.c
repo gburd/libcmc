@@ -2666,17 +2666,24 @@ may_change(int c, int e)
 }
 
 /* Is the answer to a call of node nd on fd one another node's action
- * could change, with the node mid-step?  Queued bytes could arrive
+ * could change, with the node mid-step?  A listener may get a dial;
+ * on a connection, queued bytes could arrive
  * first whenever; anything else only if the node made a call with an
  * effect on a connection earlier in this step (step_effect): before
  * that call, every action of the others was already ordered before the
  * node's own (the search tried it where the node last waited), since
  * the computation in between is the node's alone and commutes with
  * theirs. */
+static int may_act(int p);
 static int
 fd_may_change(Node *nd, int fd)
 {
 	int cs = fd >= 500 ? cfd_slot(nd, fd) : -1;
+	/* a listener with nothing waiting: a dial may come first from any
+	 * other node that can still act, as for a non-blocking accept */
+	if (fd >= 500 && fd == nd->listener_fd && !nd->npend && nd->step_effect)
+		for (int p = 0; p < M.nodes; p++)
+			if (p != nd->id && may_act(p)) return 1;
 	if (cs < 0 || nd->cconn[cs] < 0) return 0;
 	int c = nd->cconn[cs], e = nd->cend[cs];
 	if (conns[c].reset || conns[c].refused || conns[c].connecting) return 0;
@@ -5620,22 +5627,24 @@ enum_actions(Act *out)
 					int fd = th->pollfds[k];
 					if (fd < 0) continue;	/* a negative fd is ignored by poll(2) */
 					int cs = cfd_slot(nd, fd), es = efd_slot(nd, fd);
+					/* readability wakes only a poll that asked for it */
+					int in = (th->pollevents[k] & POLLIN) != 0;
 					if (cs >= 0)
 					{
 						int peer = nd->cpeer[cs], ci = nd->cconn[cs], e = nd->cend[cs];
 						saw_chan = 1;
 						/* readable: a queued byte or FIN, a pending reset, or
 						 * a peer whose node is gone (the EOF a peer notices) */
-						if ((conn_head(ci, e) >= 0 && CONN_UP(ci, e)) ||
+						if ((in && conn_head(ci, e) >= 0 && CONN_UP(ci, e)) ||
 							(ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
 							peer_lost(ci, e))
 							ADD2(A_WAKE, d, peer, ti, k);
 					}
 					else if (es >= 0)
 					{
-						if (nd->efdval[es] > 0) ADD(A_WAKE, d, POLL_LISTENER - 1 - es, ti);
+						if (in && nd->efdval[es] > 0) ADD(A_WAKE, d, POLL_LISTENER - 1 - es, ti);
 					}
-					else if (fd == nd->listener_fd)
+					else if (fd == nd->listener_fd && in)
 					{
 						int up = 0;
 						for (int q = 0; q < nd->npend; q++)
