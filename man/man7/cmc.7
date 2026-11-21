@@ -1119,7 +1119,9 @@ until it is dialled again.
 One to a node that crashed (its host is down, so nothing answers the
 SYN) waits, as across a cut link, until a RESTART lets RUN complete it
 or its 127-second deadline fails it with
-.Er ETIMEDOUT ;
+.Er ETIMEDOUT ,
+in a node with more than one thread as well (its other threads run
+meanwhile);
 a non-blocking one times out the same way; one to a live node that has not yet called
 .Fn listen
 waits rather than failing.

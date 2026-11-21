@@ -5,6 +5,16 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A blocking `connect` from a node with more than one thread to a
+crashed host, or across a cut link, waits and times out as from a
+single-threaded node.  95459af had extended a refusal (exit 3) from
+cut links to crashed hosts, so with `crashes = 1` any threaded client
+that might dial a crashed server could not be checked at all; it had
+run (to INCOMPLETE, without the race runtime) before.  The wait uses
+the same timed park as a futex wait, so the node's other threads run
+meanwhile.  No example's state count changes.  Gate: proc_gate mtdial
+timeout and norefuse.
+
 A DROP, and a peer's restart, no longer discard bytes the reader has
 started to read or that a `poll` or `epoll_wait` has reported to it.
 Those bytes are in the reader's kernel, and Linux reads them before

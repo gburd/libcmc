@@ -1201,6 +1201,18 @@ drift = 100" 'notimeout = "node[1][0] != 1"'
 sd exit exit "a host whose process exited refuses at once" 0 "No error has been found" \
 	"timeouts = 0" 'linux = "node[1][0] == 0 or node[1][0] == 3"
 reached = "eventually node[1][0] == 3"'
+# mtdial.c: the same dial from a node with a second thread times out
+# too, never refused (it ended the check, exit 3); with no race runtime
+# the run is INCOMPLETE, as for any such node
+$CC -O1 -no-pie -w -o "$B/proc/mtdial" "$T/mtdial.c" -lpthread || { echo "proc_gate: mtdial.c does not build"; fail=1; }
+mtd() {	# mtd NAME EXIT NEEDLE INVARIANT
+	printf '[target]\nbinary = %s\nnodes = 2\n[environment]\ncrashes = 1\n[invariants]\n%s\n' \
+		"$B/proc/mtdial" "$4" > "$OUT/mtd-$1.model"
+	expect_by 120 "mtdial $1: a dial to a crashed host from a threaded node" "$2" "$3" --model-file "$OUT/mtd-$1.model"
+}
+mtd timeout 1 "notimeout is violated" 'notimeout = "node[1][0] != 1"'
+mtd norefuse 2 "INCOMPLETE" 'norefuse = "node[1][0] != 3 and node[1][0] != 4"'
+
 # synmid.c: no time passes between two calls of one step, so no
 # deadline fires while a node is held there, its own dial's (own) or
 # another node's (other): ETIMEDOUT and 127 s (or 50 s) between two

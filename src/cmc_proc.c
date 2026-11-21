@@ -3578,12 +3578,11 @@ serve(Node *nd, Thread *th)
 			 * kernel answers with an RST), the SYN or its answer is lost,
 			 * and Linux retransmits: the connect waits (BK_SYNWAIT) until
 			 * the link heals or the host restarts, when the search may RUN
-			 * it again, or until it times out (EXPIRE, ETIMEDOUT).  A node
-			 * with more than one thread is not offered the wait. */
+			 * it again, or until it times out (EXPIRE, ETIMEDOUT).  In a
+			 * node with more than one thread the others run meanwhile, as
+			 * beside a timed futex wait. */
 			if (!link_up(nd->id, peer) || !link_up(peer, nd->id) || N[peer].crashed)
 			{
-				if (node_multi(nd))
-					die(3, "node %d dials node %d across a cut link or to a crashed host; a blocking connect that waits in a node with more than one thread is not modelled", nd->id, peer);
 				th->block_kind = BK_SYNWAIT; th->block_id = g_req->id; th->block_peer = peer;
 				set_deadline(nd, th, 1, SYN_TIMEOUT);
 				return 1;
