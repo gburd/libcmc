@@ -29,7 +29,8 @@
  *   revents  what poll and epoll_wait report on a connection that is
  *          open, reset by its peer (before and after the error is read),
  *          past the peer's FIN, past a write the peer's stack answered
- *          with an RST, and shut one way or both.
+ *          with an RST, and shut one way or both (with the peer's FIN
+ *          read, and arrived but not yet read).
  *
  * Canonical state fd 3: [phase][codes...], phase 1 once done.
  *
@@ -383,6 +384,22 @@ revs(int c, int s, int ls)
 	x = shutdown(c, SHUT_WR);
 	close(s);
 	code(x + (int) read(c, b, sizeof b));	/* 0 */
+	rev(c, POLLIN | POLLOUT);
+	close(c);
+	/* shut one way with the peer's FIN arrived but not read: POLLHUP
+	 * already, as both directions are shut (the wait lets the FIN in) */
+	s = pair(ls, &c);
+	x = shutdown(c, SHUT_WR);
+	close(s);
+	{
+		struct pollfd w = {c, POLLIN, 0};
+
+		code(x + poll(&w, 1, -1));		/* 1 */
+		raw(w.revents);
+	}
+	rev(c, POLLIN | POLLOUT);
+	rev(c, 0);
+	code(read(c, b, sizeof b));		/* 0 */
 	rev(c, POLLIN | POLLOUT);
 	close(c);
 }

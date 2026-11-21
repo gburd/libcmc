@@ -5,6 +5,15 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+`poll` reports `POLLHUP` once a connection's own `SHUT_WR` is done
+and the peer's FIN has arrived, before the FIN is read, as Linux does
+(`tcp_poll()` sets receive shutdown when the FIN arrives).  cmc
+reported it only after the read, so a client that half-closes and
+waits for `POLLHUP` was checked on a path Linux skips (measured: 17,
+then `POLLIN|POLLOUT|POLLHUP`, then read 0, where cmc gave 1 and 5).
+No example's state count changes.  Gate: proc_gate sockapi revents
+(a native record, now with this case).
+
 An RST sent by a `close` behind bytes still on their way to the peer
 arrives after them, as a search action (`rst n1->n0`), not at once.
 Linux delivers the bytes first, and a reader can see `POLLIN` alone

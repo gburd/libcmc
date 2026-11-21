@@ -1024,6 +1024,7 @@ local_port(const Node *nd, int fd)
  * by proc_gate's sockapi revents.  Whether a connection is readable
  * otherwise is the search's (WAKE), not this. */
 static int head_pinned(Node *nd, int fd);
+static int fin_arrived(int conn, int e);
 
 static short
 local_ready(Node *nd, int fd, short events)
@@ -1037,12 +1038,14 @@ local_ready(Node *nd, int fd, short events)
 		int e = nd->cend[cs];
 		if (cn->connecting) return 0;
 		if (cn->full[e] && !cn->reset && !cn->err[e]) events &= ~POLLOUT;
-		if (!cn->refused && (cn->reset || cn->shut_rd[e] || cn->eof[e]))
+		int fin = cn->eof[e] || fin_arrived(nd->cconn[cs], e);
+		if (!cn->refused && (cn->reset || cn->shut_rd[e] || fin))
 		{
 			/* Linux's tcp_poll(): a receive side shut (SHUT_RD, the FIN
-			 * read, or an RST) is readable, both sides shut or an RST is
-			 * POLLHUP, and the RST's error is POLLERR until read */
-			int hup = cn->reset || (cn->shut_wr[e] && (cn->shut_rd[e] || cn->eof[e]));
+			 * arrived, read or not, or an RST) is readable, both sides
+			 * shut or an RST is POLLHUP, and the RST's error is POLLERR
+			 * until read */
+			int hup = cn->reset || (cn->shut_wr[e] && (cn->shut_rd[e] || fin));
 			return (short) ((events & (POLLIN | POLLOUT)) | (hup ? POLLHUP : 0) | (cn->err[e] ? POLLERR : 0));
 		}
 		if (cn->refused)
@@ -1568,6 +1571,16 @@ head_pinned(Node *nd, int fd)
 	int cs = cfd_slot(nd, fd);
 	int h = cs >= 0 ? conn_head(nd->cconn[cs], nd->cend[cs]) : -1;
 	return h >= 0 && bag[h].pinned;
+}
+
+/* Has the FIN toward end e of connection conn arrived in that end's
+ * kernel, unread: is it queued there and pinned (a poll reported it)? */
+static int
+fin_arrived(int conn, int e)
+{
+	for (int h = conn_head(conn, e); h >= 0; h = conn_next(conn, e, bag[h].seq))
+		if (bag[h].eof) return bag[h].pinned;
+	return 0;
 }
 
 /* does connection conn hold unread bytes (not just a FIN) toward `to`? */

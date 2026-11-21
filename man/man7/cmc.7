@@ -132,7 +132,7 @@ and a non-zero
 answer at once, but a connection or listener is ready only when the
 search says so, exactly as a deferred read is.
 A connection whose receiving side is done reports what Linux reports:
-after the peer's FIN or a
+after the peer's FIN has arrived (read or not) or a
 .Dv SHUT_RD ,
 .Dv POLLIN ;
 after an RST,
@@ -144,7 +144,9 @@ with
 .Dv POLLERR
 until the error is read; with both sides shut,
 .Dv POLLHUP
-too.
+too, which a
+.Dv SHUT_WR
+of its own and the peer's FIN arrived (read or not) count as.
 .Fn epoll_wait
 is the same readiness query over an epoll instance's persistent interest
 list (built by
