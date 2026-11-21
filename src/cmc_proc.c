@@ -5471,7 +5471,7 @@ expire_ok(int d, unsigned long long D, int v)
  * moving alike, and, when the model allows drift, with one other node's
  * clock moving at the slowest or fastest rate it allows. */
 static void
-enum_expire(Act *out, int *c)
+enum_expire(Act *out, int *c, int frozen)
 {
 	for (int d = 0; d < M.nodes; d++)
 	{
@@ -5481,6 +5481,10 @@ enum_expire(Act *out, int *c)
 		/* a dial's deadline names its connection as the action's peer */
 		int pr = ci >= 0 ? ci : -1;
 		unsigned long long D = dl > g_clk[d] ? dl - g_clk[d] : 0;
+		/* while the clocks are frozen, only a deadline already due may
+		 * fire: it moves no clock, as when two nodes' timers fall due at
+		 * one instant and the second wakes while the first is mid-step */
+		if (frozen && D > 0) continue;
 		if (expire_ok(d, D, -1)) add_act(out, c, A_EXPIRE, d, pr, ti, -1);
 		if (M.drift == 0 || D == 0) continue;
 		for (int j = 0; j < M.nodes; j++)
@@ -5635,7 +5639,13 @@ enum_actions(Act *out)
 						saw_chan = 1;
 						/* readable: a queued byte or FIN, a pending reset, or
 						 * a peer whose node is gone (the EOF a peer notices) */
-						if ((in && conn_head(ci, e) >= 0 && CONN_UP(ci, e)) ||
+						/* a FIN at the head also wakes a poll that did not
+						 * ask for POLLIN, once this end has shut its own
+						 * side: its arrival is a POLLHUP, which poll always
+						 * reports */
+						int hd = ci >= 0 ? conn_head(ci, e) : -1;
+						int hupfin = hd >= 0 && bag[hd].eof && conns[ci].shut_wr[e];
+						if (((in || hupfin) && hd >= 0 && CONN_UP(ci, e)) ||
 							(ci >= 0 && (conns[ci].err[e] || conns[ci].reset || conns[ci].refused)) ||
 							peer_lost(ci, e))
 							ADD2(A_WAKE, d, peer, ti, k);
@@ -5701,7 +5711,7 @@ enum_actions(Act *out)
 			if (timed && bud.timeouts > 0) ADD(A_TIMEOUT, d, p, ti);
 		}
 	}
-	if (timed) enum_expire(out, &c);
+	enum_expire(out, &c, !timed);
 	if (bud.crashes > 0)
 		for (int d = 0; d < M.nodes; d++)
 			if (N[d].alive) add_crashes(out, &c, d);

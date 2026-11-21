@@ -1,0 +1,6 @@
+# A model file for test/proc/eqdeadline.c: both reads getting a byte is
+# reachable on Linux, so the invariant that says it is not must fail.
+[target]
+nodes = 2
+[invariants]
+not_both = "not (node[0][0] == 1 and node[1][0] == 1)"

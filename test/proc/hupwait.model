@@ -1,0 +1,6 @@
+# A model file for test/proc/hupwait.c: node 0's poll for no events
+# must be able to end with POLLHUP (16), as on Linux.
+[target]
+nodes = 2
+[invariants]
+hup_reached = "eventually node[0][0] == 16 and node[0][1] == 21 and node[0][2] == 100 and node[0][3] == 21"

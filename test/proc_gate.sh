@@ -64,6 +64,8 @@ for f in fault kernelfd durack threadpos memrace syncpoint sendmsg files syscorn
 	$CC -O1 -no-pie -w -o "$B/proc/$f" "$T/$f.c" -lpthread || { echo "proc_gate: $f.c does not build"; fail=1; }
 done
 $CC -O1 -no-pie -w -DSINGLE -o "$B/proc/durack-single" "$T/durack.c" || { echo "proc_gate: durack.c -DSINGLE does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/hupwait" "$T/hupwait.c" || { echo "proc_gate: hupwait.c does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/eqdeadline" "$T/eqdeadline.c" || { echo "proc_gate: eqdeadline.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/midmerge" "$T/midmerge.c" || { echo "proc_gate: midmerge.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/ackfirst" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/ackfirst-bug" "$T/ackfirst.c" || { echo "proc_gate: ackfirst.c -DBUG does not build"; fail=1; }
@@ -430,6 +432,12 @@ expect "ackfirst: a crash between a durable writev and the ack" 1 "durable_then_
 # crash budget cannot hide a violation reachable without one
 expect "midmerge: the violation is found without a crash"   1 "notfirst is violated" $(run midmerge midmerge) --crashes 0
 expect "midmerge: and with a crash in the budget"           1 "notfirst is violated" $(run midmerge midmerge)
+# the clocks are frozen while a node is inside a step, but a deadline
+# already due there moves no clock and may still fire
+expect "eqdeadline: a timer due at the same instant fires mid-step" 1 "not_both is violated" $(run eqdeadline eqdeadline)
+# a poll that asks for no events ends on a hangup: the peer's FIN after
+# this end's own SHUT_WR is POLLHUP, as Linux reports it (16, 21, 100, 21)
+expect "hupwait: a poll for no events wakes on the hangup" 0 "No error has been found" $(run hupwait hupwait)
 # connect() is a crash point too: the connection is in the peer's
 # backlog, so a crash before the first write leaves it empty
 $CC -O1 -no-pie -w -o "$B/proc/conncrash" "$T/conncrash.c" || { echo "proc_gate: conncrash.c does not build"; fail=1; }

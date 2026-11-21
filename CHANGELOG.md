@@ -5,6 +5,14 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+While a node is stopped inside a step the clocks are frozen, but a
+deadline already due there still fires: two nodes whose timers fall due
+at one instant could not interleave before, since the first to wake ran
+its whole step first.  A poll that asks for no events, waiting only for
+a hangup, now wakes with `POLLHUP` when the peer's FIN arrives after
+this end's own `SHUT_WR`; it never woke.  Gates: proc_gate eqdeadline
+and hupwait.
+
 A zero-timeout `poll` or `epoll_wait` of the listener mid-step stops,
 as a non-blocking `accept` does, while any other node can still act:
 a dial may come first.  It answered at once, so a loop that polls its
