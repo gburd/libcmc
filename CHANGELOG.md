@@ -5,6 +5,14 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A DROP, and a peer's restart, no longer discard bytes the reader has
+started to read or that a `poll` or `epoll_wait` has reported to it.
+Those bytes are in the reader's kernel, and Linux reads them before
+it reports the reset; cmc dropped them, so a server that got
+`EPOLLIN` and then a reset reported a lost request Linux never
+shows.  No example's state count changes.  Gate: proc_gate inkernel
+wakerst, with a drop and with a crash and restart.
+
 `poll` reports `POLLHUP` once a connection's own `SHUT_WR` is done
 and the peer's FIN has arrived, before the FIN is read, as Linux does
 (`tcp_poll()` sets receive shutdown when the FIN arrives).  cmc

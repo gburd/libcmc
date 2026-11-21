@@ -1115,6 +1115,15 @@ ik pollwake "a crash after a poll wake keeps what it reported" 0 "23 distinct st
 ik nbrest "the rest of a part-read message is readable at once" 0 "No error has been found" \
 	"timeouts = 0" 'linux = "node[1][0] != 1"
 reached = "eventually node[1][0] == 4"'
+# a reset (a drop, or node 0's host restarting) after the poll reported
+# 'a' leaves 'a' readable before the error (the reset discarded it)
+for env in "drops = 1" "crashes = 1
+restarts = 1"; do
+	ik wakerst "a reset keeps the bytes a poll reported (${env%%
+*})" 0 "No error has been found" \
+		"$env" 'linux = "node[1][0] != 1"
+reached = "eventually node[1][0] == 4"'
+done
 
 # the same fixtures under the other budgets that reach these choices
 # (a drop, a crash and restart, clock drift), pinned by their counts

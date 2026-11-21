@@ -670,7 +670,10 @@ budget is left: a write, truncation or
 of a modelled file the node is stopped at fails instead.
 .It DROP
 Drop budget is left: a connection carrying bytes is reset.
-Its queues are discarded and each end's next call fails with
+What is still in flight is discarded; bytes already in a reader's
+kernel (read in part, or reported by a
+.Fn poll )
+are read first, and then each end's next call fails with
 .Er ECONNRESET .
 .It CONNECT
 A non-blocking
@@ -723,7 +726,8 @@ descriptor 193 returns what it had made durable before the crash
 and a server that reads its own log on startup recovers.
 The new process starts with no connections and re-dials and re-listens
 as its code does; a peer that still held a connection to the crashed
-process keeps it, and its next call on it fails with
+process keeps it, reads what was already in its kernel, and its next
+call on it then fails with
 .Er ECONNRESET .
 .It WAKE
 A node parked in

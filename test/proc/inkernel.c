@@ -12,6 +12,11 @@
  *            has one way, keeping "ab")
  *   nbrest   node 1 polls, reads one byte, then reads non-blocking: 4
  *            for 'b', 1 for EAGAIN (impossible on Linux)
+ *   wakerst  node 1 polls, polls again with a zero timeout, then
+ *            reads: 2 unless both polls reported POLLIN alone (bytes
+ *            are there), else 4 for 'a', 1 for anything else
+ *            (impossible on Linux: a reset after the polls leaves 'a'
+ *            readable first)
  * Node 1 reports the result as node[1][0] and then waits; node 0 waits
  * for a reply that never comes.  The model gives node 0 a crash.
  *
@@ -59,6 +64,18 @@ reader(const char *mode)
 	if (strcmp(mode, "partial") != 0)
 		poll(&p, 1, -1);
 
+	if (!strcmp(mode, "wakerst"))
+	{
+		short		r1 = p.revents;
+
+		poll(&p, 1, 0);
+		if (r1 != POLLIN || p.revents != POLLIN)
+			emit(2);
+		else
+			emit(read(x, &b, 1) == 1 ? 4 : 1);
+		(void) !read(x, &b, 1);
+		return;
+	}
 	if (strcmp(mode, "pollwake") != 0)
 	{
 		if (read(x, &b, 1) != 1)

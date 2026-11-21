@@ -1608,6 +1608,24 @@ conn_discard_to(int conn, int to)
 		if (bag[i].used && bag[i].conn == conn && bag[i].to == to) bag[i].used = 0;
 }
 
+/* An RST reaches connection conn: discard what is still in flight in
+ * both directions, and keep what is already in a reader's kernel, the
+ * messages up to the last pinned one toward each end (see Msg).  Linux
+ * purges no receive queue on a reset, and its read returns the bytes
+ * queued there before it reports the error. */
+static void
+conn_discard_unpinned(int conn)
+{
+	for (int to = 0; to < 2; to++)
+	{
+		int keep = -1;
+		for (int h = conn_head(conn, to); h >= 0; h = conn_next(conn, to, bag[h].seq))
+			if (bag[h].pinned) keep = bag[h].seq;
+		for (int i = 0; i < MAXMSG; i++)
+			if (bag[i].used && bag[i].conn == conn && bag[i].to == to && bag[i].seq > keep) bag[i].used = 0;
+	}
+}
+
 /* has end e been sent the peer's FIN (queued, or already read)?  Linux
  * then holds the end in CLOSE_WAIT, where a reset reports EPIPE */
 static int
@@ -3747,7 +3765,7 @@ serve(Node *nd, Thread *th)
 				 * with an RST, as Linux's does in FIN_WAIT */
 				rst_path(nd->id, cn->node[1 - e]); rst_path(cn->node[1 - e], nd->id);
 				int er[2] = {reset_errno(c, 0), reset_errno(c, 1)};
-				conn_discard(c);
+				conn_discard_unpinned(c);
 				cn->reset = 1; cn->err[0] = er[0]; cn->err[1] = er[1];
 				rst_notify(c, 1 - e);
 			}
@@ -5917,10 +5935,11 @@ fire_deadline(int d, Thread *th, int v)
 	g_cap = old;
 }
 
-/* Reset connection conn (a DROP): discard every queued message in both
- * directions, mark it reset, and tell both ends at once.  A node parked
- * in recv on it gets ECONNRESET; a node parked in poll on it is woken so
- * its next read gets ECONNRESET.  Modelling a drop as a reset (not a mid-stream byte loss)
+/* Reset connection conn (a DROP, or a restarted peer's RST): discard
+ * the messages still in flight in both directions, keep those already
+ * in a reader's kernel (conn_discard_unpinned()), mark it reset, and
+ * tell both ends at once.  A node parked in recv on it gets its kept
+ * bytes, then ECONNRESET; a node parked in poll on it is woken.  Modelling a drop as a reset (not a mid-stream byte loss)
  * keeps the process front end faithful to TCP, which never loses a byte
  * from a live stream -- a failure is always visible to both ends. */
 static void
@@ -5928,7 +5947,7 @@ reset_conn(int conn)
 {
 	Conn *cn = &conns[conn];
 	int errs[2] = {reset_errno(conn, 0), reset_errno(conn, 1)};
-	conn_discard(conn);
+	conn_discard_unpinned(conn);
 	cn->reset = 1;
 	for (int e = 0; e < 2; e++) if (!cn->closed[e]) cn->err[e] = errs[e];
 	for (int e = 0; e < 2; e++) rst_notify(conn, e);
