@@ -60,20 +60,16 @@ state where the proposers disagree.
 Searching harder, with one crash and one lost message allowed:
 
 ```sh
-cmc --model-file examples/paxos/paxos.model --binary ./paxos --crashes 1 --drops 1
+cmc --model-file examples/paxos/paxos.model --binary ./paxos --crashes 1 --drops 1 --max-states 50000
 ```
 
-```
-Model checking completed. No error has been found.
-123053 states generated, 46909 distinct states found, 0 states left on queue.
-```
-
-(about twenty minutes on one core of an EC2 host, single-threaded;
-each state is a fresh run of all five processes; measured before a
-mid-step dial became a point where any running node may act first,
-which multiplies the count, so expect several times as many now).  2.0.0 printed 30,075
-here, from runs in which the nodes raced each other; on the EC2 host it
-stops with "replay diverged" instead.
+The complete search is now too large for a quick run: with a crash in
+the budget each send, close and connect inside a step is a point where
+the node may crash or another node act first, and a run on one core of
+an EC2 c7i.2xlarge had not finished after seven hours (2.1.0 finished
+in about twenty minutes, at 46,909 distinct states).  With
+`--max-states` the run explores the states it reaches first and ends
+INCOMPLETE (exit 2), never PASS.
 
 ## The planted bug
 
