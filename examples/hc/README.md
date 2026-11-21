@@ -95,11 +95,12 @@ cmc --model-file examples/hc/hc.model --binary ./hc
 
 Since 2.2 this no longer finishes in a gate's time.  A participant
 dials the next store right after answering a peer, and a dial made
-after a send in the same step is now a point where the peer may act
-first (it may exit, and Linux then refuses the dial), so the search
-has many more interleavings to try.  Bounded runs, measured on a
-48-thread x86-64 host under a load of about 8
-([measurement](../../docs/measurements/2026-11-20-hc-midstep-dial.md)):
+after a call with an effect in the same step is now a point where any
+node that can still act may act first (the dialled node may exit, and
+Linux then refuses the dial), so the search has many more
+interleavings to try.  Bounded runs, measured on a 48-thread x86-64
+host under a load of about 8
+([measurement](../../docs/measurements/2026-11-21-midstep-wide-park.md)):
 
 | `--depth` | distinct states | time |
 |---|---|---|

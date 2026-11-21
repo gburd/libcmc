@@ -92,9 +92,10 @@ to 23787 (276 s), at depth 15 to 78155 (877 s); the full search, which
 took 36331 states and about 13 minutes before, did not finish within
 two hours.  `make check-examples-slow` now runs hc to depth 15
 (INCOMPLETE, no violation) instead of to completion, and the planted
-bug's simulation uses seed 3 (walk 15905, about two minutes), as seed
+bug's simulation used seed 3 (walk 15905, about two minutes), as seed
 4 no longer finds it in 30,000 walks.  The numbers are in
-docs/measurements/2026-11-20-hc-midstep-dial.md.
+docs/measurements/2026-11-20-hc-midstep-dial.md; the later entries
+above change them again (docs/measurements/2026-11-21-midstep-wide-park.md).
 
 A dial to a node that crashed times out instead of being refused.  A
 CRASH is a host losing power, and a host that is down sends no RST, so
