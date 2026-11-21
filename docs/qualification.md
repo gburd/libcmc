@@ -77,6 +77,7 @@ in the kernel, untouched.
 | `nanosleep`, `clock_nanosleep` (relative or `TIMER_ABSTIME`), `select` and `pselect` with no descriptor | exact | a deadline on the node clock; `select` and `pselect` return their timeout counted down to zero; select on descriptors, select with no timeout and a sleep on a CPU-time clock are exit 3 | proc_gate sleeps nanosleep, clock_nanosleep, abstime, select, pselect, and the three refusal rows |
 | deadlines of several nodes | exact in order | EXPIRE fires a node's earliest deadline only when no other node passes a deadline first; time never advances one state per tick | proc_gate leasedrift |
 | time inside a step, a late wake-up | not modelled | a node's clock does not move between two of its calls, and a deadline wakes exactly on time, so a bug that needs a process pause between a clock check and the act it guards is not reached | none (a documented boundary, cmc(7) Clocks) |
+| deadlines while a node is stopped inside a step | exact | every clock is frozen while a single-threaded node is held mid-step (a crash point, or a call another node may answer first): no node's deadline fires and no TIMEOUT is offered there, so no time passes between two adjacent calls, as on Linux | proc_gate synmid own, other |
 | clock drift between nodes (`drift = R`) | approximate | per fired deadline, one node's clock at the slowest or fastest rate R allows against the others; rates in between, two nodes off at once and message delay are not explored | proc_gate leasedrift (L(1 + rho) caught only with drift, the right margin fails at drift 200) |
 | `setitimer`, `alarm`, `timer_create`, `timerfd_create` | refused | exit 3 (a timer on the real clock) | proc_gate sleeps setitimer, alarm, timer_create, timerfd |
 | `epoll_create`, `epoll_ctl`, `epoll_wait`, `epoll_pwait` | exact for level-triggered `EPOLLIN`, `EPOLLOUT` | interest list up to 16 fds | proc_gate epollloop |
@@ -181,5 +182,5 @@ in the kernel, untouched.
 | paxos | pass and planted bug, with and without faults (proc_gate) |
 | raftlog, zab | pass and planted bug (proc_gate) |
 | raft | pass and planted bug, with and without a crash (proc_gate) |
-| hc | no violation to depth 15 at four timeouts (INCOMPLETE: the full search no longer finishes in a gate's time), planted bug by seeded simulation; both only in `make check-examples-slow`, about 17 minutes; partitions only by simulation |
+| hc | no violation to depth 15 at four timeouts (INCOMPLETE: the full search no longer finishes in a gate's time), planted bug by seeded simulation; both only in `make check-examples-slow`, about 8 minutes; partitions only by simulation |
 | paxos2 | refines `paxos.cml` with a progress property; its planted bug breaks the spec's agreement (proc_gate) |

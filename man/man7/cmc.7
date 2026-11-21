@@ -826,6 +826,12 @@ never steps.
 Computation takes no time either: a node's clock does not move inside
 a step, between two of its calls, and a deadline wakes its thread
 exactly on time, never late.
+While a single-threaded node is stopped inside a step (at a crash
+point, or at a call another node may answer first) every clock is
+frozen: no deadline of any node fires, its own dial's SYN deadline and
+other nodes' timeouts included, and TIMEOUT is not offered, until the
+node runs on to a call that waits.
+Other nodes still act there, but only in ways that take no time.
 On Linux a process can be descheduled for any length of time, so a
 check of the clock and the action that relies on it
 .Pq a lease holder that reads the time, finds its lease valid, then serves

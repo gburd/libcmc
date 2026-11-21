@@ -4794,6 +4794,25 @@ mid_world(void)
 	return 0;
 }
 
+/* Are the clocks frozen: is some node stopped inside a step, at a
+ * world mid_world() names or at a call parked on a handshake or a full
+ * send buffer (BK_CONNWAIT, BK_SHORTW)?  No time passes between two
+ * calls of one step, so no deadline of any node fires there and no
+ * TIMEOUT moves the clocks: they wait for the node to reach a call
+ * that waits.  Only a node with one thread parks this way; a thread of
+ * a multi-threaded node held at a visible call is runnable, not inside
+ * a step, so time may pass for its other threads' timed waits. */
+static int
+clocks_frozen(void)
+{
+	if (mid_world()) return 1;
+	for (int i = 0; i < M.nodes; i++)
+		for (int t = 0; N[i].alive && t < N[i].nth; t++)
+			if (N[i].th[t].inuse && (N[i].th[t].block_kind == BK_CONNWAIT || N[i].th[t].block_kind == BK_SHORTW))
+				return 1;
+	return 0;
+}
+
 static int
 world_settled(void)
 {
@@ -5337,11 +5356,6 @@ syn_stuck(int c)
 	const Conn *cn = &conns[c];
 	int a = cn->node[0], b = cn->node[1];
 	if (!cn->used || !cn->connecting || !N[a].alive || cn->closed[0]) return 0;
-	/* a call parked on the handshake (BK_CONNWAIT) is the dialler mid-
-	 * step, where no time passes: its deadline competes once the call
-	 * has run (a poll then has its own deadline) */
-	for (int ti = 0; ti < N[a].nth; ti++)
-		if (N[a].th[ti].inuse && N[a].th[ti].block_kind == BK_CONNWAIT) return 0;
 	return !link_up(a, b) || !link_up(b, a) || N[b].crashed;
 }
 
@@ -5537,6 +5551,8 @@ enum_actions(Act *out)
 			return c;
 		}
 	}
+	/* no time passes while a node is inside a step (clocks_frozen()) */
+	int timed = !clocks_frozen();
 	for (int d = 0; d < M.nodes; d++)
 	{
 		Node *nd = &N[d];
@@ -5552,7 +5568,7 @@ enum_actions(Act *out)
 				/* a server idle in accept() can have its election timer fire:
 				 * the timeout arrives as a synthetic timer connection it
 				 * accepts and reads a 'T' from (peer = TIMER_PEER) */
-				if (bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
+				if (timed && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
 				continue;
 			}
 			if (th->block_kind == BK_POLL)
@@ -5601,7 +5617,7 @@ enum_actions(Act *out)
 					}
 				}
 				if (th->poll_now) ADD(A_RUN, d, -1, ti);	/* answered as it stands */
-				else if (saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
+				else if (timed && saw_chan && bud.timeouts > 0) ADD(A_TIMEOUT, d, TIMER_PEER, ti);
 				continue;
 			}
 			if (th->block_kind == BK_SLEEP) continue;	/* only its deadline wakes it (A_EXPIRE) */
@@ -5637,10 +5653,10 @@ enum_actions(Act *out)
 			if (conn_head(th->block_conn, th->block_end) >= 0 && CONN_UP(th->block_conn, th->block_end))
 				ADD(A_DELIVER, d, p, ti);
 			else if (peer_lost(th->block_conn, th->block_end)) ADD(A_EOF, d, p, ti);
-			if (bud.timeouts > 0) ADD(A_TIMEOUT, d, p, ti);
+			if (timed && bud.timeouts > 0) ADD(A_TIMEOUT, d, p, ti);
 		}
 	}
-	enum_expire(out, &c);
+	if (timed) enum_expire(out, &c);
 	if (bud.crashes > 0)
 		for (int d = 0; d < M.nodes; d++)
 			if (N[d].alive) add_crashes(out, &c, d);

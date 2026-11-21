@@ -5,6 +5,22 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+No deadline fires while a node is stopped inside a step.  A
+single-threaded node held between two calls of one step (at a crash
+point, or at a call another node may answer first) had its own dial's
+SYN deadline and every other node's deadlines still able to fire, so
+127 s could pass between a non-blocking `connect` and the
+`getsockopt` two writes later, and a client was checked on an
+`ETIMEDOUT` that Linux never gives there.  Only a call parked on the
+handshake itself was exempt.  Now every clock is frozen at such a
+world: no EXPIRE and no TIMEOUT is offered until the node reaches a
+call that waits (cmc(7), Clocks and deadlines).  The hc example at
+depth 12 goes from 23787 to 14534 distinct states and at depth 15
+from 78155 to 36625 (about 7 minutes, the check-examples-slow row);
+no other example's count changes.  The planted hc bug's simulation
+now uses seed 1 (walk 1457, about 12 s), as seed 3 finds it only at
+walk 29761.  Gate: proc_gate synmid own and other.
+
 The full search of the hc example no longer finishes in a gate's time.
 Since the mid-step dial became a point where the peer may act first,
 hc's search space grew: at depth 12 from 8095 distinct states (125 s)

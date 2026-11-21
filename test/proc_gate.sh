@@ -201,13 +201,13 @@ expect "raftlog: --simulate finds it"       1 "no_lost_committed is violated" $(
 # hc's model requires that some participant adopts, so agreement is not
 # a vacuous pass.  The full check no longer finishes in a gate's time
 # (examples/hc/README.md), so CMC_SLOW=1 (make check-examples-slow, on
-# the calibration's triggers) runs it to depth 15, about 15 minutes,
-# and the AP-mode bug by simulation, about 2 minutes; the quick row
+# the calibration's triggers) runs it to depth 15, about 7 minutes,
+# and the AP-mode bug by simulation, under a minute; the quick row
 # checks a shorter run is INCOMPLETE rather than a pass.
 expect "hc: a bounded run is not a pass" 2 "INCOMPLETE" $(runx "$HERE/examples/hc/hc.model" hc) --depth 12
 if [ "${CMC_SLOW:-0}" = 1 ]; then
-	expect_by 2400 "hc: agreement holds to depth 15" 2 "78155 distinct states" $(runx "$HERE/examples/hc/hc.model" hc) --depth 15
-	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 3 --walks 30000 --depth 600
+	expect_by 2400 "hc: agreement holds to depth 15" 2 "36625 distinct states" $(runx "$HERE/examples/hc/hc.model" hc) --depth 15
+	expect "hc: AP-mode adoption breaks agreement" 1 "agreement is violated" $(runx "$HERE/examples/hc/hc.model" hc-bug) --timeouts 12 --simulate --seed 1 --walks 30000 --depth 600
 fi
 expect "zab: no committed txn is lost"       0 "No error has been found" $(runx "$HERE/examples/zab/zab.model" zab)
 expect "zab: early-ack loses a commit on crash" 1 "no_lost_commit is violated" $(runx "$HERE/examples/zab/zab.model" zab-bug)
@@ -1172,6 +1172,18 @@ drift = 100" 'notimeout = "node[1][0] != 1"'
 sd exit exit "a host whose process exited refuses at once" 0 "No error has been found" \
 	"timeouts = 0" 'linux = "node[1][0] == 0 or node[1][0] == 3"
 reached = "eventually node[1][0] == 3"'
+# synmid.c: no time passes between two calls of one step, so no
+# deadline fires while a node is held there, its own dial's (own) or
+# another node's (other): ETIMEDOUT and 127 s (or 50 s) between two
+# adjacent calls were reachable
+$CC -O1 -no-pie -w -o "$B/proc/synmid" "$T/synmid.c" || { echo "proc_gate: synmid.c does not build"; fail=1; }
+for m in own other; do
+	for env in "crashes = 1" "partitions = 1"; do
+		printf '[target]\nbinary = %s\nnodes = 3\nargs = %s\n[environment]\n%s\n[invariants]\n%s\n' "$B/proc/synmid" "$m" "$env" \
+			'linux = "node[1][0] != 1 and node[1][0] != 3 and node[1][1] < 1"' > "$OUT/synmid-$m.model"
+		expect_by 300 "synmid $m: no deadline fires mid-step (${env% =*})" 0 "No error has been found" --model-file "$OUT/synmid-$m.model"
+	done
+done
 
 echo "-- edges: limits, partial transfers, refusals and signals"
 # edges.c: each mode passes a limit or a malformed argument and must end
