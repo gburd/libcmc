@@ -92,10 +92,14 @@ the step, to a peer that could reset the connection first (it holds
 unread bytes from the writer), stops so the RST may arrive before it.
 So does a blocking
 .Fn connect
-to a node that holds such bytes, which may exit first, and a
-non-blocking
+after such a call, to a node that is still running or whose host may
+restart: it may accept, exit, crash or be cut off first, in reaction
+to anything, a bare dial with no bytes or a message relayed through a
+third node included.
+So does a non-blocking
 .Fn accept
-with nothing waiting while any node does, which may dial first.
+with nothing waiting while any other node can still act, which may
+dial first.
 No invariant is checked at such a point, and it is never merged.
 Elsewhere other nodes do not act inside a step: what the node computes
 between two calls touches only its own memory, so it commutes with

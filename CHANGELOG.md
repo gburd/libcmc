@@ -5,6 +5,23 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+A blocking `connect` after a call with an effect earlier in the step
+stops while the dialled node is running or its host may restart, and
+a non-blocking `accept` with nothing waiting stops while any other
+node can still act.  Both stopped only when the caller had bytes
+unread at a node, and only that node's reaction counted, so three
+Linux outcomes were never reached: the dialled node accepting a bare
+dial (no bytes) and exiting or dialling back, a message relayed
+through a third node that makes the dialled node exit, and a crash or
+cut of the dialled host between two dials (which needs no reaction at
+all).  State counts grow: paxos from 561 to 7711 distinct states
+(about two minutes), raft from 5182 to 10309, raftlog and zab from 107
+to 115, hc at depth 12 from 14534 to 12570 and at depth 15 from 36625
+to 46184; repl and the guide's kvserver do not change.  A launch now
+also clears the node's record of a call with an effect in the current
+step, which a replay could inherit from the run before and diverge.
+Gate: proc_gate baredial redial, dialbk and relay.
+
 No deadline fires while a node is stopped inside a step.  A
 single-threaded node held between two calls of one step (at a crash
 point, or at a call another node may answer first) had its own dial's

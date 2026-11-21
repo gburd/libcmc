@@ -91,7 +91,7 @@ build/cmc --model-file test/proc/paxos.model --binary ./paxos
 build/cmc --model-file test/proc/paxos.model --binary ./paxos-bug
 ```
 
-The first passes, with 561 distinct states.  The second prints the 24
+The first passes, with 7711 distinct states.  The second prints the 30
 actions after which the two proposers have decided different values.
 The [next page]({{ '/guide/02-first-model/' | relative_url }}) checks a
 server from nothing.

@@ -1482,7 +1482,7 @@ launch(Node *nd)
 	{ int fl = fcntl(nd->listener, F_GETFL); fcntl(nd->listener, F_SETFL, fl | O_NONBLOCK); }
 	nd->pid = pid; nd->alive = 1; nd->next_fd = 500; nd->nc = 0;
 	nd->npend = 0; nd->crashed = 0; nd->canon_len = 0; nd->durable_len = 0; nd->durable_read_off = 0; nd->preload_ok = 0; nd->timer_fd = -1;
-	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0;
+	nd->ls_nonblock = 0; nd->ls_cloexec = 0; nd->listener_fd = -1; nd->nefd = 0; nd->nep = 0; nd->step_effect = 0;
 	memset(nd->fdflag, 0, sizeof nd->fdflag); memset(nd->sockopt, 0, sizeof nd->sockopt); memset(nd->dupof, 0, sizeof nd->dupof); nd->execd = 0;
 	nd->nth = 0; memset(nd->th, 0, sizeof nd->th); nd->threaded = 0; nd->race_ok = 0;
 	return 0;
@@ -2664,38 +2664,26 @@ peerwait(Node *nd, long nr, const __u64 *a)
 	return rst_may_come(nd, (int) a[0]);
 }
 
-/* Does node nd have bytes or a FIN unread at live node p, on any
- * connection between them?  Then p may yet react to what nd did in
- * this step: exit, dial nd, close. */
+/* Could node p change, before a mid-step call of another node, what a
+ * dial to it finds: p is live (it may accept, exit, close its listener
+ * or dial elsewhere, on its own or in reaction to anything, including a
+ * bare connect with no bytes or a message relayed through a third node;
+ * its host may crash, its link may be cut), or p's host is down and may
+ * restart?  A node that exited stays gone. */
 static int
-owes_peer(const Node *nd, int p)
+may_act(int p)
 {
-	if (p < 0 || p >= M.nodes || !N[p].alive) return 0;
-	for (int c = 0; c < MAXCONNS; c++)
-		for (int e = 0; conns[c].used && e < 2; e++)
-			if (conns[c].node[e] == nd->id && conns[c].node[1 - e] == p &&
-				!conns[c].closed[1 - e] && conn_head(c, 1 - e) >= 0)
-				return 1;
-	return 0;
-}
-
-/* Could some live node still react to what node nd sent in this step
- * (owes_peer())?  Its reaction, or a chain of them through other nodes,
- * may then come before nd's next call. */
-static int
-owes_any(const Node *nd)
-{
-	for (int p = 0; p < M.nodes; p++)
-		if (p != nd->id && owes_peer(nd, p)) return 1;
-	return 0;
+	if (p < 0 || p >= M.nodes) return 0;
+	return N[p].alive || (N[p].crashed && bud.restarts > 0);
 }
 
 /* Would a blocking connect a of node nd, mid-step, answer differently
- * had others acted first: the live node it dials may exit (ECONNREFUSED)
- * in reaction to what nd sent it in this step?  As for a write
- * (peerwait()), only the dialled node's own reaction counts, not one
- * relayed through a third node.  A non-blocking connect's outcome is
- * the search's already (A_CONNECT). */
+ * had others acted first?  Its outcome is fixed only once the node it
+ * dials can no longer act (may_act()).  Narrowing this to a reaction
+ * to what nd sent that node misses a reaction to the bare dial, one
+ * relayed through a third node, and a crash or cut, none of which wait
+ * for bytes.  A non-blocking connect's outcome is the search's already
+ * (A_CONNECT). */
 static int
 dial_may_change(Node *nd, const __u64 *a)
 {
@@ -2706,17 +2694,19 @@ dial_may_change(Node *nd, const __u64 *a)
 	if (cs >= 0 ? nd->cnonblock[cs] : (*fd_flags(nd, fd) & FD_NB) != 0) return 0;
 	if (cr_read(nd->pid, a[1], &sa, sizeof sa) != sizeof sa) return 0;
 	int peer = ((sa.port >> 8) | ((sa.port & 0xff) << 8)) - BASE;
-	return owes_peer(nd, peer);
+	return peer != nd->id && may_act(peer);
 }
 
 /* Would a non-blocking accept of node nd on its listener fd, with
- * nothing waiting, mid-step, find a dial had others acted first: a node
- * reacting to what nd sent in this step may dial it? */
+ * nothing waiting, mid-step, find a dial had others acted first?  Any
+ * other node that can still act may dial it (may_act()). */
 static int
 backlog_may_change(Node *nd, int fd)
 {
 	if (!nd->step_effect || node_multi(nd) || fd != nd->listener_fd || !nd->ls_nonblock || nd->npend) return 0;
-	return owes_any(nd);
+	for (int p = 0; p < M.nodes; p++)
+		if (p != nd->id && may_act(p)) return 1;
+	return 0;
 }
 
 /* Could an RST reach node nd's connection fd before its next call,

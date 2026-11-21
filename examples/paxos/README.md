@@ -49,8 +49,8 @@ cmc --model-file examples/paxos/paxos.model --binary ./paxos
 
 ```
 Model checking completed. No error has been found.
-983 states generated, 561 distinct states found, 0 states left on queue.
-The depth of the complete state graph search is 28.
+14203 states generated, 7711 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 35.
 ```
 
 cmc ran all five processes, tried every interleaving of the two
@@ -69,7 +69,9 @@ Model checking completed. No error has been found.
 ```
 
 (about twenty minutes on one core of an EC2 host, single-threaded;
-each state is a fresh run of all five processes).  2.0.0 printed 30,075
+each state is a fresh run of all five processes; measured before a
+mid-step dial became a point where any running node may act first,
+which multiplies the count, so expect several times as many now).  2.0.0 printed 30,075
 here, from runs in which the nodes raced each other; on the EC2 host it
 stops with "replay diverged" instead.
 
@@ -86,7 +88,7 @@ cmc --model-file examples/paxos/paxos.model --binary ./paxos-bug
 
 ```
 Error: Invariant agreement is violated.
-Error: The behavior up to this point is (24 actions):
+Error: The behavior up to this point is (30 actions):
   ...
 ```
 

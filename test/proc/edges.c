@@ -140,6 +140,14 @@ main(int argc, char **argv)
 
 		bind(ls, (struct sockaddr *) &a, sizeof a);
 		listen(ls, 8);
+		/* manyconn fills the backlog: node 1 sleeps rather than
+		 * accept, so the dials do not interleave with accepts */
+		if (!strcmp(mode, "manyconn"))
+		{
+			struct timespec t = {1000000, 0};
+
+			nanosleep(&t, NULL);
+		}
 		for (;;)
 			if (accept(ls, NULL, NULL) < 0)
 				break;

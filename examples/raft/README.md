@@ -65,7 +65,7 @@ cmc --model-file examples/raft/raft.model --binary ./raft
 
 ```
 Model checking completed. No error has been found.
-11727 states generated, 5182 distinct states found, 0 states left on queue.
+21405 states generated, 10309 distinct states found, 0 states left on queue.
 ```
 
 Two nodes may time out and stand for election; cmc tries every
@@ -85,7 +85,9 @@ Model checking completed. No error has been found.
 ```
 
 (about three minutes on one core of an EC2 host, single-threaded; each
-state is a fresh run of all three processes).
+state is a fresh run of all three processes; measured before a
+mid-step dial became a point where any running node may act first,
+which multiplies the count, so expect several times as many now).
 
 ## The planted bug
 
