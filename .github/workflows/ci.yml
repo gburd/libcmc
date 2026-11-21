@@ -27,8 +27,8 @@ jobs:
   check:
     name: make check (${{ matrix.cc }})
     runs-on: ubuntu-24.04
-    # proc_gate's rows for 2.1 bring make check to about 14 minutes
-    timeout-minutes: 30
+    # proc_gate's rows for 2.2 bring make check past 30 minutes on a runner
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -75,7 +75,7 @@ jobs:
     # every gate of make check on a gcc --coverage build; fails below 90%
     # of functions or of branches in any src/*.c file
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -95,7 +95,8 @@ jobs:
 
   nix:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # make check twice, gcc and clang, in the sandbox
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: cachix/install-nix-action@v31
