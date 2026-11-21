@@ -40,7 +40,10 @@ three engines and gates that could report success after a tool failed.
 [soundness remediation plan](docs/plans/soundness-remediation.md) and
 [CHANGELOG.md](CHANGELOG.md)); 2.1.0 closes the gaps 2.0.0 documented
 and holds every source file to 90% function and branch coverage (see
-the [2.1 plan](docs/plans/2.1-boundaries.md)).  A pass covers only the instance and the
+the [2.1 plan](docs/plans/2.1-boundaries.md)); 2.2.0 lets a crash fall
+between any two effectful calls and adds per-node clocks, a modelled
+file system and the socket calls a libpq client makes (see the
+[2.2 plan](docs/plans/2.2-in-place.md)).  A pass covers only the instance and the
 budgets searched, and only the behaviour
 [docs/qualification.md](docs/qualification.md) lists as modelled; a
 construct outside it is refused, not passed.  Use cmc as one input
@@ -102,25 +105,28 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 2.1.0.  `cmc --model-file`
+Release 2.2.0.  `cmc --model-file`
 checks the shipped binary as it runs, under seccomp, with the network,
-timeouts, crashes and connection resets as search decisions.  Blocking
-sockets, `poll`/`ppoll`/`epoll`, `fcntl`, `eventfd`, threads and node
-restart are intercepted, each with the limits listed in cmc(7) and
+timeouts, crashes, connection resets, partitions and short writes as
+search decisions.  Blocking and non-blocking sockets,
+`poll`/`ppoll`/`epoll`, finite timeouts on per-node clocks, `fcntl`,
+`eventfd`, threads and node restart are intercepted, each with the limits listed in cmc(7) and
 docs/qualification.md.  The order of nodes and of a multi-threaded
 node's system calls and lock acquisitions is a search choice; memory
 accesses between them are checked for data races by the race runtime
 (`libcmc-race.a`, linked into a node built with `-fsanitize=thread`),
 and without it a multi-threaded node cannot pass.  The file system is
-read-only to a node, and a node's channels to other processes are
-refused.  The worked examples are small
+read-only to a node except under a directory the model file names,
+whose files the checker owns and a crash may roll back to their last
+fsync; a node's channels to other processes are refused.  The worked examples are small
 safety demonstrations, not complete models of the protocols they are
 named after.
 Process mode replays every state from a fresh launch, so the rate scales
 with how much the program does per launch: the small fixtures run several
-hundred replays a second (HummingConsensus with three processes, three
-timeouts and one drop is 14,730 distinct states in about 90 seconds, 380
-replays a second, on a 48-core Xeon).  History and measurements are in
+hundred replays a second, a five-process protocol about a hundred
+(the Paxos example, five processes and no faults, is 7,711 distinct
+states in about 130 seconds, 111 replays a second, on one core of an EC2
+c7i.8xlarge).  History and measurements are in
 `docs/measurements/`.
 
 ## CI

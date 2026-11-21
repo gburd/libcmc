@@ -5,6 +5,21 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 2.2.0 (2026-11-22)
+
+Takes the process engine toward checking a program in place, as Greg
+Burd's notes on 2.1.0 asked (docs/plans/2.2-in-place.md): a crash can
+fall between any two calls that reach outside the process, nodes have
+their own clocks with finite timeouts and drift, a node can have a
+modelled file system, and a client can connect the way libpq does.
+Three rounds of independent review of this work found false passes,
+most of them also in 2.1.0; each is fixed with a test that fails
+before the fix.  Results change for the same input: several programs
+that passed now fail, as they do on Linux, and state counts grow,
+often by several times, where crashes or mid-step connects are in play
+(paxos 561 to 7711 distinct states; the full hc example is no longer
+in any gate, which runs it to depth 15).
+
 While a node is stopped inside a step the clocks are frozen, but a
 deadline already due there still fires: two nodes whose timers fall due
 at one instant could not interleave before, since the first to wake ran
