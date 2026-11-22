@@ -148,6 +148,10 @@ action newleader_bug(e in 1 .. E, m in 0 .. S-1) [BUG]:
 
 # agreement and total order on what is committed: of two epochs'
 # committed prefixes, one is a prefix of the other.
+# A terminal state is intended here (the bounded epochs and histories run out),
+# so the deadlock check is off, as TLC's CHECK_DEADLOCK FALSE.
+deadlock = off
+
 invariant committed_prefix: all x in 1 .. E : all y in 1 .. E : cm[x] == 0 or cm[x] == cm[y] or (cm[x] mod K == 0 and cm[y] - (cm[y] mod K) == cm[x]) or cm[y] == 0 or (cm[y] mod K == 0 and cm[x] - (cm[x] mod K) == cm[y])
 
 # the step of Zab's argument for primary integrity that discovery must

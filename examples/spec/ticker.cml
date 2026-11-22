@@ -28,6 +28,10 @@ action reset [RESET]:
   when x > 0
   x' = 0
 
+# A terminal state is intended here (without RESET the ticker stops at N),
+# so the deadlock check is off, as TLC's CHECK_DEADLOCK FALSE.
+deadlock = off
+
 fairness weak
 
 property reaches_max: eventually x == N

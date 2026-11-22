@@ -1,0 +1,32 @@
+# test/spec/deadlock.cml: TLC's deadlock check.  A reachable state where
+# no action is enabled is a violation unless the model says
+# `deadlock = off`.  Here x counts to N while y may flip once; the state
+# x = N, y = 0 has no enabled action (the shortest deadlock, 3 actions),
+# but x = N, y = 1 has `idle`, a step that changes nothing, and so is not
+# deadlocked: a stuttering step of an action counts, as in TLC.  The
+# deadlock_*.cml files extend this one.
+#
+#   cmc --spec test/spec/deadlock.cml
+
+module deadlock
+
+const N = 3
+
+var x : 0 .. N
+var y : 0 .. 1
+
+init x == 0 and y == 0
+
+action inc:
+  when x < N
+  x' = x + 1
+
+action flip:
+  when x < N and y == 0
+  y' = 1
+
+action idle:
+  when x == N and y == 1
+  y' = y
+
+invariant in_range: x <= N

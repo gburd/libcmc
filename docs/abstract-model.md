@@ -70,6 +70,10 @@ SMT-encodable -- not full TLA+.
   symmetric states (see below).  SET is a constant set of at most 8
   values; anything else is an error.
 - `fairness weak` and `property NAME: ...` -- liveness (see below).
+- `deadlock = off` (or `deadlock = on`, the default) -- whether a state
+  with no enabled action is an error (see below).
+- `constraint NAME: EXPR` and `action_constraint NAME: EXPR` -- bound
+  the search, as TLC's `CONSTRAINT` and `ACTION_CONSTRAINT` (see below).
 
 Expressions: integers with `+ - * / mod`; sets `{a, b}` and ranges
 `LO .. HI`; functions `[i in SET -> EXPR]`, application `f[k]`, update
@@ -90,6 +94,47 @@ operation: `x > 0 and y / x == 2` is FALSE at `x = 0`, and
 `i == N or f[i] == 0` never applies `f` outside its domain.  The operand
 that is skipped is still parsed, so an unknown name or a syntax error in
 it is refused, but its type and its evaluation errors are not checked.
+
+## Deadlock and constraints
+
+These are TLC's checking options, with TLC's meaning; the calibration
+checks each against single-worker TLC on the same model.
+
+A reachable state in which no action is enabled is a deadlock, and
+`cmc --spec` reports it as TLC does: `Error: Deadlock reached.`, the
+shortest trace to the state, and exit status 1.  The check is on by
+default, as in TLC.  A model whose terminal states are intended says
+so with a `deadlock = off` line, or the run passes `--no-deadlock`;
+`cmc --emit-cfg` then writes `CHECK_DEADLOCK FALSE` into the TLC
+configuration.  An action step that changes no variable still counts
+as a step, so a state where only such a step is enabled is not
+deadlocked: TLC's deadlock is about `Next`, not about progress.
+Liveness is separate.  A deadlocked state stutters forever in TLA+, so
+`eventually` and `~>` treat it as a state the behaviour stays in, with
+or without the deadlock check.
+
+```
+constraint small: x + y <= 2
+action_constraint follow: y' <= x' or y' < y
+```
+
+A state that fails a `constraint`, or that a step failing an
+`action_constraint` reaches, is outside the model: it is not counted
+among the distinct states, not kept and not expanded.  Its invariants
+are still checked, as TLC checks them, so a violation found in such a
+state is reported.  An `action_constraint` reads the variables before
+the step unprimed and after it primed (`x'`); a primed variable is
+refused anywhere else.  A step outside the model is still a step, so
+the state it leaves is not deadlocked; a state that is never expanded
+is never deadlocked.  An initial state outside a `constraint` is
+checked but not counted, so the search can end with 0 distinct states,
+as TLC's does.
+
+A constraint narrows the search, not the specification, so a liveness
+property under one, and `--refine` against a spec with one, are
+refused (exit 3): neither is modelled.  `cmc --emit-tla` writes each
+constraint as an operator, and `cmc --emit-cfg` names it under
+`CONSTRAINT` or `ACTION_CONSTRAINT`.
 
 ## Modules and a shared base
 
@@ -154,10 +199,14 @@ and refuses otherwise.
 
 ```
 cmc --emit-tla counter.cml > counter.tla
+cmc --emit-cfg counter.cml > counter.cfg
 ```
 
 writes a TLA+ module, so the model can be checked with TLC or Apalache
-and proved with TLAPS.  Name the file after the module.  `make
+and proved with TLAPS, and the TLC configuration that goes with it (the
+constants, invariants, properties and constraints by name, and
+`CHECK_DEADLOCK FALSE` when the deadlock check is off).  Name the files
+after the module.  `make
 check-emit-tla` verifies that the generated TLA+ agrees with
 `cmc --spec` on every example.
 

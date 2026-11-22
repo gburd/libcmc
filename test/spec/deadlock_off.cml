@@ -1,0 +1,7 @@
+# test/spec/deadlock_off.cml: deadlock.cml with the deadlock check off,
+# as TLC's CHECK_DEADLOCK FALSE.
+
+module deadlock_off
+extends deadlock
+
+deadlock = off

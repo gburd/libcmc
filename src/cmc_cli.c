@@ -48,6 +48,8 @@ usage(void)
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
 			"         [--net fifo|bag] [--live-steps K]\n"
+			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
+			"         [--define TAG ...] [--no-deadlock]\n"
 			"       cmc --version\n"
 			"models:");
 	for (size_t k = 0; k < nmodels; k++)
@@ -429,19 +431,26 @@ proc_main(int argc, char **argv)
 	return cmc_proc_main(&po);
 }
 
-/* cmc --spec FILE or cmc --emit-tla FILE (mode), with --define TAG ...:
- * every other option is an error, and so is an option with no value */
+/* cmc --spec FILE, cmc --emit-tla FILE or cmc --emit-cfg FILE (mode),
+ * with --define TAG ... and --no-deadlock: every other option is an
+ * error, and so is an option with no value */
 static int
 spec_main(int argc, char **argv, const char *mode)
 {
 	const char *path = NULL;
 	char	   *defs[16];
 	int			ndefs = 0;
+	int			nodl = 0;
 
 	for (int j = 1; j < argc; j++)
 	{
 		bool		def = !strcmp(argv[j], "--define");
 
+		if (!strcmp(argv[j], "--no-deadlock"))
+		{
+			nodl = 1;
+			continue;
+		}
 		if (!def && strcmp(argv[j], mode))
 		{
 			fprintf(stderr, "cmc: %s is not supported with %s\n", argv[j], mode);
@@ -454,7 +463,11 @@ spec_main(int argc, char **argv, const char *mode)
 		else
 			path = argv[++j];
 	}
-	return strcmp(mode, "--spec") ? cmc_emit_tla(path, defs, ndefs) : cmc_spec_main(path, defs, ndefs);
+	if (!strcmp(mode, "--spec"))
+		return cmc_spec_main(path, defs, ndefs, nodl);
+	if (!strcmp(mode, "--emit-cfg"))
+		return cmc_emit_cfg(path, defs, ndefs, nodl);
+	return cmc_emit_tla(path, defs, ndefs, nodl);
 }
 
 int
@@ -480,9 +493,11 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			return proc_main(argc, argv);
 	/* cmc --spec FILE.cml [--define TAG ...]: the abstract-model front
 	 * end (cmc_spec.c), model-checking a declarative spec on its own;
-	 * cmc --emit-tla FILE.cml [--define TAG ...]: translate it to TLA+ */
+	 * cmc --emit-tla FILE.cml [--define TAG ...]: translate it to TLA+,
+	 * and cmc --emit-cfg FILE.cml: write the TLC .cfg that goes with it */
 	for (int i = 1; i < argc; i++)
-		if (!strcmp(argv[i], "--spec") || !strcmp(argv[i], "--emit-tla"))
+		if (!strcmp(argv[i], "--spec") || !strcmp(argv[i], "--emit-tla") ||
+			!strcmp(argv[i], "--emit-cfg"))
 			return spec_main(argc, argv, argv[i]);
 	cmc_options_default(&o);
 	o.progress_s = 60;

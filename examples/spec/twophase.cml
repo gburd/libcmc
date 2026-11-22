@@ -62,4 +62,8 @@ action commit_bug(r in 0 .. N-1) [BUG]:
 
 # Consistency (atomicity): a committed resource manager and an aborted
 # one never coexist -- all resource managers reach the same decision.
+# A terminal state is intended here (the protocol ends once every resource manager decides),
+# so the deadlock check is off, as TLC's CHECK_DEADLOCK FALSE.
+deadlock = off
+
 invariant consistency: (count r in 0 .. N-1 : rmState[r] == 2) == 0 or (count r in 0 .. N-1 : rmState[r] == 3) == 0

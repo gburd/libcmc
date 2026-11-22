@@ -33,4 +33,8 @@ action skip(m in 1 .. N) [BUG]:
   passed' = [passed except [m] = owner]
   owner' = m
 
+# A terminal state is intended here (the token stops once passed),
+# so the deadlock check is off, as TLC's CHECK_DEADLOCK FALSE.
+deadlock = off
+
 invariant fresh: all i in 1 .. N : i != owner or passed[i] == 0

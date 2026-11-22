@@ -1,0 +1,26 @@
+# test/spec/dlorder.cml: which error TLC reports first.  TLC checks a
+# state's invariants when it generates it, and the deadlock check when
+# it expands it.  From x = 0, `a` reaches 1 and `b` reaches 2, which
+# deadlocks; expanding 1 generates 3, which breaks the invariant, before
+# 2 is expanded.  So the verdict is the invariant, in 2 actions, not the
+# deadlock in 1.
+
+module dlorder
+
+var x : 0 .. 3
+
+init x == 0
+
+action a:
+  when x == 0
+  x' = 1
+
+action b:
+  when x == 0
+  x' = 2
+
+action c:
+  when x == 1
+  x' = 3
+
+invariant not_three: x != 3

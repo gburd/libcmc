@@ -1,0 +1,30 @@
+# test/spec/constrain.cml: TLC's state and action constraints.  Two
+# counters rise to N and fall together.  The constrain_*.cml files extend
+# this one with a constraint each; test/spec/constrain.tla is the TLA+
+# twin that spec_calibrate checks them against.
+#
+#   cmc --spec test/spec/constrain.cml
+
+module constrain
+
+const N = 3
+
+var x : 0 .. N
+var y : 0 .. N
+
+init x == 0 and y == 0
+
+action incx:
+  when x < N
+  x' = x + 1
+
+action incy:
+  when y < N
+  y' = y + 1
+
+action drop:
+  when x > 0 and y > 0
+  x' = x - 1
+  y' = y - 1
+
+invariant in_range: x + y <= 2 * N

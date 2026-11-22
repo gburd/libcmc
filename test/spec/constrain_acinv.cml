@@ -1,0 +1,8 @@
+# test/spec/constrain_acinv.cml: constrain_ac.cml with an invariant that
+# only the target of a refused step breaks.  TLC checks the invariants on
+# that state too, so this is a violation in 1 action (incy from 0, 0).
+
+module constrain_acinv
+extends constrain_ac
+
+invariant y_follows: y <= x

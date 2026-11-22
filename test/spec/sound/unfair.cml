@@ -4,4 +4,5 @@ init x == 0
 action go:
   when x == 0
   x' = 1
+deadlock = off
 property progress: eventually x == 1

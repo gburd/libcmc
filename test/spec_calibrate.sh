@@ -20,7 +20,7 @@ if [ ! -x "$java" ] && ! command -v nix >/dev/null; then
 	exit 0
 fi
 
-# row: DIR | CML [--define TAG] | TLA | CFG | want-verdict(PASS|VIOLATION)
+# row: DIR | CML [--define TAG] | TLA | CFG | want-verdict(PASS|VIOLATION|DEADLOCK)
 rows="
 test/spec|counter.cml||counter.tla|counter.cfg|PASS
 test/spec|mutex.cml||mutex.tla|mutex_safe.cfg|PASS
@@ -37,6 +37,16 @@ examples/spec|zab.cml||zab.tla|zab_safe.cfg|PASS
 examples/spec|zab.cml|--define BUG|zab.tla|zab_bug.cfg|VIOLATION
 examples/spec|fastpaxos.cml||fastpaxos.tla|fastpaxos_view.cfg|PASS
 examples/spec|fastpaxos.cml|--define BUG|fastpaxos.tla|fastpaxos_bug.cfg|VIOLATION
+test/spec|deadlock.cml||deadlock.tla|deadlock.cfg|DEADLOCK
+test/spec|deadlock.cml|--no-deadlock|deadlock.tla|deadlock_off.cfg|PASS
+test/spec|deadlock_off.cml||deadlock.tla|deadlock_off.cfg|PASS
+test/spec|deadlock_c.cml||deadlock.tla|deadlock_c.cfg|PASS
+test/spec|deadlock_ac.cml||deadlock.tla|deadlock_ac.cfg|PASS
+test/spec|constrain.cml||constrain.tla|constrain.cfg|PASS
+test/spec|constrain_c.cml||constrain.tla|constrain_c.cfg|PASS
+test/spec|constrain_ac.cml||constrain.tla|constrain_ac.cfg|PASS
+test/spec|constrain_inv.cml||constrain.tla|constrain_inv.cfg|VIOLATION
+test/spec|constrain_acinv.cml||constrain.tla|constrain_acinv.cfg|VIOLATION
 "
 # fastpaxos.tla keeps each round 2 promise's sender, which the .cml
 # counts away; fastpaxos_view.cfg checks it under VIEW Abstract, the
@@ -59,12 +69,20 @@ printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
 	t_distinct=$(num "$to" 'generated, [0-9]+ distinct states found')
 	c_depth=$(num "$co" 'complete state graph search is [0-9]+')
 	t_depth=$(num "$to" 'complete state graph search is [0-9]+')
-	c_viol=$(grep -c 'is violated' "$co")
-	t_viol=$(grep -c 'is violated' "$to")
+	c_viol=$(grep -c 'is violated\|Deadlock reached' "$co")
+	t_viol=$(grep -c 'is violated\|Deadlock reached' "$to")
+	c_dl=$(grep -c 'Deadlock reached' "$co")
+	t_dl=$(grep -c 'Deadlock reached' "$to")
 
 	ok=1
-	if [ "$want" = VIOLATION ]; then
+	if [ "$want" != PASS ]; then
 		[ "$c_viol" -ge 1 ] && [ "$t_viol" -ge 1 ] || ok=0
+		# a deadlock is a deadlock in both, and an invariant an invariant
+		if [ "$want" = DEADLOCK ]; then
+			[ "$c_dl" -ge 1 ] && [ "$t_dl" -ge 1 ] || ok=0
+		else
+			[ "$c_dl" = 0 ] && [ "$t_dl" = 0 ] || ok=0
+		fi
 		# shortest-trace depth: cmc "(K actions)" vs TLC counterexample states
 		c_trace=$(grep -oE 'is \([0-9]+ actions\)' "$co" | grep -oE '[0-9]+')
 		t_trace=$(($(grep -cE '^State [0-9]+:' "$to") - 1))

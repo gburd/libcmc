@@ -319,7 +319,7 @@ n²/2¹²⁹ is printed, as TLC does.
 | `make check-asan` | out-of-bounds access, leaks and undefined behaviour in the abstract checker, over every `.cml` model and soundness probe |
 | planted bugs | `#if` sites in shipped core source; each must be caught with the expected property (`test/toy_gate.sh`, `calib/hc/hc_bug_gate.sh`) |
 | calibration (engine) | the search itself, against TLC: the step-function HC core vs a hand-written `HummingConsensus.tla`, row by row (`calib/hc/calibrate.sh`) |
-| calibration (bridge) | the abstract-model checker against TLC on the *same* model: `cmc --emit-tla FILE.cml` must parse in TLC and give the identical verdict as `cmc --spec`, for safety and for liveness (`test/emit_gate.sh`, `make check-emit-tla`; needs nix) |
+| calibration (bridge) | the abstract-model checker against TLC on the *same* model: `cmc --emit-tla FILE.cml` with the `.cfg` from `cmc --emit-cfg` must parse in TLC and give the identical verdict, distinct states and depth as `cmc --spec`, for safety, deadlock, constraints and liveness (`test/emit_gate.sh`, `make check-emit-tla`; needs nix) |
 
 There are two calibration tracks because there are two things to pin.
 The **engine** track (`calib/hc`) checks that the in-process

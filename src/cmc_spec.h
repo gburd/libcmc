@@ -9,9 +9,11 @@
 #include <stddef.h>
 
 /* Model-check the .cml specification at `path` on its own.  `defs` are
- * the -D tags given (to activate [TAG]-gated actions).  Returns an exit
- * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
-int cmc_spec_main(const char *path, char **defs, int ndefs);
+ * the -D tags given (to activate [TAG]-gated actions); a nonzero
+ * `deadlock_off` turns the deadlock check off, as `deadlock = off` in the
+ * model does.  Returns an exit status: 0 no violation, 1 a violation, 2
+ * incomplete, 3 a model error. */
+int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off);
 
 /* ---- refinement support (Milestone C) ------------------------------
  * The refinement checker runs an implementation and, at each reached
@@ -58,7 +60,10 @@ int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errc
 void cmc_refine_reset(void);
 
 /* Milestone D: translate the .cml spec to TLA+ on stdout (for TLC,
- * Apalache, TLAPS).  Returns 0 ok, 3 on a model error. */
-int cmc_emit_tla(const char *path, char **defs, int ndefs);
+ * Apalache, TLAPS), and write the TLC .cfg that goes with it.
+ * `deadlock_off` as for cmc_spec_main().  Return 0 ok, 3 on a model
+ * error. */
+int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off);
+int cmc_emit_cfg(const char *path, char **defs, int ndefs, int deadlock_off);
 
 #endif

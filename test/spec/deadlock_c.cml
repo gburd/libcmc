@@ -1,0 +1,8 @@
+# test/spec/deadlock_c.cml: deadlock.cml under a state constraint.  The
+# states with x = N fail it, so they are not expanded and their missing
+# successors are no deadlock, as in TLC.
+
+module deadlock_c
+extends deadlock
+
+constraint below: x < N

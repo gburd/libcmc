@@ -1,0 +1,8 @@
+# test/spec/constrain_ac.cml: constrain.cml under an action constraint
+# over primed and unprimed variables.  A step that would put y above x
+# is not taken, as TLC's ACTION_CONSTRAINT.
+
+module constrain_ac
+extends constrain
+
+action_constraint follow: y' <= x' or y' < y

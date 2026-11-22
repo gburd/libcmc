@@ -1,0 +1,8 @@
+# test/spec/constrain_c.cml: constrain.cml under a state constraint.  A
+# state with x + y > 2 is reached and checked against the invariants, but
+# is not counted or expanded, as TLC's CONSTRAINT.
+
+module constrain_c
+extends constrain
+
+constraint low: x + y <= 2

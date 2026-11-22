@@ -101,6 +101,9 @@ static struct {
 	char symmetry[SP_EXPR]; int has_sym;	/* a set of interchangeable values */
 	SpProp prop[SP_MAXINV]; int nprop;	/* liveness properties */
 	int fair_weak;						/* all actions weakly fair */
+	int deadlock_off;					/* `deadlock = off`: no deadlock check */
+	SpInv con[SP_MAXINV]; int ncon;		/* state constraints (TLC's CONSTRAINT) */
+	SpInv acon[SP_MAXINV]; int nacon;	/* action constraints (ACTION_CONSTRAINT) */
 } S;
 
 #include "cmc_spec.h"
@@ -108,6 +111,7 @@ static struct {
 /* ---- evaluation context: constants + variable values + bound params - */
 typedef struct {
 	const Value *var;			/* current value of each variable, by index */
+	const Value *nxt;			/* an action constraint: the successor's values, read as x' */
 	char pname[SP_MAXPARAM][SP_NAME]; long pval[SP_MAXPARAM]; int np;	/* bound params */
 	const CmcObs *obs;			/* refinement: observable accessor, or NULL */
 	const int *assigned;			/* init: which vars are set so far, or NULL (all) */
@@ -286,12 +290,16 @@ static Value sp_atom(Pst *s){
 	 * variable has no next-state value here: guards, right-hand sides and
 	 * invariants are all evaluated against the current state, so reading
 	 * x' as x would silently change the spec's meaning (and the emitted
-	 * TLA+ keeps the prime).  Refuse it. */
-	if(*s->p=='\''){ fail(s,"a primed variable can only be assigned (x' = E), not read"); return z; }
-	int vi=var_index(id);
+	 * TLA+ keeps the prime).  Refuse it, except in an action constraint,
+	 * which is evaluated over a step and reads x' from the successor. */
+	int vi=var_index(id), primed=0;
+	if(*s->p=='\''){
+		if(!s->env->nxt || vi<0){ fail(s,"a primed variable can only be assigned (x' = E), not read"); return z; }
+		s->p++; primed=1;
+	}
 	if(vi>=0){
 		if(s->env->assigned && !s->env->assigned[vi]){ fail(s,"init reads a variable before assigning it"); return z; }
-		Value base = s->env->var[vi];
+		Value base = primed ? s->env->nxt[vi] : s->env->var[vi];
 		sp_skip(s);
 		if(*s->p=='['){ s->p++; Value kk=sp_or(s); if(!s->ok || !need(s,&kk,T_INT,"a function key")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ] in application"); return z; } s->p++;
 			if(base.tag!=T_FUN){ efail(s,"applied a non-function"); return z; }
@@ -487,6 +495,7 @@ static int fits(char *dst, size_t cap, const char *src, const char *path, int ln
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
 	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0; S.nprop=0; S.fair_weak=0;
+	S.deadlock_off=0; S.ncon=S.nacon=0;
 	g_symok=0;	/* no symmetry carries over from a previously loaded spec */
 	if(sp_load_into(path)) return -1;
 	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
@@ -587,6 +596,24 @@ static int sp_load_into(const char *path){
 			in_action=1; continue;
 		}
 		if(!strncmp(s,"when ",5)){ if(!cur){ fprintf(stderr,"cmc: %s:%d: when outside action\n",path,ln); goto bad; } CPY(cur->guard,sp_trim(s+5),"guard"); continue; }
+		if(!strncmp(s,"deadlock",8) && (s[8]==' '||s[8]=='=')){
+			char *v=sp_trim(s+8);
+			if(*v!='='){ fprintf(stderr,"cmc: %s:%d: deadlock needs = on or = off\n",path,ln); goto bad; }
+			v=sp_trim(v+1);
+			if(!strcmp(v,"off")) S.deadlock_off=1;
+			else if(!strcmp(v,"on")) S.deadlock_off=0;
+			else { fprintf(stderr,"cmc: %s:%d: deadlock is on or off, not %s\n",path,ln,v); goto bad; }
+			in_action=0; continue;
+		}
+		if(!strncmp(s,"constraint ",11) || !strncmp(s,"action_constraint ",18)){
+			int act=s[0]=='a'; const char *kw=act?"action_constraint":"constraint";
+			SpInv *tab=act?S.acon:S.con; int *n=act?&S.nacon:&S.ncon;
+			char *rest=sp_trim(s+strlen(kw)); char *col=strchr(rest,':');
+			if(!col){ fprintf(stderr,"cmc: %s:%d: %s needs name:\n",path,ln,kw); goto bad; }
+			*col=0; if(*n>=SP_MAXINV){ fprintf(stderr,"cmc: too many %ss\n",kw); goto bad; }
+			CPY(tab[*n].name,sp_trim(rest),"constraint name"); CPY(tab[*n].expr,sp_trim(col+1),"constraint"); (*n)++;
+			in_action=0; continue;
+		}
 		if(!strncmp(s,"invariant",9)){
 			char *rest=sp_trim(s+9); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: invariant needs name:\n",path,ln); goto bad; }
 			*col=0; if(S.ninv>=SP_MAXINV){ fprintf(stderr,"cmc: too many invariants\n"); goto bad; }
@@ -876,6 +903,53 @@ static int seen_insert(const State *st){
 
 typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
 
+/* Is the step from `from` to `to` inside the model, as TLC's CONSTRAINT
+ * and ACTION_CONSTRAINT decide it?  Every state constraint must hold in
+ * `to`, and, unless `from` is NULL (an initial state), every action
+ * constraint over the pair, with x' read from `to`.  Sets *in; returns
+ * 0, or -1 on an evaluation error (message in err). */
+static int sp_in_model(const State *from, const State *to, int *in, char *err, size_t errcap){
+	Env env; memset(&env,0,sizeof env);
+	*in=1;
+	env.var=to->v;
+	for(int i=0;i<S.ncon && *in;i++)
+		if(!sp_eval_bool(S.con[i].expr,&env,in,"a constraint",err,errcap)) return -1;
+	if(!from) return 0;
+	env.var=from->v; env.nxt=to->v;
+	for(int i=0;i<S.nacon && *in;i++)
+		if(!sp_eval_bool(S.acon[i].expr,&env,in,"an action constraint",err,errcap)) return -1;
+	return 0;
+}
+
+/* Print the shortest behaviour from the initial state to `cur` and the
+ * variable values there, after the caller's "Error: ..." line. */
+static void print_trace(const QN *cur){
+	int cn=0; for(const QN *x=cur; x; x=x->prev) cn++;
+	printf("Error: The behavior up to this point is (%d actions):\n", cn-1);
+	const char **steps = malloc((size_t)cn * sizeof *steps); int si=0;
+	if(!steps){ fprintf(stderr,"cmc: out of memory\n"); exit(1); }
+	for(const QN *x=cur; x; x=x->prev) steps[si++]=x->step;
+	for(int i=cn-2;i>=0;i--) printf("    %d. %s\n", cn-1-i, steps[i]);
+	free(steps);
+	printf("  state:");
+	for(int vi=0;vi<S.nvar;vi++){ const Value *v=&cur->st.v[vi]; printf(" %s=",S.var[vi].name);
+		if(v->tag==T_FUN){ printf("["); for(int j=0;j<v->n;j++) printf("%s%ld:%ld",j?",":"",v->k[j],v->v[j]); printf("]"); }
+		else printf("%ld",v->i); }
+	printf("\n");
+}
+
+/* Check the invariants in the state of `x`, newly generated, and report
+ * a violation.  Returns 0 if they hold, else the exit status (1 or 3). */
+static int check_new(const QN *x){
+	char err[256];
+	int bad=sp_check(&x->st,err,sizeof err);
+	if(bad==-2){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); return 3; }
+	if(bad<0) return 0;
+	printf("Error: Invariant %s is violated.\n", S.inv[bad].name);
+	print_trace(x);
+	return 1;
+}
+
 /* =====================================================================
  * liveness (Milestone F): temporal properties on the abstract model,
  * with TLA+'s meaning for Spec == Init /\ [][Next]_vars /\ Fairness.
@@ -1105,10 +1179,13 @@ static int set_defines(char **defs, int ndefs){
 	return 0;
 }
 
-int cmc_spec_main(const char *path, char **defs, int ndefs){
+int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off){
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
 	char err[256];
 	if(sym_init(err,sizeof err)){ fprintf(stderr,"cmc: %s: %s\n",path,err); return 3; }
+	/* the liveness graph (lv_build) knows no constraints; TLC's meaning
+	 * for a property under a constraint is not modelled, so refuse it */
+	if(S.nprop && (S.ncon || S.nacon)){ fprintf(stderr,"cmc: %s: a liveness property cannot be checked under a constraint or an action constraint\n",path); return 3; }
 	/* parse-check every invariant and guard once (over the init state) */
 	State init; if(sp_init_state(&init,err,sizeof err)){ fprintf(stderr,"cmc: %s: init: %s\n",path,err); return 3; }
 
@@ -1121,51 +1198,55 @@ int cmc_spec_main(const char *path, char **defs, int ndefs){
 	size_t qcap = 1024, qh = 0, qt = 0;
 	QN **q = malloc(qcap * sizeof *q);
 	if (!q) { fprintf(stderr, "cmc: out of memory\n"); return 1; }
-	seen_insert(&init);
-	QN *root = calloc(1, sizeof *root); root->st=init; root->prev=NULL; root->step[0]=0; root->depth=0;
-	q[qt++] = root;
-	size_t distinct=1, generated=1; int maxdepth=0;
+	QN *root = calloc(1, sizeof *root);
+	if(!root){ fprintf(stderr, "cmc: out of memory\n"); free(q); return 1; }
+	root->st=init; root->prev=NULL; root->step[0]=0; root->depth=0;
+	size_t distinct=0, generated=1; int maxdepth=0;
 	int SUCCAP = 4096; State *succ = malloc((size_t)SUCCAP * sizeof *succ);
-	if (!succ) { fprintf(stderr, "cmc: out of memory\n"); free(q); return 1; }
+	if (!succ) { fprintf(stderr, "cmc: out of memory\n"); free(q); free(root); return 1; }
 
 	printf("cmc: spec %s, %d variable%s, %d action%s, breadth-first\n", S.modname, S.nvar, S.nvar==1?"":"s", S.nact, S.nact==1?"":"s");
 
-	int ret = 0;
-	while(qh<qt){
+	/* As TLC: a state's invariants are checked when it is generated, and
+	 * only a state inside the model (its constraints hold, and the action
+	 * constraints on the step that reached it) is counted, kept and
+	 * expanded.  A state outside the model is still checked.  So a state
+	 * that one step reaches outside the model and another inside is
+	 * counted once, through the second. */
+	int ret = check_new(root), in = 1;
+	if(!ret && sp_in_model(NULL,&init,&in,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); ret=3; }
+	if(!ret && in){ seen_insert(&init); q[qt++]=root; distinct=1; }
+	else free(root);
+	while(qh<qt && !ret){
 		QN *cur=q[qh];
-		int bad=sp_check(&cur->st,err,sizeof err);
-		if(bad==-2){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); ret=3; break; }
-		if(bad>=0){
-			printf("Error: Invariant %s is violated.\n", S.inv[bad].name);
-			/* reconstruct the shortest path root..cur */
-			int cn=0; for(QN *x=cur; x; x=x->prev) cn++;
-			printf("Error: The behavior up to this point is (%d actions):\n", cn-1);
-			char **steps = malloc((size_t)cn * sizeof *steps); int si=0;
-			for(QN *x=cur; x; x=x->prev) steps[si++]=x->step;
-			for(int i=cn-2;i>=0;i--) printf("    %d. %s\n", cn-1-i, steps[i]);
-			free(steps);
-			/* the variable values at the failing state */
-			printf("  state:");
-			for(int vi=0;vi<S.nvar;vi++){ const Value *v=&cur->st.v[vi]; printf(" %s=",S.var[vi].name);
-				if(v->tag==T_FUN){ printf("["); for(int j=0;j<v->n;j++) printf("%s%ld:%ld",j?",":"",v->k[j],v->v[j]); printf("]"); }
-				else printf("%ld",v->i); }
-			printf("\n");
-			ret=1; break;
-		}
 		if(cur->depth>maxdepth) maxdepth=cur->depth;
+		/* A state with no successor at all deadlocks.  A step that changes
+		 * nothing is a successor, and so is one outside the model. */
+		int nsucc=0;
 		for(int ai=0; ai<S.nact && !ret; ai++){
 			if(!act_active(&S.act[ai])) continue;
 			int ns=0; int rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
 			bind_params(&S.act[ai],&env,0,&cur->st,succ,&ns,SUCCAP,err,sizeof err,&rc);
 			if(rc<0){ fprintf(stderr,"cmc: action %s: %s\n",S.act[ai].name,err); ret=3; break; }
-			for(int k=0;k<ns;k++){
+			nsucc+=ns;
+			for(int k=0;k<ns && !ret;k++){
 				generated++;
-				if(!seen_insert(&succ[k])) continue;
+				if(sp_in_model(&cur->st,&succ[k],&in,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); ret=3; break; }
+				if(in && !seen_insert(&succ[k])) continue;
 				if(seen_n>=SP_MAXSTATES){ printf("INCOMPLETE: more than %d states\n",SP_MAXSTATES); ret=2; break; }
-				if(qt>=qcap){ qcap*=2; QN **nq=realloc(q,qcap*sizeof *q); if(!nq){ fprintf(stderr,"cmc: out of memory\n"); ret=1; break; } q=nq; }
-				QN *nn=calloc(1,sizeof *nn); nn->st=succ[k]; nn->prev=cur; snprintf(nn->step,sizeof nn->step,"%s",S.act[ai].name); nn->depth=cur->depth+1;
+				QN *nn=calloc(1,sizeof *nn);
+				if(!nn){ fprintf(stderr,"cmc: out of memory\n"); ret=1; break; }
+				nn->st=succ[k]; nn->prev=cur; snprintf(nn->step,sizeof nn->step,"%s",S.act[ai].name); nn->depth=cur->depth+1;
+				ret=check_new(nn);
+				if(!in || ret){ free(nn); continue; }
+				if(qt>=qcap){ qcap*=2; QN **nq=realloc(q,qcap*sizeof *q); if(!nq){ fprintf(stderr,"cmc: out of memory\n"); free(nn); ret=1; break; } q=nq; }
 				q[qt++]=nn; distinct++;
 			}
+		}
+		if(!ret && nsucc==0 && !(S.deadlock_off || deadlock_off)){
+			printf("Error: Deadlock reached.\n");
+			print_trace(cur);
+			ret=1;
 		}
 		qh++;
 	}
@@ -1200,8 +1281,11 @@ static struct { char var[SP_NAME]; char idx[SP_NAME]; char expr[SP_EXPR]; } B_ma
 static int B_nmap;
 
 int cmc_refine_load_spec(const char *path, char **defs, int ndefs){
-	if(set_defines(defs,ndefs)) return -1;
-	return sp_load(path);
+	if(set_defines(defs,ndefs) || sp_load(path)) return -1;
+	/* a constraint narrows TLC's search, not the spec; refinement against
+	 * the narrowed model is not modelled */
+	if(S.ncon || S.nacon){ fprintf(stderr,"cmc: %s: refinement against a spec with a constraint or an action constraint is not supported\n",path); return -1; }
+	return 0;
 }
 
 /* The binding file: [fields] name = byte offset, then [map] VAR = "EXPR"
@@ -1470,7 +1554,7 @@ static void tla_expr_fixup(const char *e, FILE *o){
 	}
 }
 
-int cmc_emit_tla(const char *path, char **defs, int ndefs){
+int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
 	FILE *o=stdout;
 	fprintf(o,"---- MODULE %s ----\n",S.modname);
@@ -1478,8 +1562,14 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs){
 	fprintf(o,"\\* Apalache or TLAPS; a .cfg binds the constants for TLC.  The\n");
 	fprintf(o,"\\* @type annotations and the CInit operator let Apalache check it\n");
 	fprintf(o,"\\* directly: apalache-mc check --cinit=CInit --inv=INV MODULE.tla\n");
-	fprintf(o,"\\* (add --no-deadlock, as TLC's CHECK_DEADLOCK FALSE, since a\n");
-	fprintf(o,"\\* terminal state is not a safety fault for these models).\n");
+	if(S.deadlock_off || deadlock_off){
+		fprintf(o,"\\* The deadlock check is off for this model, so add --no-deadlock,\n");
+		fprintf(o,"\\* as the .cfg's CHECK_DEADLOCK FALSE does for TLC.\n");
+	}
+	if(S.ncon || S.nacon){
+		fprintf(o,"\\* Its CONSTRAINT and ACTION_CONSTRAINT operators bound TLC's search\n");
+		fprintf(o,"\\* (cmc --emit-cfg names them); Apalache does not apply them.\n");
+	}
 	fprintf(o,"EXTENDS Naturals, FiniteSets\n\n");
 	/* constants, each with an Apalache @type (all our constants are Int) */
 	if(S.ncst){ fprintf(o,"CONSTANTS\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  \\* @type: Int;\n  %s%s\n",S.cst[i].name,i+1<S.ncst?",":""); }
@@ -1510,17 +1600,36 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs){
 		fprintf(o,"\n");
 	}
 	/* Next = disjunction of actions */
-	fprintf(o,"Next ==\n"); { int any=0; for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o,"  \\/ %s\n",S.act[a].name); any=1; } if(!any) fprintf(o,"  UNCHANGED vars\n"); } fprintf(o,"\n");
+	fprintf(o,"Next ==\n"); { int any=0; for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o,"  \\/ %s\n",S.act[a].name); any=1; } if(!any) fprintf(o,"  FALSE\n"); } fprintf(o,"\n");
 	fprintf(o,"Spec == Init /\\ [][Next]_vars");
 	if(S.fair_weak){ for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o," /\\ WF_vars(%s)",S.act[a].name); } }
 	fprintf(o,"\n\n");
 	/* invariants */
 	for(int i=0;i<S.ninv;i++){ fprintf(o,"%s ==\n  ",S.inv[i].name); tla_expr_fixup(S.inv[i].expr,o); fprintf(o,"\n"); }
+	/* state and action constraints, as TLC's CONSTRAINT and ACTION_CONSTRAINT */
+	for(int i=0;i<S.ncon;i++){ fprintf(o,"%s ==\n  ",S.con[i].name); tla_expr_fixup(S.con[i].expr,o); fprintf(o,"\n"); }
+	for(int i=0;i<S.nacon;i++){ fprintf(o,"%s ==\n  ",S.acon[i].name); tla_expr_fixup(S.acon[i].expr,o); fprintf(o,"\n"); }
 	/* liveness properties */
 	for(int i=0;i<S.nprop;i++){ SpProp *P=&S.prop[i]; fprintf(o,"%s ==\n  ",P->name);
 		if(P->kind==0){ fprintf(o,"<>("); tla_expr_fixup(P->a,o); fprintf(o,")"); }
 		else { fprintf(o,"("); tla_expr_fixup(P->a,o); fprintf(o,") ~> ("); tla_expr_fixup(P->b,o); fprintf(o,")"); }
 		fprintf(o,"\n"); }
 	fprintf(o,"====\n");
+	return 0;
+}
+
+/* Write the TLC configuration for the module cmc_emit_tla() writes: the
+ * constants at their .cml values, every invariant, property, state and
+ * action constraint by name, and CHECK_DEADLOCK FALSE when the deadlock
+ * check is off.  Returns 0 ok, 3 on a model error. */
+int cmc_emit_cfg(const char *path, char **defs, int ndefs, int deadlock_off){
+	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
+	printf("SPECIFICATION Spec\n");
+	for(int i=0;i<S.ncst;i++) printf("CONSTANT %s = %ld\n",S.cst[i].name,S.cst[i].val);
+	for(int i=0;i<S.ninv;i++) printf("INVARIANT %s\n",S.inv[i].name);
+	for(int i=0;i<S.nprop;i++) printf("PROPERTY %s\n",S.prop[i].name);
+	for(int i=0;i<S.ncon;i++) printf("CONSTRAINT %s\n",S.con[i].name);
+	for(int i=0;i<S.nacon;i++) printf("ACTION_CONSTRAINT %s\n",S.acon[i].name);
+	if(S.deadlock_off || deadlock_off) printf("CHECK_DEADLOCK FALSE\n");
 	return 0;
 }

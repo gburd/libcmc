@@ -143,12 +143,65 @@ expect "a symmetric scalar keeps the verdict"  0 "No error has been found" --spe
 # a symmetry declaration of one value, or one that is not a set, is no
 # reduction: the search is the full one
 printf 'module sym1\nsymmetry {1}\nvar x : 0 .. 1\ninit x == 0\naction a:\n  when x == 0\n  x%s = 1\ninvariant ok: TRUE\n' "'" > "$OUT/sym1.cml"
-expect "a one-value symmetry set reduces nothing" 0 "2 distinct states found" --spec "$OUT/sym1.cml"
+expect "a one-value symmetry set reduces nothing" 0 "2 distinct states found" --spec "$OUT/sym1.cml" --no-deadlock
 # a declaration it cannot use is an error, not a search without it
 for sym in "x" "1 .. 9" "{1, y}"; do
 	printf 'module s\nsymmetry %s\nvar x : 0 .. 1\ninit x == 0\ninvariant ok: TRUE\n' "$sym" > "$OUT/symbad.cml"
 	expect "symmetry $sym is an error" 3 "symmetry $sym:" --spec "$OUT/symbad.cml"
 done
+
+echo "-- TLC's checking options: deadlock, CONSTRAINT, ACTION_CONSTRAINT"
+# The counts are single-worker TLC's on test/spec/deadlock.tla and
+# constrain.tla (check-spec-calibration re-verifies them).  A state with
+# no successor deadlocks; a step that changes nothing is a successor
+# (deadlock.cml's idle), and so is a step outside the model.
+T=$HERE/test/spec
+expect "deadlock: a state with no action deadlocks"  1 "Error: Deadlock reached." --spec "$T/deadlock.cml"
+expect "deadlock: the shortest trace is 3 actions"   1 "is (3 actions)" --spec "$T/deadlock.cml"
+expect "deadlock: --no-deadlock turns it off"        0 "8 distinct states found" --spec "$T/deadlock.cml" --no-deadlock
+expect "deadlock: deadlock = off turns it off"       0 "8 distinct states found" --spec "$T/deadlock_off.cml"
+expect "deadlock: depth matches TLC (5)"             0 "complete state graph search is 5" --spec "$T/deadlock_off.cml"
+expect "deadlock: an unexpanded state does not deadlock" 0 "6 distinct states found" --spec "$T/deadlock_c.cml"
+expect "deadlock: a refused step is still a successor" 0 "6 distinct states found" --spec "$T/deadlock_ac.cml"
+printf 'module m\nvar x : 0 .. 1\ninit x == 0\ninvariant i: x == 1\n' > "$OUT/dlinv.cml"
+expect "deadlock: an invariant before a deadlock at the init" 1 "Invariant i is violated" --spec "$OUT/dlinv.cml"
+expect "deadlock: an invariant generated first is reported first" 1 "not_three is violated" --spec "$T/dlorder.cml"
+expect "deadlock: in 2 actions, as TLC"              1 "is (2 actions)" --spec "$T/dlorder.cml"
+printf 'module m\nvar x : 0 .. 1\ninit x == 0\ndeadlock = off\ndeadlock = on\ninvariant i: TRUE\n' > "$OUT/dlon.cml"
+expect "deadlock = on after off turns it back on"    1 "Deadlock reached" --spec "$OUT/dlon.cml"
+expect "constraint: none"                            0 "16 distinct states found" --spec "$T/constrain.cml"
+expect "constraint: failing states are not counted"  0 "6 distinct states found" --spec "$T/constrain_c.cml"
+expect "constraint: depth matches TLC (3)"           0 "complete state graph search is 3" --spec "$T/constrain_c.cml"
+expect "constraint: invariants hold on a dropped state" 1 "not_three is violated" --spec "$T/constrain_inv.cml"
+expect "constraint: that trace is 3 actions"         1 "is (3 actions)" --spec "$T/constrain_inv.cml"
+expect "action constraint: refused steps are not taken" 0 "10 distinct states found" --spec "$T/constrain_ac.cml"
+expect "action constraint: depth matches TLC (7)"    0 "complete state graph search is 7" --spec "$T/constrain_ac.cml"
+expect "action constraint: invariants hold on a refused target" 1 "is (1 actions)" --spec "$T/constrain_acinv.cml"
+printf 'module m\nvar x : 0 .. 1\ninit x == 1\nconstraint c: x == 0\ninvariant i: TRUE\n' > "$OUT/cinit.cml"
+expect "constraint: an initial state outside it is not counted" 0 "0 distinct states found" --spec "$OUT/cinit.cml"
+printf 'module m\nvar x : 0 .. 1\ninit x == 1\nconstraint c: x == 0\ninvariant i: x == 0\n' > "$OUT/cinit.cml"
+expect "constraint: an initial state outside it is still checked" 1 "Invariant i is violated" --spec "$OUT/cinit.cml"
+expect "emit-tla: the constraint operators"          0 "y. <= x. \\\\/ y. < y" --emit-tla "$T/constrain_ac.cml"
+expect "emit-cfg: CONSTRAINT"                        0 "CONSTRAINT low" --emit-cfg "$T/constrain_c.cml"
+expect "emit-cfg: ACTION_CONSTRAINT"                 0 "ACTION_CONSTRAINT follow" --emit-cfg "$T/constrain_ac.cml"
+expect "emit-cfg: deadlock = off"                    0 "CHECK_DEADLOCK FALSE" --emit-cfg "$T/deadlock_off.cml"
+expect "emit-cfg: --no-deadlock"                     0 "CHECK_DEADLOCK FALSE" --emit-cfg "$T/deadlock.cml" --no-deadlock
+expect "emit-tla: the header names --no-deadlock when it is off" 0 "add --no-deadlock" --emit-tla "$T/deadlock_off.cml"
+# refused: a constraint the checker cannot apply is an error, not a pass
+cbad() {	# cbad DESC NEEDLE BODY: a spec of module m with BODY is refused
+	printf 'module m\nvar x : 0 .. 1\ninit x == 0\naction a:\n  when x == 0\n  x%s = 1\n%b\n' "'" "$3" > "$OUT/cbad.cml"
+	expect "$1" 3 "$2" --spec "$OUT/cbad.cml"
+}
+cbad "a primed variable in a state constraint" "primed variable" "constraint c: x' == 0\ninvariant i: TRUE"
+cbad "a primed non-variable in an action constraint" "primed variable" "action_constraint c: N' == 0\ninvariant i: TRUE"
+cbad "a non-boolean constraint"            "expected a boolean in a constraint" "constraint c: x\ninvariant i: TRUE"
+cbad "a non-boolean action constraint"     "expected a boolean in an action constraint" "action_constraint c: x'\ninvariant i: TRUE"
+cbad "a constraint with no name"           "constraint needs name:" "constraint x == 0\ninvariant i: TRUE"
+cbad "a deadlock line without ="           "deadlock needs = on or = off" "deadlock off\ninvariant i: TRUE"
+cbad "a deadlock value that is not on or off" "deadlock is on or off, not no" "deadlock = no\ninvariant i: TRUE"
+cbad "a property under a constraint"       "cannot be checked under a constraint" "constraint c: TRUE\nproperty p: eventually x == 1"
+cbad "a property under an action constraint" "cannot be checked under a constraint" "action_constraint c: TRUE\nproperty p: eventually x == 1"
+cbad "too many constraints" "too many constraints" "$(i=0; while [ $i -lt 17 ]; do printf 'constraint c%d: TRUE\\n' $i; i=$((i + 1)); done)invariant i: TRUE"
 
 echo "-- liveness: temporal properties under weak fairness"
 # the ticker must eventually reach its max under weak fairness (holds);
@@ -185,7 +238,8 @@ printf 'module ex\nvar f : [0 .. 1 -> 0 .. 1]\nvar g : [0 .. 1 -> 0 .. 1]\ninit 
 expect "emit-tla: an except keyed by an application" 0 "EXCEPT !\[g\[i\]\] =  1 - f\[i\] \]" --emit-tla "$OUT/ex.cml"
 expect "emit-tla: fairness skips a gated action"     0 "Spec == Init /. \[\]\[Next\]_vars /. WF_vars(set)$" --emit-tla "$OUT/ex.cml"
 printf 'module bare\nvar x : 0 .. 1\ninit x == 0\ninvariant ok: x == 0\n' > "$OUT/bare.cml"
-expect "emit-tla: no constants and no actions" 0 "UNCHANGED vars" --emit-tla "$OUT/bare.cml"
+# with no action, Next is FALSE, so TLC finds the deadlock cmc --spec finds
+expect "emit-tla: no constants and no actions" 0 "^  FALSE$" --emit-tla "$OUT/bare.cml"
 # every operator inside a count body is translated (emit_gate runs TLC on it)
 expect "countops: the operators in a count body"   0 "5 distinct states found" --spec "$HERE/test/spec/countops.cml"
 expect "emit-tla: not, in, some and all in a count body" 0 "~ (j .in {})" --emit-tla "$HERE/test/spec/countops.cml"
@@ -310,8 +364,8 @@ typed "an unknown name with an underscore" "unknown identifier" "x_ == 0"
 # the values the evaluator computes, each pinned by the verdict it gives
 value() {	# value DESC WANT EXPR: invariant EXPR holds (0) or is violated (1)
 	printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\nvar g : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> i] and g == [i in 0 .. 1 -> 0]\ninvariant i: %s\n' "$3" > "$OUT/value.cml"
-	if [ "$2" = 0 ]; then expect "$1" 0 "No error has been found" --spec "$OUT/value.cml"
-	else expect "$1" 1 "Invariant i is violated" --spec "$OUT/value.cml"; fi
+	if [ "$2" = 0 ]; then expect "$1" 0 "No error has been found" --spec "$OUT/value.cml" --no-deadlock
+	else expect "$1" 1 "Invariant i is violated" --spec "$OUT/value.cml" --no-deadlock; fi
 }
 value "division truncates"          0 "7 / 2 == 3 and 7 mod 2 == 1 and 2 * 3 - 1 == 5"
 value "sets compare by members"     0 "{1, 0, 1} == {0, 1} and {0} != {1} and {} == {}"
@@ -347,7 +401,7 @@ value "and skips an overflow in -" 0 "FALSE and (0 - 9223372036854775807) - 2 ==
 value "and skips a two-key except" 0 "FALSE and [f except [0] = 1, [1] = 1] == f or TRUE"
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
-expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml"
+expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml" --no-deadlock
 
 # every line the loader cannot use is refused with its reason, never
 # skipped: a skipped `when` or invariant would check a different model
@@ -402,7 +456,7 @@ bad "a function range with a broken bound" "unknown identifier"            "var 
 bad "a function domain that fails"      "unknown identifier"               "var f : [0 .. y -> 0 .. 1]\ninit f == [i in 0 .. 1 -> 0]\ninvariant i: TRUE"
 bad "a function on other keys"          "f is not a function on 0 .. 1"    "var f : [0 .. 1 -> 0 .. 1]\ninit f == [i in 1 .. 2 -> 0]\ninvariant i: TRUE"
 printf 'module sd\nvar x : {0, 2}\ninit x == 0\naction a:\n  when x == 0\n  x%s = 2\ninvariant i: x != 1\n' "'" > "$OUT/sd.cml"
-expect "a set domain holds its members"  0 "2 distinct states found" --spec "$OUT/sd.cml"
+expect "a set domain holds its members"  0 "2 distinct states found" --spec "$OUT/sd.cml" --no-deadlock
 bad "a parameter that redeclares a var" "parameter x redeclares"           "$V\naction a(x in 0 .. 1):\n  x' = 1\n$I"
 bad "a parameter domain that is not a set" "param domain: expected a set" "$V\naction a(i in x):\n  x' = 1\n$I"
 bad "a parameter domain that fails"     "param domain"                     "$V\naction a(i in 0 .. y):\n  x' = 1\n$I"
@@ -469,11 +523,11 @@ set --
 # and an absolute path
 printf 'module base\nvar x : 0 .. 1\ninit x == 0\n' > "$OUT/base.cml"
 printf 'module top\nextends base\ninvariant i: x == 0\n' > "$OUT/top.cml"
-expect "extends finds the base beside the file" 0 "1 distinct states found" --spec "$OUT/top.cml"
+expect "extends finds the base beside the file" 0 "1 distinct states found" --spec "$OUT/top.cml" --no-deadlock
 printf 'module top\nimport %s\ninvariant i: x == 0\n' "$OUT/base.cml" > "$OUT/top.cml"
-expect "import takes an absolute path"         0 "1 distinct states found" --spec "$OUT/top.cml"
+expect "import takes an absolute path"         0 "1 distinct states found" --spec "$OUT/top.cml" --no-deadlock
 printf 'module top\nextends base.cml\ninvariant i: x == 0\n' > "$OUT/top.cml"
-if (cd "$OUT" && "$CMC" --spec top.cml > "$OUT/rel.txt" 2>&1) && grep -q "1 distinct" "$OUT/rel.txt"; then
+if (cd "$OUT" && "$CMC" --spec top.cml --no-deadlock > "$OUT/rel.txt" 2>&1) && grep -q "1 distinct" "$OUT/rel.txt"; then
 	echo "ok   a spec named without a directory extends from ."
 else
 	echo "FAIL a spec named without a directory extends from ."; fail=1
@@ -496,6 +550,11 @@ expectp "C2: an observation outside init is rejected" 1 "rejected at step 0" "$R
 expectp "C2: a behaviour from init is accepted"       0 "accepted 3"         "$RD" "$S/c2init.cml" "$S/scalar.bind" 0 1 2
 # 1.2: a [TAG] action that is not --define'd is not a step
 expectp "C2: a disabled [BUG] action is not a step"    1 "rejected at step 1" "$RD" "$S/c2gate.cml" "$S/scalar.bind" 0 2
+# a constraint narrows TLC's search, not the spec, so refinement against
+# a spec that has one is refused rather than checked against a narrower
+# model
+{ cat "$S/c2init.cml"; printf 'constraint c: x < 2\n'; } > "$OUT/c2con.cml"
+expectp "refinement under a constraint is refused" 3 "not supported" "$RD" "$OUT/c2con.cml" "$S/scalar.bind" 0
 # a binding is read whole: a line it cannot use is an error, never
 # skipped, since a second binding of x that hid the first accepted the
 # forbidden step 0 -> 2

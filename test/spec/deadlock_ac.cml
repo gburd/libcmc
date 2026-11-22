@@ -1,0 +1,8 @@
+# test/spec/deadlock_ac.cml: deadlock.cml under an action constraint
+# that forbids every step into x = N.  At x = N-1, y = 1 the only step
+# is refused, yet the state has a successor and TLC reports no deadlock.
+
+module deadlock_ac
+extends deadlock
+
+action_constraint no_top: x' < N

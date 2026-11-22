@@ -11,87 +11,106 @@ OUT=${CMC_SCRATCH:-$HOME/tmp/cmc-build}/emit-gate
 mkdir -p "$OUT"
 fail=0
 
-# row: DIR | CML | MODULE | CFGLINE (TLC constants) | INV | want | define
-rows="
-test/spec|counter|counter|CONSTANT N = 3|in_range|PASS|
-examples/spec|paxos|paxos|CONSTANTS V = 2  A = 3  B = 2  Q = 2|agreement|PASS|
-examples/spec|paxos|paxos|CONSTANTS V = 2  A = 3  B = 2  Q = 2|agreement|VIOLATION|--define BUG
-examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|PASS|
-examples/spec|raft|raft|CONSTANTS S = 3  Q = 2|election_safety|VIOLATION|--define BUG
-examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|PASS|
-examples/spec|hc|hc|CONSTANTS V = 2  P = 3  Q = 2|agreement|VIOLATION|--define BUG
-examples/spec|zab|zab|CONSTANTS S = 3  E = 2  Q = 2  K = 3|committed_prefix initial_history|PASS|
-examples/spec|zab|zab|CONSTANTS S = 3  E = 2  Q = 2  K = 3|committed_prefix initial_history|VIOLATION|--define BUG
-examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 4  B = 2  Q1 = 3  Q2 = 2  Q1BUG = 2|agreement|PASS|
-examples/spec|fpaxos|fpaxos|CONSTANTS V = 2  A = 4  B = 2  Q1 = 3  Q2 = 2  Q1BUG = 2|agreement|VIOLATION|--define BUG
-examples/spec|caspaxos|caspaxos|CONSTANTS A = 3  B = 2  Q = 2|descends|PASS|
-examples/spec|caspaxos|caspaxos|CONSTANTS A = 3  B = 2  Q = 2|descends|VIOLATION|--define BUG
-examples/spec|twophase|twophase|CONSTANT N = 3|consistency|PASS|
-examples/spec|twophase|twophase|CONSTANT N = 3|consistency|VIOLATION|--define BUG
-examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|PASS|
-examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|VIOLATION|--define BUG
-test/spec|countops|countops|CONSTANT N = 3|bounded|PASS|
-test/spec|guard|guard|CONSTANT N = 3|ratio marked|PASS|
-test/spec|guard|guard|CONSTANT N = 3|ratio marked|VIOLATION|--define BUG
-"
+# verdict FILE: what a cmc --spec or TLC run concluded
+verdict() {
+	if grep -q 'Deadlock reached' "$1"; then echo DEADLOCK
+	elif grep -q 'Invariant .* is violated' "$1"; then echo VIOLATION
+	elif grep -q 'Temporal properties were violated\|Property .* is violated' "$1"; then echo TEMPORAL
+	elif grep -q 'No error has been found' "$1"; then echo PASS
+	else echo ERROR; fi
+}
+num() { grep -oE "$2" "$1" | grep -oE '[0-9]+' | head -1; }
+
+# check DIR CML MODULE WANT [ARG...] (DIR absolute or under the repo): `cmc --emit-tla` and
+# `cmc --emit-cfg` give a module and a .cfg that TLC accepts and that
+# give the verdict WANT, as `cmc --spec` does; on a pass, TLC also finds
+# the same distinct states and depth.  The .cfg names every invariant,
+# property and constraint, and CHECK_DEADLOCK FALSE when the model turns
+# the deadlock check off.
 check() {
-	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7
-	# the emitted module is named after the .cml `module` line; write it to
-	# <module>.tla so TLC's filename==module rule is satisfied
+	dir=$1 cml=$2 mod=$3 want=$4; shift 4
 	d="$OUT/$mod-$want"; mkdir -p "$d"
-	# shellcheck disable=SC2086
-	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
-	printf 'SPECIFICATION Spec\n%s\nINVARIANT %s\nCHECK_DEADLOCK FALSE\n' "$cfgline" "$inv" > "$d/$mod.cfg"
+	case $dir in /*) src=$dir/$cml.cml ;; *) src=$HERE/$dir/$cml.cml ;; esac
+	"$CMC" --emit-tla "$src" "$@" > "$d/$mod.tla" 2>&1
+	"$CMC" --emit-cfg "$src" "$@" > "$d/$mod.cfg" 2>&1
+	"$CMC" --spec "$src" "$@" > "$d/cmc.txt" 2>&1
+	# the module name must match the filename for TLC
+	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
 	bash "$TLC" "$d/$mod.tla" "$d/$mod.cfg" -workers 1 > "$d/out.txt" 2>&1
 	if grep -qiE 'Parse Error|semantic analysis failed' "$d/out.txt"; then
-		echo "FAIL $cml [$want]: TLC rejected the generated TLA+"; sed 's/^/     /' "$d/out.txt" | grep -iE 'error|line' | head -4; echo x>"$OUT/fail"; return
+		echo "FAIL $mod [$want]: TLC rejected the generated TLA+"; sed 's/^/     /' "$d/out.txt" | grep -iE 'error|line' | head -4; echo x>"$OUT/fail"; return
 	fi
-	v=$(grep -c 'is violated' "$d/out.txt")
-	if [ "$want" = VIOLATION ]; then
-		[ "$v" -ge 1 ] && echo "ok   $cml [$want]: generated TLA+ violates in TLC" || { echo "FAIL $cml [$want]: expected a violation"; echo x>"$OUT/fail"; }
+	cv=$(verdict "$d/cmc.txt") tv=$(verdict "$d/out.txt")
+	if [ "$cv" != "$want" ] || [ "$tv" != "$want" ]; then
+		echo "FAIL $mod [$want]: cmc --spec says $cv, TLC says $tv"; echo x>"$OUT/fail"; return
+	fi
+	if [ "$want" = PASS ]; then
+		cd_=$(num "$d/cmc.txt" 'generated, [0-9]+ distinct') td=$(num "$d/out.txt" 'generated, [0-9]+ distinct')
+		cp_=$(num "$d/cmc.txt" 'search is [0-9]+') tp=$(num "$d/out.txt" 'search is [0-9]+')
+		if [ -z "$cd_" ] || [ "$cd_" != "$td" ] || [ "$cp_" != "$tp" ]; then
+			echo "FAIL $mod [$want]: cmc d=$cd_ depth=$cp_, TLC d=$td depth=$tp"; echo x>"$OUT/fail"; return
+		fi
+		echo "ok   $mod [$want]: TLC agrees (d=$td depth=$tp)"
 	else
-		[ "$v" = 0 ] && grep -q 'No error' "$d/out.txt" && echo "ok   $cml [$want]: generated TLA+ holds in TLC" || { echo "FAIL $cml [$want]: expected no error"; echo x>"$OUT/fail"; }
+		echo "ok   $mod [$want]: TLC agrees"
 	fi
 }
 
 echo "-- the TLA+ bridge: cmc --emit-tla produces TLC-checkable modules"
 rm -f "$OUT/fail"
-printf '%s\n' "$rows" | while IFS='|' read -r dir cml mod cfgline inv want def; do
-	[ -z "$cml" ] && continue
-	check "$dir" "$cml" "$mod" "$cfgline" "$inv" "$want" "$def"
-done
+check test/spec counter counter PASS
+check examples/spec paxos paxos PASS
+check examples/spec paxos paxosb VIOLATION --define BUG
+check examples/spec raft raft PASS
+check examples/spec raft raftb VIOLATION --define BUG
+check examples/spec hc hc PASS
+check examples/spec hc hcb VIOLATION --define BUG
+check examples/spec zab zab PASS
+check examples/spec zab zabb VIOLATION --define BUG
+check examples/spec fpaxos fpaxos PASS
+check examples/spec fpaxos fpaxosb VIOLATION --define BUG
+check examples/spec caspaxos caspaxos PASS
+check examples/spec caspaxos caspaxosb VIOLATION --define BUG
+check examples/spec twophase twophase PASS
+check examples/spec twophase twophaseb VIOLATION --define BUG
+check examples/spec fastpaxos fastpaxos PASS
+check examples/spec fastpaxos fastpaxosb VIOLATION --define BUG
+check test/spec countops countops PASS
+check test/spec guard guard PASS
+check test/spec guard guardb VIOLATION --define BUG
+# the deadlock check and TLC's CONSTRAINT and ACTION_CONSTRAINT, with
+# and without each (test/spec/deadlock*.cml, constrain*.cml)
+check test/spec deadlock deadlock DEADLOCK
+check test/spec deadlock deadlocknd PASS --no-deadlock
+check test/spec deadlock_off deadlock_off PASS
+check test/spec dlorder dlorder VIOLATION
+# a model with no action deadlocks at once, in TLC as in cmc --spec (the
+# emitted Next is FALSE, not a stutter)
+printf 'module nostep\nvar x : 0 .. 1\ninit x == 0\ninvariant ok: x == 0\n' > "$OUT/nostep.cml"
+check "$OUT" nostep nostep DEADLOCK
+check test/spec deadlock_c deadlock_c PASS
+check test/spec deadlock_ac deadlock_ac PASS
+check test/spec constrain constrain PASS
+check test/spec constrain_c constrain_c PASS
+check test/spec constrain_ac constrain_ac PASS
+check test/spec constrain_inv constrain_inv VIOLATION
+check test/spec constrain_acinv constrain_acinv VIOLATION
 
-# liveness: the generated TLA+ carries WF fairness and a temporal PROPERTY;
-# TLC must agree with cmc --spec (ticker holds; ticker+RESET violates)
-checkprop() {
-	dir=$1 cml=$2 mod=$3 cfgline=$4 prop=$5 want=$6 def=$7
-	d="$OUT/$mod-prop-$want"; mkdir -p "$d"
-	# shellcheck disable=SC2086
-	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
-	# the module name must match the filename for TLC
-	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
-	printf 'SPECIFICATION Spec\n%s\nPROPERTY %s\nCHECK_DEADLOCK FALSE\n' "$cfgline" "$prop" > "$d/$mod.cfg"
-	bash "$TLC" "$d/$mod.tla" "$d/$mod.cfg" -workers 1 > "$d/out.txt" 2>&1
-	if grep -qiE 'Parse Error|semantic analysis failed' "$d/out.txt"; then echo "FAIL $cml prop [$want]: TLC rejected the TLA+"; echo x>"$OUT/fail"; return; fi
-	v=$(grep -c 'Temporal properties were violated' "$d/out.txt")
-	if [ "$want" = VIOLATION ]; then
-		[ "$v" -ge 1 ] && echo "ok   $cml prop [$want]: TLC violates the temporal property" || { echo "FAIL $cml prop [$want]: expected a temporal violation"; echo x>"$OUT/fail"; }
-	else
-		[ "$v" = 0 ] && echo "ok   $cml prop [$want]: TLC holds the temporal property" || { echo "FAIL $cml prop [$want]: expected it to hold"; echo x>"$OUT/fail"; }
-	fi
-}
-checkprop examples/spec ticker ticker "CONSTANT N = 3" reaches_max PASS ""
-checkprop examples/spec ticker tickerb "CONSTANT N = 3" reaches_max VIOLATION "--define RESET"
+# liveness: the generated TLA+ carries WF fairness and a temporal
+# PROPERTY; TLC must agree with cmc --spec (ticker holds; ticker+RESET
+# violates)
+check examples/spec ticker ticker PASS
+check examples/spec ticker tickerb TEMPORAL --define RESET
 # the soundness probes (remediation 1.7): TLC fixes the verdict that
 # test/spec_gate.sh asserts for cmc --spec on the same file
-checkprop test/spec/sound dead dead "" progress VIOLATION ""
-checkprop test/spec/sound unfair unfair "" progress VIOLATION ""
-checkprop test/spec/sound once once "" achieved PASS ""
-checkprop test/spec/sound leads leads "" response VIOLATION ""
-checkprop test/spec/sound leadscross leadscross "" response PASS ""
-# one of each form the bridge emits (test/spec/shape.cml), both properties
-check test/spec shape shape "CONSTANTS N = 2  M = 1" ok PASS ""
-checkprop test/spec shape shape "CONSTANTS N = 2  M = 1" "back fill" PASS ""
+check test/spec/sound dead dead TEMPORAL
+check test/spec/sound unfair unfair TEMPORAL
+check test/spec/sound once once PASS
+check test/spec/sound leads leads TEMPORAL
+check test/spec/sound leadscross leadscross PASS
+# one of each form the bridge emits (test/spec/shape.cml), an invariant
+# and both properties
+check test/spec shape shape PASS
 
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "emit_gate: ok (generated TLA+ parses and agrees with cmc --spec)" || echo "emit_gate: FAILED"

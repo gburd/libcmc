@@ -1,0 +1,9 @@
+# test/spec/constrain_inv.cml: constrain_c.cml with an invariant that only
+# a state failing the constraint breaks.  TLC checks the invariants on
+# such a state before it drops it, so this is a violation (3 actions to
+# x + y = 3), not a pass.
+
+module constrain_inv
+extends constrain_c
+
+invariant not_three: x + y != 3

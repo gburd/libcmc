@@ -54,4 +54,8 @@ action grant_bug(s in 0 .. S-1, c in 0 .. S-1) [BUG]:
 
 # Election Safety: at most one candidate reaches a quorum in the term,
 # so at most one leader is elected.
+# A terminal state is intended here (an election ends once every vote is cast),
+# so the deadlock check is off, as TLC's CHECK_DEADLOCK FALSE.
+deadlock = off
+
 invariant election_safety: (count c in 0 .. S-1 : votes[c] >= Q) <= 1

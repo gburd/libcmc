@@ -5,6 +5,35 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+`cmc --spec` has TLC's checking options (docs/plans/2.3-tla-users.md,
+item 1), each calibrated against single-worker TLC 2.19 on the same
+model for verdict, distinct states and depth (spec_gate,
+spec_calibrate and emit_gate rows on test/spec/deadlock*.cml and
+constrain*.cml).
+
+- A reachable state with no enabled action is a deadlock, reported as
+  TLC reports it ("Error: Deadlock reached." and the shortest trace,
+  exit 1).  It is on by default, as in TLC; `deadlock = off` in the
+  model or `--no-deadlock` turns it off.  This changes results: a model
+  whose terminal states are intended now fails until it says
+  `deadlock = off`, as raft, ticker, twophase, zab and several test
+  models now do.
+- `constraint NAME: EXPR` and `action_constraint NAME: EXPR`, TLC's
+  `CONSTRAINT` and `ACTION_CONSTRAINT`: a state outside the model is
+  not counted or expanded, but its invariants are checked.  A liveness
+  property under a constraint, and `--refine` against a spec with one,
+  are refused.
+- Invariants are now checked as each state is generated, not as it is
+  expanded, as TLC does, so where an invariant and a deadlock are both
+  reachable the error reported is TLC's.  Counts and traces of the
+  existing models are unchanged.
+- `cmc --emit-cfg FILE.cml` writes the TLC configuration for the module
+  `--emit-tla` writes: constants, invariants, properties, constraints
+  and `CHECK_DEADLOCK FALSE`.  emit_gate now uses it and compares
+  distinct states and depth with TLC, not only the verdict.  A module
+  with no action now emits `Next == FALSE`, so TLC finds the deadlock
+  `cmc --spec` finds (it emitted `UNCHANGED vars`, a stutter).
+
 ## 2.2.0 (2026-11-22)
 
 Takes the process engine toward checking a program in place, as Greg

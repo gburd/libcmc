@@ -22,9 +22,15 @@
 .Nm
 .Fl -spec Ar file
 .Op Fl -define Ar tag ...
+.Op Fl -no-deadlock
 .Nm
 .Fl -emit-tla Ar file
 .Op Fl -define Ar tag ...
+.Op Fl -no-deadlock
+.Nm
+.Fl -emit-cfg Ar file
+.Op Fl -define Ar tag ...
+.Op Fl -no-deadlock
 .Nm
 .Fl -refine Ar spec
 .Fl -bind Ar file
@@ -146,8 +152,36 @@ and
 .Cm or
 evaluate left to right and short-circuit, so a guard can protect a
 division or a function application.
+A reachable state in which no action is enabled is a deadlock: it is
+reported with the shortest trace, in TLC's words
+.Pq Dq Error: Deadlock reached. ,
+and exit status 1, unless the model says
+.Cm deadlock = off
+or
+.Fl -no-deadlock
+is given.
+A
+.Cm constraint
+and an
+.Cm action_constraint
+bound the search as TLC's
+.Cm CONSTRAINT
+and
+.Cm ACTION_CONSTRAINT
+do.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.It Fl -no-deadlock
+With
+.Fl -spec ,
+do not report a deadlock, as TLC's
+.Cm CHECK_DEADLOCK FALSE ;
+with
+.Fl -emit-tla
+and
+.Fl -emit-cfg ,
+write the module and configuration for a model whose deadlock check is
+off.
 .It Fl -emit-tla Ar file
 Translate the abstract specification
 .Pq a Pa .cml No module
@@ -156,6 +190,13 @@ and proved with TLAPS.
 Name the output after the module
 .Pq Pa NAME.tla
 so TLC accepts it.
+.It Fl -emit-cfg Ar file
+Write the TLC configuration for the module
+.Fl -emit-tla
+writes: its constants, every invariant, property, state and action
+constraint by name, and
+.Cm CHECK_DEADLOCK FALSE
+when the deadlock check is off.
 .It Fl -define Ar tag
 Activate an action gated with
 .Op Ar tag
