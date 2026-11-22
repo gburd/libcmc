@@ -35,6 +35,8 @@ lede: >-
   the false passes an audit of 1.3.0 found, and how 2.0.0 fixes each
   one.  A pass is evidence only for what the qualification table lists
   as modelled.
+- [For TLA+ users (2.3)]({{ '/reference/plan-2.3/' | relative_url }}): TLC's
+  options, records and sequences, traces, TLA+ input, proof hooks.
 - [In place (2.2 and after)]({{ '/reference/plan-2.2/' | relative_url }}): the
   road from a checker of small C services to one that runs PostgreSQL.
 - [2.1 boundaries]({{ '/reference/plan-2.1/' | relative_url }}): the
