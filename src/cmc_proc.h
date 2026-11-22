@@ -27,6 +27,10 @@ typedef struct CmcProcOptions
 	 * stutter (it still subsumes the invariant check). */
 	int			refine;
 	int			refine_steps;
+	/* trace_out: if set, a counterexample is also written there as JSON
+	 * (trace_fmt "json"), one world per action */
+	const char *trace_out;
+	const char *trace_fmt;
 } CmcProcOptions;
 
 int			cmc_proc_main(const CmcProcOptions *po);

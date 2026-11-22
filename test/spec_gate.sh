@@ -614,6 +614,50 @@ expect "liveness: every bad component is checked"      1 "response is violated" 
 expect "liveness: reaching B discharges A ~> B"        0 "No error has been found" --spec "$S/leadscross.cml" # TLC: holds
 expect "liveness under symmetry is refused"          3 "under symmetry" --spec "$S/symlive.cml"
 
+echo "-- machine-readable counterexamples (--trace-out, --trace-format)"
+# trace_row KIND SPEC NACT [--define TAG]: the file parses, holds the
+# shortest trace's NACT actions plus the initial state, and its actions
+# and final state are the ones cmc printed (test/trace_check.py).  With
+# no python3 the fallback counts the states only.
+trace_row() {
+	kind=$1 spec=$2 nact=$3; shift 3
+	f="$OUT/trace.$kind"; : > "$f"
+	"$CMC" --spec "$spec" "$@" --trace-out "$f" --trace-format "$kind" > "$OUT/trace.txt" 2>&1
+	rc=$?
+	if [ $rc != 1 ] || ! grep -q "is ($nact actions)" "$OUT/trace.txt"; then
+		echo "FAIL trace $kind $(basename "$spec"): exit $rc"; sed 's/^/     /' "$OUT/trace.txt" | head; fail=1; return
+	fi
+	if command -v python3 > /dev/null 2>&1; then
+		python3 "$HERE/test/trace_check.py" "$kind" "$OUT/trace.txt" "$f" > "$OUT/tc.txt" 2>&1
+	else
+		[ "$(grep -o '"index":' "$f" | wc -l)" = $((nact + 1)) ] > "$OUT/tc.txt" 2>&1
+	fi
+	if [ $? = 0 ]; then echo "ok   trace $kind $(basename "$spec"): $((nact + 1)) states, as printed"
+	else echo "FAIL trace $kind $(basename "$spec")"; sed 's/^/     /' "$OUT/tc.txt"; fail=1; fi
+}
+trace_row itf  "$HERE/test/spec/mutex.cml" 4 --define BUG
+trace_row json "$HERE/test/spec/mutex.cml" 4 --define BUG
+trace_row itf  "$HERE/examples/spec/paxos.cml" 12 --define BUG
+trace_row json "$HERE/examples/spec/paxos.cml" 12 --define BUG
+expect "trace: ITF is the default format" 1 '(itf, 5 states)' --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out "$OUT/t.itf"
+expect "trace: a format other than itf or json is an error" 3 "the formats are itf and json" --spec "$HERE/test/spec/mutex.cml" --trace-out "$OUT/t.x" --trace-format tla
+expect "trace: --trace-format without --trace-out is an error" 3 "needs --trace-out" --spec "$HERE/test/spec/mutex.cml" --trace-format json
+expect "trace: an unwritable file is an error" 3 "could not write" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out "$OUT/no/such/dir/t.itf"
+expect "trace: a failed write is an error"     3 "could not write" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out /dev/full
+expect "trace: a liveness violation writes no file" 1 "No trace written" --spec "$HERE/test/spec/sound/dead.cml" --trace-out "$OUT/live.itf"
+expect "trace: --emit-tla takes no --trace-out" 3 "not supported with --emit-tla" --emit-tla "$HERE/test/spec/mutex.cml" --trace-out "$OUT/t.itf"
+rm -f "$OUT/pass.itf"
+expect "trace: a pass writes no file" 0 "No error has been found" --spec "$HERE/test/spec/mutex.cml" --trace-out "$OUT/pass.itf"
+[ -e "$OUT/pass.itf" ] && { echo "FAIL trace: a pass wrote $OUT/pass.itf"; fail=1; }
+# the checker has teeth: a trace that lost its last state fails it
+if command -v python3 > /dev/null 2>&1; then
+	"$CMC" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out "$OUT/t.json" --trace-format json > "$OUT/trace.txt" 2>&1
+	python3 -c 'import json,sys; t=json.load(open(sys.argv[1])); json.dump(t[:-1],open(sys.argv[1],"w"))' "$OUT/t.json"
+	if python3 "$HERE/test/trace_check.py" json "$OUT/trace.txt" "$OUT/t.json" > /dev/null 2>&1; then
+		echo "FAIL trace_check passed a trace with a state missing"; fail=1
+	else echo "ok   trace_check fails a trace with a state missing"; fi
+fi
+
 # the Apalache gate's verdict classifier: a tool error (parse, typing,
 # input) must never count as an expected violation (audit 0.2)
 if bash "$HERE/test/apalache_gate.sh" --self-test > "$OUT/apa-selftest.txt" 2>&1; then

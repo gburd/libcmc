@@ -84,6 +84,9 @@ if [ -z "$MC" ]; then
 fi
 [ -x "$MC" ] || skip "no apalache-mc at $MC; set APALACHE_MC"
 
+# the ITF comparison of the VIOLATION rows reads JSON with python3
+command -v python3 > /dev/null 2>&1 || skip "needs python3 to compare ITF traces"
+
 # a Java 21+ runner: use the host java if new enough, else nix jdk21
 java_ok() { command -v java >/dev/null 2>&1 && java -version 2>&1 | grep -qE 'version "(2[1-9]|[3-9][0-9])'; }
 if java_ok; then
@@ -128,12 +131,21 @@ check() {
 	"$CMC" --emit-tla "$HERE/$dir/$cml.cml" $def > "$d/$mod.tla" 2>&1
 	# module name must match the filename for the tools
 	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
-	( cd "$d" && RUN "$MC" check --no-deadlock --cinit=CInit "--inv=$inv" "--length=$len" "$mod.tla" > out.txt 2>&1 )
+	( cd "$d" && RUN "$MC" check --no-deadlock --cinit=CInit "--inv=$inv" "--length=$len" --run-dir=run "$mod.tla" > out.txt 2>&1 )
 	disp=$(classify "$d/out.txt")
 	if [ "$disp" != "$want" ]; then
 		echo "FAIL $cml [$want]: Apalache gave $disp"; grep -iE 'outcome|error|EXITCODE' "$d/out.txt" | head -3 | sed 's/^/     /'; echo x>"$OUT/fail"; return
 	fi
-	if [ "$want" = VIOLATION ]; then echo "ok   $cml [$want]: Apalache found an invariant violation"
+	# cmc's ITF counterexample has the structure of Apalache's: header,
+	# variables, parameters, types, length, and each value's form
+	if [ "$want" = VIOLATION ]; then
+		# shellcheck disable=SC2086
+		"$CMC" --spec "$HERE/$dir/$cml.cml" $def --trace-out "$d/cmc.itf.json" > "$d/cmc.txt" 2>&1
+		if ! python3 "$HERE/test/trace_check.py" apalache "$d/cmc.itf.json" "$d/run/violation.itf.json" > "$d/tc.txt" 2>&1; then
+			echo "FAIL $cml: cmc's ITF trace differs from Apalache's"; sed 's/^/     /' "$d/tc.txt"; echo x>"$OUT/fail"; return
+		fi
+	fi
+	if [ "$want" = VIOLATION ]; then echo "ok   $cml [$want]: Apalache found an invariant violation, an ITF trace like cmc's"
 	else echo "ok   $cml [$want]: Apalache reports no error up to length $len"; fi
 }
 

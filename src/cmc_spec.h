@@ -9,9 +9,11 @@
 #include <stddef.h>
 
 /* Model-check the .cml specification at `path` on its own.  `defs` are
- * the -D tags given (to activate [TAG]-gated actions).  Returns an exit
- * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
-int cmc_spec_main(const char *path, char **defs, int ndefs);
+ * the -D tags given (to activate [TAG]-gated actions).  If `trace_out`
+ * is not NULL, an invariant's counterexample is also written there in
+ * `trace_fmt` ("itf" or "json").  Returns an exit status: 0 no
+ * violation, 1 a violation, 2 incomplete, 3 a model error. */
+int cmc_spec_main(const char *path, char **defs, int ndefs, const char *trace_out, const char *trace_fmt);
 
 /* ---- refinement support (Milestone C) ------------------------------
  * The refinement checker runs an implementation and, at each reached

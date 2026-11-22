@@ -40,6 +40,8 @@ usage(void)
 			"usage: cmc --model-file FILE [--binary PATH]\n"
 			"         [--bfs | --simulate [--seed N] [--walks K]] [--depth D]\n"
 			"         [--max-states N] [--time S] [--crashes N] [--drops N] [--timeouts N]\n"
+			"         [--trace-out FILE [--trace-format json]]\n"
+			"       cmc --spec FILE [--define TAG] [--trace-out FILE [--trace-format itf|json]]\n"
 			"       cmc --model NAME [--tlc-cfg FILE | --cfg k=v,...]\n"
 			"         [--inv NAME[,NAME]] [--prop NAME[,NAME]] [--all-props]\n"
 			"         [--bfs | --dfs DEPTH | --simulate [--seed N] [--walks K] [--depth D]\n"
@@ -360,6 +362,27 @@ kind_word(const CmcModel *m, const char *prop)
 	return "Engine check";
 }
 
+/* --trace-format names the format of the --trace-out file, so one
+ * without the other is an error, and so is a format that is neither
+ * itf nor json.  *fmt defaults to dflt.  Returns 0, or 3 with a message. */
+static int
+trace_check(const char **fmt, const char *out, const char *dflt)
+{
+	if (*fmt && !out)
+	{
+		fprintf(stderr, "cmc: --trace-format needs --trace-out FILE\n");
+		return 3;
+	}
+	if (!*fmt)
+		*fmt = dflt;
+	if (strcmp(*fmt, "itf") && strcmp(*fmt, "json"))
+	{
+		fprintf(stderr, "cmc: --trace-format %s: the formats are itf and json\n", *fmt);
+		return 3;
+	}
+	return 0;
+}
+
 /* cmc --model-file FILE: the process front end (cmc_proc.c).  Every
  * option it cannot honour is an error, never silently ignored. */
 static int
@@ -410,6 +433,10 @@ proc_main(int argc, char **argv)
 			bind_path = ARG();
 		else if (!strcmp(a, "--define"))
 			{ if (ndefs < 16) defs[ndefs++] = (char *) ARG(); else usage(); }
+		else if (!strcmp(a, "--trace-out"))
+			po.trace_out = ARG();
+		else if (!strcmp(a, "--trace-format"))
+			po.trace_fmt = ARG();
 		else
 		{
 			fprintf(stderr, "cmc: %s is not supported with --model-file\n", a);
@@ -418,6 +445,9 @@ proc_main(int argc, char **argv)
 #undef ARG
 	}
 	if (!po.model_file) { fprintf(stderr, "cmc: --refine needs --model-file FILE\n"); return 3; }
+	if (trace_check(&po.trace_fmt, po.trace_out, "json")) return 3;
+	/* a world is node records and bytes, not TLA+ values */
+	if (!strcmp(po.trace_fmt, "itf")) { fprintf(stderr, "cmc: --trace-format itf is for --spec; --model-file writes json\n"); return 3; }
 	if (po.refine_steps && !po.refine) { fprintf(stderr, "cmc: --refine-steps needs --refine SPEC\n"); return 3; }
 	if (po.refine)
 	{
@@ -434,15 +464,20 @@ proc_main(int argc, char **argv)
 static int
 spec_main(int argc, char **argv, const char *mode)
 {
-	const char *path = NULL;
+	const char *path = NULL,
+			   *trace_out = NULL,
+			   *trace_fmt = NULL;
 	char	   *defs[16];
 	int			ndefs = 0;
+	bool		spec = !strcmp(mode, "--spec");
 
 	for (int j = 1; j < argc; j++)
 	{
-		bool		def = !strcmp(argv[j], "--define");
+		bool		def = !strcmp(argv[j], "--define"),
+					out = spec && !strcmp(argv[j], "--trace-out"),
+					fmt = spec && !strcmp(argv[j], "--trace-format");
 
-		if (!def && strcmp(argv[j], mode))
+		if (!def && !out && !fmt && strcmp(argv[j], mode))
 		{
 			fprintf(stderr, "cmc: %s is not supported with %s\n", argv[j], mode);
 			return 3;
@@ -451,10 +486,18 @@ spec_main(int argc, char **argv, const char *mode)
 			usage();
 		if (def)
 			defs[ndefs++] = argv[++j];
+		else if (out)
+			trace_out = argv[++j];
+		else if (fmt)
+			trace_fmt = argv[++j];
 		else
 			path = argv[++j];
 	}
-	return strcmp(mode, "--spec") ? cmc_emit_tla(path, defs, ndefs) : cmc_spec_main(path, defs, ndefs);
+	if (!spec)
+		return cmc_emit_tla(path, defs, ndefs);
+	if (trace_check(&trace_fmt, trace_out, "itf"))
+		return 3;
+	return cmc_spec_main(path, defs, ndefs, trace_out, trace_fmt);
 }
 
 int

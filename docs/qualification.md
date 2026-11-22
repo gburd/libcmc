@@ -148,6 +148,7 @@ in the kernel, untouched.
 | a run that never progressed | refused | INCOMPLETE without an `eventually` property | proc_gate noprogress |
 | a fault signal (`abort`, a failed `assert`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`) | exact at the default disposition | the node is killed and the run ends with a violation (exit 1) and its trace; a handler is exit 3 | proc_gate fault |
 | a thread blocked in, or busy outside, the calls the checker sees | refused | exit 1 after 10 s with no checked call | proc_gate kernelfd |
+| `--trace-out` JSON counterexample | exact | each listed step and the world after it: node records, durable records, crashed flags, replies; the network and timers are not written | proc_gate trace rows |
 | `--refine` (C1) and `--refine-steps` (C2) | exact for the bound variables | C2 needs every spec variable bound; checks init, gated actions, exact states | proc_gate mono, spec_gate C2 rows |
 
 ## Abstract checker (`cmc --spec`)
@@ -159,6 +160,7 @@ in the kernel, untouched.
 | liveness under `symmetry` | refused | exit 3 | (code; no fixture yet) |
 | paxos, fpaxos, caspaxos, zab, fastpaxos against a hand-written TLA+ twin | exact | same distinct states and depth, and the same shortest trace for the BUG; fastpaxos under a VIEW (the twin keeps promise senders the `.cml` counts) | `make check-spec-calibration` |
 | Apalache on the emitted module | bounded | `--length 10` (fastpaxos 11): complete for counter, raft, hc, twophase, fastpaxos; a bounded pass for paxos, fpaxos, caspaxos, zab (longer runs: [Apalache past length 10]({{ '/background/apalache-length/' | relative_url }})) | apalache_gate |
+| `--trace-out` ITF and JSON counterexamples | exact | the printed shortest trace, integers and functions as Apalache writes them; an invariant violation only (a liveness one has no path) | spec_gate trace rows, apalache_gate VIOLATION rows ([ITF against Apalache]({{ '/background/itf-traces/' | relative_url }})) |
 | `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
 | declared domains | exact | init and every successor must lie in each variable's domain | spec_gate boundpass, succbound |

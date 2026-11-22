@@ -175,6 +175,34 @@ unchanged.  `make check-emit-apalache` verifies that the generated TLA+
 type-checks in Apalache and agrees with `cmc --spec`.  Apalache is
 optional (not a build dependency); the gate fetches it once or uses
 `$APALACHE_MC`, and needs Java 21+.
+
+## Counterexamples as files
+
+```
+cmc --spec mutex.cml --define BUG --trace-out bug.itf.json
+cmc --spec mutex.cml --define BUG --trace-out bug.json --trace-format json
+```
+
+On an invariant violation, `--trace-out FILE` writes the shortest
+counterexample, the one cmc prints, as a file as well.  The default
+format, `itf`, is the [Informal Trace Format](https://apalache-mc.org/docs/adr/015adr-trace.html)
+Apalache writes and its tools read (`itf-py`, `itf-rs`).  It is laid
+out as Apalache lays out a counterexample for the module `cmc
+--emit-tla` makes of the spec: the constants under `params` and in
+every state, each variable's type in `varTypes`, an integer as
+`{"#bigint": "N"}`, and a function as `{"#map": [[k, v], ...]}`.  Each
+state's `#meta` holds its index and, past the first, the action that
+led to it (Apalache leaves that out).  `json` writes a plain array, one
+object per state with its `index`, its `action` (`null` for the first)
+and its `vars`, an integer as a number and a function as an object
+keyed by its arguments.  A liveness violation has no path to write, and
+a pass writes no file.
+
+The spec gate checks that each file parses, holds the printed actions
+plus the initial state, and ends in the printed state; the Apalache gate
+checks that cmc's ITF file for each planted bug has the header, the
+variables, the types, the length and the value forms of the one Apalache
+writes for the same module.
 ## Symmetry
 
 ```

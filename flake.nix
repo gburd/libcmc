@@ -66,6 +66,8 @@
             # the documentation site (docs/, Jekyll) and its link check
             ruby
             lychee
+            # test/trace_check.py, which reads the --trace-out files
+            python3
             # the calibration oracle: calib/hc/tlc.sh
             tlaplus
           ]) ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.gdb pkgs.valgrind ];

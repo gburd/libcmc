@@ -19,9 +19,11 @@
 .Op Fl -crashes Ar n
 .Op Fl -drops Ar n
 .Op Fl -timeouts Ar n
+.Op Fl -trace-out Ar file Op Fl -trace-format Cm json
 .Nm
 .Fl -spec Ar file
 .Op Fl -define Ar tag ...
+.Op Fl -trace-out Ar file Op Fl -trace-format Cm itf | json
 .Nm
 .Fl -emit-tla Ar file
 .Op Fl -define Ar tag ...
@@ -148,6 +150,63 @@ evaluate left to right and short-circuit, so a guard can protect a
 division or a function application.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.It Fl -trace-out Ar file
+On a violation, also write the counterexample cmc prints to
+.Ar file ,
+in the format
+.Fl -trace-format
+names.
+.It Fl -trace-format Cm itf | json
+The format of the
+.Fl -trace-out
+file; without
+.Fl -trace-out
+it is an error.
+With
+.Fl -spec ,
+.Cm itf
+(the default) is the Informal Trace Format that Apalache writes and its
+tools read
+.Pq Lk https://apalache-mc.org/docs/adr/015adr-trace.html ,
+laid out as Apalache lays out a counterexample for the module
+.Fl -emit-tla
+writes: an integer is
+.Ql {\(dq#bigint\(dq: \(dqN\(dq} ,
+a function is
+.Ql {\(dq#map\(dq: [[k, v], ...]} ,
+and each state's
+.Ql #meta
+names the action that led to it.
+.Cm json
+is an array of states, each with its
+.Ql index ,
+its
+.Ql action
+.Pq null for the first
+and its
+.Ql vars .
+With
+.Fl -model-file ,
+only
+.Cm json
+(the default) is offered: one object per listed step, with the
+.Ql action
+as printed, its
+.Ql number
+.Pq null for an unnumbered step ,
+and the world after it, each node's
+.Ql state
+and
+.Ql durable
+records and whether it is
+.Ql crashed ,
+and the
+.Ql replies .
+A liveness or
+.Ic eventually
+violation has no path, so no file is written, and neither is one on a
+pass.
+A file that cannot be written is exit 3.
 .It Fl -emit-tla Ar file
 Translate the abstract specification
 .Pq a Pa .cml No module
@@ -405,6 +464,12 @@ truncated.
 .Bl -tag -width Ds
 .It Fl -trace-out Ar file
 On a violation, write the counterexample as a replay file.
+For
+.Fl -spec
+and
+.Fl -model-file ,
+see
+.Sx Checking a program .
 .It Fl -progress Ar seconds
 Print a progress line every
 .Ar seconds
