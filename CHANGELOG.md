@@ -5,6 +5,14 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+Fixed: a state-level `--refine` violation found by breadth-first search
+left the nodes of the reached world running after cmc exited.  That path
+reported without killing them first, and the replay that prints the
+trace launches a fresh set, so the first set was never reaped.  A node
+that retries a failed `accept()` then spins forever as an orphan.  Gate:
+proc_gate "C1: a refinement violation leaves no node running"
+(test/proc/orphan.c).
+
 `cmc --spec FILE.tla --config FILE.cfg` reads a TLA+ module and its TLC
 configuration directly (docs/plans/2.3-tla-users.md, items 4 and 5).
 The new src/cmc_tla.c translates the module to the `.cml` model it

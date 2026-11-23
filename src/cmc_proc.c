@@ -6733,6 +6733,7 @@ cmc_proc_main(const CmcProcOptions *po)
 			if (rr == -2) { fprintf(stderr, "cmc: refinement: %s\n", rerr); kill_all(); free(seq); return 3; }
 			if (rr >= 0)
 			{
+				kill_all();
 				printf("Error: the implementation does not refine the spec: abstract invariant %s is violated.\n", inm);
 				report_refine(seq, e.len);
 				free(seq); return 1;

@@ -48,6 +48,7 @@ $CC -O1 -no-pie -w -DBUG -o "$B/proc/paxos2-bug" "$HERE/examples/paxos/paxos2.c"
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/paxos-bug" "$HERE/examples/paxos/paxos.c" || { echo "proc_gate: paxos.c -DBUG does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/mono" "$HERE/test/proc/mono.c" || { echo "proc_gate: mono.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DBUG -o "$B/proc/mono-bug" "$HERE/test/proc/mono.c" || { echo "proc_gate: mono.c -DBUG does not build"; fail=1; }
+$CC -O1 -no-pie -w -o "$B/proc/orphan" "$T/orphan.c" || { echo "proc_gate: orphan.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -o "$B/proc/noprogress" "$HERE/test/proc/noprogress.c" || { echo "proc_gate: noprogress.c does not build"; fail=1; }
 $CC -O1 -no-pie -w -DNEGFD -o "$B/proc/noprogress-stuck" "$HERE/test/proc/noprogress.c" || { echo "proc_gate: noprogress.c -DNEGFD does not build"; fail=1; }
 # the two-threaded fixture needs pthreads (clone/clone3 + futex)
@@ -192,6 +193,18 @@ printf '[fields]\ncval = 0\n[map]\nc = "node[0].cval + node[5][0] + node[0][40] 
 expect "a binding reads past the record as -1" 0 "No error has been found" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-past.bind" --refine-steps
 printf '[fields]\ncval = 0\n[map]\nc = "node[0].cval + node[5][0] + node[0][40] + 1"\n' > "$OUT/mono-out.bind"
 expect "a bound value outside the spec's domain" 3 "c = -1 is outside its domain" $(runx "$HERE/test/proc/mono.model" mono) --refine "$HERE/test/proc/mono.cml" --bind "$OUT/mono-out.bind" --refine-steps
+# a state-level refinement violation under breadth-first search kills
+# the nodes it launched before cmc exits: orphan.c spins in its accept
+# loop once the checker is gone, so a forgotten node outlives cmc
+printf 'module oz\nvar c : 0 .. 1\ninit c == 0\naction set():\n  when c == 0\n  c%s = 1\ninvariant zero: c == 0\n' "'" > "$OUT/oz.cml"
+printf '[map]\nc = "node[0][0]"\n' > "$OUT/oz.bind"
+printf '[target]\nnodes = 1\n[environment]\ntimeouts = 1\n[invariants]\nok = "1 == 1"\n' > "$OUT/oz.model"
+expect_by 60 "C1: a refinement violation is reported" 1 "abstract invariant zero is violated" --model-file "$OUT/oz.model" --binary "$B/proc/orphan" --refine "$OUT/oz.cml" --bind "$OUT/oz.bind"
+sleep 1
+left=$(pgrep -f "^$B/proc/orphan" | wc -l)
+pkill -f "^$B/proc/orphan"
+[ "$left" = 0 ] && echo "ok   C1: a refinement violation leaves no node running" ||
+	{ echo "FAIL C1: a refinement violation leaves $left node(s) running after cmc exits"; fail=1; }
 expect "mono: C2 under --simulate catches the by-two step" 1 "no matching abstract action" $(runx "$HERE/test/proc/mono.model" mono-bug) --refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps --simulate --seed 1 --walks 20
 expect "C2 refuses a partly-bound spec"           3 "needs every spec variable bound" $(runx "$HERE/examples/spec/paxos-refine.model" paxos) --refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos.bind" --refine-steps
 expect "raft: election safety holds"        0 "No error has been found" $(runx "$HERE/examples/raft/raft.model" raft)
