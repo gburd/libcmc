@@ -115,7 +115,9 @@ static void ar_release(size_t m){ ar_n=m; }
 /* canonical order so equal sets compare equal */
 static int lcmp(const void *a, const void *b){ long x=*(const long*)a,y=*(const long*)b; return x<y?-1:x>y?1:0; }
 static int set_canon(long *e, int n){
-	/* sort, then drop duplicates */
+	/* sort, then drop duplicates; an empty set may have no storage, and
+	 * qsort() of a null pointer is undefined even for zero elements */
+	if(n<=0) return 0;
 	qsort(e, (size_t)n, sizeof e[0], lcmp);
 	int w=0; for(int r=0;r<n;r++){ if(w==0||e[r]!=e[w-1]) e[w++]=e[r]; }
 	return w;
@@ -320,7 +322,7 @@ static Value mk_set(Pst *s, long *e, int n){
 	Value z={0}; z.tag=T_SET;
 	n=set_canon(e,n);
 	long *w=ar_alloc(s,(size_t)n+3); if(!w) return z;
-	w[0]=T_SET; w[1]=n+3; w[2]=n; memcpy(w+3,e,(size_t)n*sizeof *e);
+	w[0]=T_SET; w[1]=n+3; w[2]=n; if(n>0) memcpy(w+3,e,(size_t)n*sizeof *e);
 	z.w=w; return z;
 }
 /* a function (T_FUN), record (T_REC) or sequence (T_SEQ) of the n
