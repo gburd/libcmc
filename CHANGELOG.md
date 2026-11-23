@@ -45,6 +45,14 @@ pass).  Model values now start at 2^40, past TLC's integers, so no
 integer equals one, and a variable may hold an integer in one state and
 a model value in another, as TLC allows.
 
+A second review found two `x \in T` invariants on one variable read as
+two types: the last replaced the first, and both were checked as TRUE,
+a false pass where TLC reports the tighter one violated.  Now one
+invariant gives the types, TypeOK if the .cfg lists it, else the first
+of that form, and every other is checked as written.  Gate: spec_gate
+and spec_calibrate typeinv rows (test/spec/typeinv.tla, TLC's verdict
+and trace).
+
 `.cml` gains `if C then A else B`, TLA+'s `IF`: only the branch taken
 is evaluated.  `cmc --emit-tla` writes it as `IF THEN ELSE`
 (test/spec/ifexpr.cml agrees with TLC: 11 distinct states, depth 7).

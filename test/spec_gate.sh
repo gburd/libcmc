@@ -1002,6 +1002,11 @@ expect "tla: CONSTRAINT"                      0 "6 distinct states found" --spec
 expect "tla: logrep twin: records, sequences, defs, @" 0 "4439 distinct states found" --spec "$HERE/examples/spec/logrep.tla" --config "$HERE/examples/spec/logrep_read_safe.cfg"
 expect "tla: logrep twin, depth 16"           0 "search is 16" --spec "$HERE/examples/spec/logrep.tla" --config "$HERE/examples/spec/logrep_read_safe.cfg"
 expect "tla: logrep twin with BUG"            1 "is (5 actions)" --spec "$HERE/examples/spec/logrep.tla" --config "$HERE/examples/spec/logrep_read_bug.cfg"
+# two type-invariant forms on one variable: TypeOK, else the first, types
+# it; the other is checked as written (TLC's trace, 3 actions)
+expect "tla: TypeOK types, a tighter x \\in T is checked" 1 "Tight is violated" --spec "$HERE/test/spec/typeinv.tla" --config "$HERE/test/spec/typeinv_ok.cfg"
+expect "tla: the first types, a later x \\in T is checked" 1 "is (3 actions)" --spec "$HERE/test/spec/typeinv.tla" --config "$HERE/test/spec/typeinv_lt.cfg"
+expect "tla: a tighter first type stops (exit 3)" 3 "x = 3 is outside its domain 0 .. 2" --spec "$HERE/test/spec/typeinv.tla" --config "$HERE/test/spec/typeinv_tl.cfg"
 expect "tla: logrep's TypeOK is refused"      3 "logrep.tla:22: UNION is not supported" --spec "$HERE/examples/spec/logrep.tla" --config "$HERE/examples/spec/logrep_safe.cfg"
 expect "tla: paxos twin is refused (strings)" 3 "paxos.tla:35: a string literal" --spec "$HERE/examples/spec/paxos.tla" --config "$HERE/examples/spec/paxos_safe.cfg"
 expect "tla: zab twin is refused (\\X)"       3 "zab.tla:53: the set operator \\\\X" --spec "$HERE/examples/spec/zab.tla" --config "$HERE/examples/spec/zab_safe.cfg"

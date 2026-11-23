@@ -293,6 +293,8 @@ whose conjuncts are all
 .Pq a TypeOK
 gives the variables their types, which the checker enforces on every
 state.
+One invariant does so: TypeOK if the configuration lists it, else the
+first of that form; every other invariant is checked as written.
 Expressions are the
 .Pa .cml
 set: integers, booleans,

@@ -355,7 +355,10 @@ conjuncts are all `x \in T`, such as the `TypeOK` `cmc --emit-tla`
 writes, gives the variables their types instead: T is `LO .. HI`, a
 literal or constant set of integers, `[S -> T]`, `[a : T, ...]`, or
 `{<<>>} \cup {<<e1>> : e1 \in T} \cup ...` up to k elements (`Seq(T,
-k)`).  The checker enforces a variable's type on every state, so a
+k)`).  One invariant gives the types: `TypeOK` if the `.cfg` lists it,
+else the first of that form.  Every other invariant, including another
+`x \in T` on the same variable, is checked as written.  The checker
+enforces a variable's type on every state, so a
 value outside it is a model error (exit 3), where TLC reports the
 invariant violated (exit 1).
 

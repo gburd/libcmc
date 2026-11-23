@@ -1949,9 +1949,13 @@ static void emit(Buf *o, const char *path){
 	 * error (exit 3), where TLC reports the invariant violated (exit 1).
 	 * Both stop with no pass, and the invariant itself then holds in
 	 * every state the search keeps, so it is written as TRUE.  NB: the
-	 * exit status differs from TLC's on a type violation. */
-	int istype[TL_MAX]={0};
-	for(int i=0;i<C.ninv;i++) istype[i]=type_invariant(C.inv[i]);
+	 * exit status differs from TLC's on a type violation.  One invariant
+	 * gives the types: TypeOK if it is one, else the first listed.  Any
+	 * other, of the same form or not, is checked as written, so a second
+	 * `x \in T` neither replaces the first nor holds as TRUE. */
+	int istype[TL_MAX]={0}, typed=0;
+	for(int i=0;i<C.ninv && !typed;i++) if(!strcmp(C.inv[i],"TypeOK")) typed=istype[i]=type_invariant(C.inv[i]);
+	for(int i=0;i<C.ninv && !typed;i++) typed=istype[i]=type_invariant(C.inv[i]);
 	for(int i=0;i<M.nvar;i++){
 		bput(o,"var %s : ",M.var[i]);
 		if(g_decl[i]) bput(o,"%s",g_decl[i]); else ty_text(o,g_vty[i],M.var[i]);

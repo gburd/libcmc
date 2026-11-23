@@ -126,6 +126,8 @@ test/spec|constrain.tla|constrain_c.cfg|PASS
 test/spec|constrain.tla|constrain_ac.cfg|PASS
 test/spec|constrain.tla|constrain_inv.cfg|VIOLATION
 test/spec|constrain.tla|constrain_acinv.cfg|VIOLATION
+test/spec|typeinv.tla|typeinv_ok.cfg|VIOLATION
+test/spec|typeinv.tla|typeinv_lt.cfg|VIOLATION
 examples/spec|logrep.tla|logrep_read_safe.cfg|PASS
 examples/spec|logrep.tla|logrep_read_bug.cfg|VIOLATION
 "
