@@ -229,6 +229,39 @@ echo "-- liveness: temporal properties under weak fairness"
 expect "ticker: eventually-max holds under fairness" 0 "1 property held" --spec "$HERE/examples/spec/ticker.cml"
 expect "ticker: a fair reset cycle breaks it"        1 "reaches_max is violated" --spec "$HERE/examples/spec/ticker.cml" --define RESET
 
+echo "-- fairness per action, strong fairness, action properties, coverage"
+# test/spec/fair/: each verdict is TLC's on the emitted module
+# (emit_gate.sh); toggle and inner tell weak from strong fairness
+FD=$HERE/test/spec/fair
+expect "toggle: no fairness, a run may stop"         1 "finishes is violated" --spec "$FD/toggle.cml"
+expect "toggle: WF on both, flip for ever is fair"   1 "finishes is violated" --spec "$FD/toggle_wf.cml"
+expect "toggle: SF on finish alone, a stutter at 0"  1 "finishes is violated" --spec "$FD/toggle_sfonly.cml"
+expect "toggle: WF flip and SF finish, it finishes"  0 "1 property held" --spec "$FD/toggle_sf.cml"
+expect "toggle: fairness strong, it finishes"        0 "1 property held" --spec "$FD/toggle_strong.cml"
+expect "inner: WF, the cycle 0 <-> 1 is fair"        1 "finishes is violated" --spec "$FD/inner_wf.cml"
+expect "inner: SF finish, 0 <-> 1 never enables it"  1 "finishes is violated" --spec "$FD/inner_sf.cml"
+expect "inner: SF up and finish, it finishes"        0 "1 property held" --spec "$FD/inner_sf2.cml"
+expect "param: WF on go(i) is fairness of the disjunction" 1 "finishes is violated" --spec "$FD/param.cml"
+expect "mono: two action properties hold"            0 "2 properties held" --spec "$FD/mono.cml"
+expect "mono: x' >= x fails on the wrap"             1 "Action property bad is violated" --spec "$FD/mono_bad.cml"
+expect "mono: the shortest trace ends in the bad step" 1 "is (4 actions)" --spec "$FD/mono_bad.cml"
+expect "mono: a step out of the model is checked"    1 "Action property bad is violated" --spec "$FD/mono_c.cml"
+expect "emit-tla: WF and SF per action"              0 "Spec == Init /. \[\]\[Next\]_vars /. WF_vars(flip) /. SF_vars(finish)$" --emit-tla "$FD/toggle_sf.cml"
+expect "emit-tla: fairness strong"                   0 "SF_vars(flip) /. SF_vars(finish)$" --emit-tla "$FD/toggle_strong.cml"
+expect "emit-tla: an action property"                0 "^  \[\]\[(x' >= x)\]_vars$" --emit-tla "$FD/mono_bad.cml"
+expect "coverage: distinct:generated per action (TLC's 3:6)" 0 "^<incx>: 3:6  (enabled in 6 states)" --spec "$HERE/test/spec/constrain_ac.cml" --coverage
+expect "coverage: an action seen only as a stutter"  0 "^<stay>: 0:1  (enabled in 1 states)" --spec "$FD/mono.cml" --coverage
+expect "coverage: a never-enabled action is a warning" 1 "Warning: action stay is never enabled" --spec "$FD/mono_bad.cml" --coverage
+expect "coverage: is only for --spec"                3 "--coverage is not supported with --emit-tla" --emit-tla "$FD/mono.cml" --coverage
+printf 'module fx\nvar x : 0 .. 1\ninit x == 0\naction a:\n  x%s = 1 - x\nfair weak b\nproperty p: eventually x == 1\n' "'" > "$OUT/fx.cml"
+expect "a fair line naming no action is an error"    3 "fair b names no action" --spec "$OUT/fx.cml"
+# a weaker fairness line after a stronger one leaves it strong
+printf 'module fs\nvar x : 0 .. 1\nvar d : 0 .. 1\ninit x == 0 and d == 0\naction flip:\n  when d == 0\n  x%s = 1 - x\naction finish:\n  when x == 1 and d == 0\n  d%s = 1\ndeadlock = off\nfairness strong\nfairness weak\nproperty p: eventually d == 1\n' "'" "'" > "$OUT/fs.cml"
+expect "fairness weak after fairness strong stays strong" 0 "1 property held" --spec "$OUT/fs.cml"
+expect "coverage: an action --define leaves out is not listed" 0 "^<tick>: 3:3  (enabled in 3 states)" --spec "$HERE/examples/spec/ticker.cml" --coverage
+expect "coverage: no report on a model error"        3 "outside" --spec "$HERE/test/spec/sound/succbound.cml" --coverage
+expect "mono: an unwritable trace file is an error"  3 "could not write" --spec "$FD/mono_bad.cml" --trace-out /dev/full
+
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
 # the emitted module's shape (test/spec/shape.cml; emit_gate runs TLC on it)
 expect "shape: holds, with both properties" 0 "9 distinct states found" --spec "$HERE/test/spec/shape.cml"
@@ -574,9 +607,22 @@ bad "a const that fails to evaluate" "const N: bad value"      "const N = M\n$V\
 bad "a const that is a boolean"     "const N: bad value"       "const N = TRUE\n$V\n$I"
 bad "a var without :"               "var needs :"              "var x 0 .. 1\ninit x == 0\n$I"
 bad "a function var without ->"     "function var needs ->"    "var f : [0 .. 1, 0 .. 1]\ninit f == 0\n$I"
-bad "fairness other than weak"      "only 'fairness weak'"     "$V\nfairness strong\n$I"
+bad "fairness other than weak or strong" "fairness is weak or strong" "$V\nfairness fast\n$I"
+bad "a fair line with no kind"      "fair needs weak or strong" "$V\nfair a\n$I"
+bad "a fair line with no action"    "fair needs weak or strong" "$V\nfair weak\n$I"
+bad "a fair line of another kind"   "fair needs weak or strong" "$V\nfair weakly a\n$I"
+bad "a fair line, strong run on"    "fair needs weak or strong" "$V\nfair strongest a\n$I"
+bad "fairness strong run on"        "fairness is weak or strong" "$V\nfairness strongly\n$I"
+bad "too many fair lines"           "too many fair lines"      "$V\n$(for i in $(seq 33); do printf 'fair weak a\\n'; done)$I"
+bad "a fair action name too long"   "fair action name"         "$V\nfair weak $(printf 'a%.0s' $(seq 80))\n$I"
+bad "always run on"                 "property must be"         "$V\nproperty p: alwaysx\n$I"
+bad "an action property without ["  "an action property is"    "$V\nproperty p: always x_vars]_vars\n$I"
+bad "an empty action property"      "an action property is"    "$V\nproperty p: always []_vars\n$I"
+bad "an action property too long"   "property"                 "$V\nproperty p: always [$(printf 'x == x and %.0s' $(seq 60))TRUE]_vars\n$I"
+bad "an action property without _vars" "an action property is"   "$V\nproperty p: always [x' >= x]\n$I"
 bad "a property without a name"     "property needs name:"     "$V\nproperty x == 1\n$I"
-bad "a property of no known form"   "property must be"         "$V\nproperty p: always x == 0\n$I"
+bad "a property of no known form"   "property must be"         "$V\nproperty p: x == 0\n$I"
+bad "an action property on a non-boolean" "expected a boolean in an action property" "$V\naction a:\n  x' = 1 - x\nproperty p: always [x']_vars"
 bad "an invariant without a name"   "invariant needs name:"    "$V\ninvariant x <= 1"
 bad "a when outside an action"      "when outside action"      "$V\nwhen x == 0\n$I"
 bad "an action parameter without in" "action param needs 'in'" "$V\naction a(i):\n  x' = 1\n$I"
@@ -867,7 +913,20 @@ expect "trace: a format other than itf or json is an error" 3 "the formats are i
 expect "trace: --trace-format without --trace-out is an error" 3 "needs --trace-out" --spec "$HERE/test/spec/mutex.cml" --trace-format json
 expect "trace: an unwritable file is an error" 3 "could not write" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out "$OUT/no/such/dir/t.itf"
 expect "trace: a failed write is an error"     3 "could not write" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out /dev/full
-expect "trace: a liveness violation writes no file" 1 "No trace written" --spec "$HERE/test/spec/sound/dead.cml" --trace-out "$OUT/live.itf"
+# a liveness violation prints its lasso, as TLC does, and writes it:
+# ITF marks the cycle with ADR-015's "loop", JSON repeats its first state
+expect "lasso: printed with the state the cycle goes back to" 1 "Back to state 3: <flip>" --spec "$HERE/test/spec/fair/lasso.cml"
+expect "lasso: a cycle that stutters is printed so" 1 "State 2: Stuttering" --spec "$HERE/test/spec/sound/dead.cml"
+expect "lasso: written as ITF with its loop" 1 '(itf, 4 states, loop at state 3)' --spec "$HERE/test/spec/fair/lasso.cml" --trace-out "$OUT/live.itf"
+expectp "lasso: ITF loop is the index of the cycle's first state" 0 '"loop":2}' cat "$OUT/live.itf"
+expectp "lasso: ITF names the action that closes the cycle" 0 '"loopAction":"flip"' cat "$OUT/live.itf"
+expect "lasso: a stutter cycle loops at its last state" 1 '(json, 1 states, loop at state 1)' --spec "$HERE/test/spec/sound/dead.cml" --trace-out "$OUT/live.json" --trace-format json
+expectp "lasso: JSON repeats the loop state, a stutter" 0 '"action":"Stuttering","back_to":0' cat "$OUT/live.json"
+expect "lasso: as JSON" 1 '(json, 4 states, loop at state 3)' --spec "$HERE/test/spec/fair/lasso.cml" --trace-out "$OUT/live.json" --trace-format json
+expectp "lasso: JSON repeats the loop state with its action" 0 '"index":4,"action":"flip","back_to":2' cat "$OUT/live.json"
+expect "lasso: strong fairness owes only what is enabled" 1 "Back to state 3: <flip>" --spec "$HERE/test/spec/fair/lasso_sf.cml"
+expect "lasso: the cycle of A ~> B starts at an A state" 1 "State 3: Stuttering" --spec "$HERE/test/spec/sound/leads.cml"
+expect "lasso: an unwritable file is an error" 3 "could not write" --spec "$HERE/test/spec/sound/dead.cml" --trace-out /dev/full
 expect "trace: --emit-tla takes no --trace-out" 3 "not supported with --emit-tla" --emit-tla "$HERE/test/spec/mutex.cml" --trace-out "$OUT/t.itf"
 rm -f "$OUT/pass.itf"
 expect "trace: a pass writes no file" 0 "No error has been found" --spec "$HERE/test/spec/mutex.cml" --trace-out "$OUT/pass.itf"

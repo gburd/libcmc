@@ -148,7 +148,7 @@ typedef struct {
 	char tag[SP_NAME];			/* a [TAG] gate: action active only if -D TAG */
 } Action;
 typedef struct { char name[SP_NAME]; char expr[SP_EXPR]; int inductive; } SpInv;	/* inductive: an invariant marked [inductive] */
-typedef struct { char name[SP_NAME]; int kind; char a[SP_EXPR]; char b[SP_EXPR]; } SpProp;	/* kind: 0 eventually(a), 1 a~>b */
+typedef struct { char name[SP_NAME]; int kind; char a[SP_EXPR]; char b[SP_EXPR]; } SpProp;	/* kind: 0 eventually(a), 1 a~>b, 2 always [a]_vars */
 
 static struct {
 	char modname[SP_NAME];
@@ -161,7 +161,9 @@ static struct {
 	char fname[SP_MAXCONST][SP_NAME]; int foff[SP_MAXCONST]; int nfield;	/* binding [fields] */
 	char symmetry[SP_EXPR]; int has_sym;	/* a set of interchangeable values */
 	SpProp prop[SP_MAXINV]; int nprop;	/* liveness properties */
-	int fair_weak;						/* all actions weakly fair */
+	int fair_weak;						/* `fairness weak|strong`: every action, 1 WF, 2 SF */
+	char fairname[SP_MAXACT][SP_NAME]; int fairk[SP_MAXACT]; int nfair;	/* `fair weak|strong A` lines */
+	int afair[SP_MAXACT];				/* fairness per action, from the fair lines: 0, 1 WF, 2 SF */
 	int deadlock_off;					/* `deadlock = off`: no deadlock check */
 	SpInv con[SP_MAXINV]; int ncon;		/* state constraints (TLC's CONSTRAINT) */
 	SpInv acon[SP_MAXINV]; int nacon;	/* action constraints (ACTION_CONSTRAINT) */
@@ -1059,7 +1061,7 @@ static int defs_check(const char *path){
 
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
-	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0; S.nprop=0; S.fair_weak=0;
+	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0; S.nprop=0; S.fair_weak=0; S.nfair=0;
 	S.deadlock_off=0; S.ncon=S.nacon=0;
 	S.nty=S.ndefs=S.nfld=0;
 	g_symok=0;	/* no symmetry carries over from a previously loaded spec */
@@ -1069,6 +1071,14 @@ static int sp_load(const char *path){
 	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
 	if(defs_check(path)) return -1;
 	if(S.ninv==0 && S.nprop==0){ fprintf(stderr,"cmc: %s: no invariant or property\n",path); return -1; }
+	/* a fair line names an action of the spec; on one that --define
+	 * leaves out of Next it is vacuous, as WF or SF of a disabled action */
+	memset(S.afair,0,sizeof S.afair);
+	for(int i=0;i<S.nfair;i++){
+		int a=0; while(a<S.nact && strcmp(S.act[a].name,S.fairname[i])) a++;
+		if(a==S.nact){ fprintf(stderr,"cmc: %s: fair %s names no action\n",path,S.fairname[i]); return -1; }
+		if(S.fairk[i]>S.afair[a]) S.afair[a]=S.fairk[i];
+	}
 	/* a --define that gates nothing is a typo: checking without the
 	 * planted bug it meant to turn on would read as a pass */
 	for(int i=0;i<S.ndef;i++){
@@ -1119,7 +1129,18 @@ static int sp_load_into(const char *path){
 			S.nvar++; in_action=0; continue;
 		}
 		if(!strncmp(s,"def ",4)){ if(def_parse(s+4,path,ln)) goto bad; in_action=0; continue; }
-		if(!strncmp(s,"fairness ",9)){ if(!strcmp(sp_trim(s+9),"weak")) S.fair_weak=1; else { fprintf(stderr,"cmc: %s:%d: only 'fairness weak' is supported\n",path,ln); goto bad; } in_action=0; continue; }
+		if(!strncmp(s,"fairness ",9) || !strncmp(s,"fair ",5)){
+			/* `fairness weak|strong`: every action; `fair weak|strong A`:
+			 * one action, by name, resolved once every action is read */
+			int all=s[4]=='n'; char *v=sp_trim(s+(all?9:5)); int k=0;
+			if(!strncmp(v,"weak",4) && (all?!v[4]:v[4]==' ')) k=1;
+			else if(!strncmp(v,"strong",6) && (all?!v[6]:v[6]==' ')) k=2;
+			if(!k){ fprintf(stderr,"cmc: %s:%d: %s\n",path,ln,all?"fairness is weak or strong":"fair needs weak or strong and an action name"); goto bad; }
+			if(all){ if(k>S.fair_weak) S.fair_weak=k; in_action=0; continue; }
+			if(S.nfair>=SP_MAXACT){ fprintf(stderr,"cmc: too many fair lines\n"); goto bad; }
+			CPY(S.fairname[S.nfair],sp_trim(v+(k==1?4:6)),"fair action name"); S.fairk[S.nfair++]=k;
+			in_action=0; continue;
+		}
 		if(!strncmp(s,"property",8)){
 			char *rest=sp_trim(s+8); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: property needs name:\n",path,ln); goto bad; }
 			*col=0; if(S.nprop>=SP_MAXINV){ fprintf(stderr,"cmc: too many properties\n"); goto bad; }
@@ -1127,7 +1148,13 @@ static int sp_load_into(const char *path){
 			char *lt=strstr(body,"~>");
 			if(lt){ *lt=0; P->kind=1; CPY(P->a,sp_trim(body),"property"); CPY(P->b,sp_trim(lt+2),"property"); }
 			else if(!strncmp(body,"eventually",10)){ P->kind=0; CPY(P->a,sp_trim(body+10),"property"); P->b[0]=0; }
-			else { fprintf(stderr,"cmc: %s:%d: property must be 'eventually E' or 'A ~> B'\n",path,ln); goto bad; }
+			else if(!strncmp(body,"always",6) && isspace((unsigned char)body[6])){
+				/* always [E]_vars: TLA+'s [][E]_vars, E over x and x' */
+				char *a=sp_trim(body+6); size_t n=strlen(a);
+				if(a[0]!='[' || n<8 || strcmp(a+n-6,"]_vars")){ fprintf(stderr,"cmc: %s:%d: an action property is 'always [E]_vars'\n",path,ln); goto bad; }
+				a[n-6]=0; P->kind=2; CPY(P->a,sp_trim(a+1),"property"); P->b[0]=0;
+			}
+			else { fprintf(stderr,"cmc: %s:%d: property must be 'eventually E', 'A ~> B' or 'always [E]_vars'\n",path,ln); goto bad; }
 			S.nprop++; in_action=0; continue;
 		}
 		if(!strncmp(s,"symmetry ",9)){ CPY(S.symmetry,sp_trim(s+9),"symmetry set"); S.has_sym=1; in_action=0; continue; }
@@ -1638,24 +1665,30 @@ static const char *ty_itf(int ti, char *buf, size_t cap){
 	return buf;
 }
 
-/* Write the counterexample that ends at `end` to `file`, one state per
- * line, as ITF (fmt "itf") or as a JSON array (fmt "json").  The ITF
- * header follows what Apalache writes for the module cmc --emit-tla
- * makes of this spec: the constants as "params", repeated in every
- * state, and each variable's type in "varTypes".  Each state's #meta
- * also names the action that led to it, which Apalache leaves out.
- * Returns 0, or -1 if the file could not be written. */
-static int spec_write_trace(const char *file, const char *fmt, const QN *end){
+/* Write a counterexample of n states to `file`, one state per line, as
+ * ITF (fmt "itf") or as a JSON array (fmt "json").  State i has the
+ * words w[i] and, past the first, was reached by action act[i].  A
+ * lasso (loop >= 0) goes on from its last state back to state loop by
+ * action loopact, or stutters there forever when loopact is NULL.  ITF
+ * says so as ADR-015 does, with "loop": loop, and names loopact in the
+ * header's #meta; JSON repeats state loop as a last entry with the
+ * action and "back_to": loop.  The ITF header follows what Apalache
+ * writes for the module cmc --emit-tla makes of this spec: the
+ * constants as "params", repeated in every state, and each variable's
+ * type in "varTypes".  Each state's #meta also names the action that
+ * led to it, which Apalache leaves out.  Returns 0, or -1 if the file
+ * could not be written. */
+static int spec_write_trace(const char *file, const char *fmt, const long *const *w, const char *const *act,
+		int n, int loop, const char *loopact){
 	char tb[1024];
-	int itf=!strcmp(fmt,"itf"), n=0;
-	for(const QN *x=end; x; x=x->prev) n++;
-	const QN **path=malloc((size_t)n*sizeof *path);
-	FILE *o=path?fopen(file,"w"):NULL;
-	if(!o){ free(path); return -1; }
-	int i=n; for(const QN *x=end; x; x=x->prev) path[--i]=x;
+	int itf=!strcmp(fmt,"itf"), i;
+	FILE *o=fopen(file,"w");
+	if(!o) return -1;
 	if(itf){
 		fprintf(o,"{\"#meta\":{\"format\":\"ITF\",\"format-description\":\"https://apalache-mc.org/docs/adr/015adr-trace.html\","
-			"\"description\":\"Created by cmc --spec from %s\",\"varTypes\":{",S.modname);
+			"\"description\":\"Created by cmc --spec from %s\",",S.modname);
+		if(loop>=0) fprintf(o,"\"loopAction\":\"%s\",",loopact?loopact:"Stuttering");
+		fprintf(o,"\"varTypes\":{");
 		for(int vi=0;vi<S.nvar;vi++) fprintf(o,"%s\"%s\":\"%s\"",vi?",":"",S.var[vi].name,ty_itf(S.var[vi].ty,tb,sizeof tb));
 		fprintf(o,"}},\n\"params\":[");
 		for(int c=0;c<S.ncst;c++) fprintf(o,"%s\"%s\"",c?",":"",S.cst[c].name);
@@ -1664,25 +1697,28 @@ static int spec_write_trace(const char *file, const char *fmt, const QN *end){
 		fprintf(o,"],\n\"states\":[\n");
 	}
 	else fprintf(o,"[\n");
-	for(i=0;i<n;i++){
-		const QN *x=path[i];
-		Value vv[SP_MAXVAR]; qn_views(x,vv);
+	int last=n+(loop>=0 && !itf);	/* JSON repeats the loop state */
+	for(i=0;i<last;i++){
+		int k=i<n?i:loop;
+		Value vv[SP_MAXVAR]; const long *p=w[k];
+		for(int vi=0;vi<S.nvar;vi++){ vv[vi]=enc_view(p); p+=enc_len(p); }
 		if(itf){
 			fprintf(o,"{\"#meta\":{\"index\":%d",i);
-			if(i) fprintf(o,",\"action\":\"%s\"",x->step);
+			if(i) fprintf(o,",\"action\":\"%s\"",act[i]);
 			fprintf(o,"}");
 			for(int c=0;c<S.ncst;c++) fprintf(o,",\"%s\":{\"#bigint\":\"%ld\"}",S.cst[c].name,S.cst[c].val);
 		}
-		else if(i) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"vars\":{",i,x->step);
+		else if(i==n) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"back_to\":%d,\"vars\":{",i,loopact?loopact:"Stuttering",loop);
+		else if(i) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"vars\":{",i,act[i]);
 		else fprintf(o,"{\"index\":0,\"action\":null,\"vars\":{");
 		for(int vi=0;vi<S.nvar;vi++){
 			fprintf(o,"%s\"%s\":",vi||itf?",":"",S.var[vi].name);
 			trace_value(o,&vv[vi],itf);
 		}
-		fprintf(o,"%s%s\n",itf?"}":"}}",i+1<n?",":"");
+		fprintf(o,"%s%s\n",itf?"}":"}}",i+1<last?",":"");
 	}
-	fprintf(o,"%s\n",itf?"]}":"]");
-	free(path);
+	if(itf && loop>=0) fprintf(o,"],\n\"loop\":%d}\n",loop);
+	else fprintf(o,"%s\n",itf?"]}":"]");
 	return fclose(o)?-1:0;
 }
 
@@ -1745,7 +1781,13 @@ static int print_trace(const QN *cur){
 	for(int vi=0;vi<S.nvar;vi++){ printf(" %s=",S.var[vi].name); val_print(&vv[vi]); }
 	printf("\n");
 	if(!g_trace_out) return 0;
-	if(spec_write_trace(g_trace_out,g_trace_fmt,cur)){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
+	const long **w=malloc((size_t)cn*2*sizeof *w);
+	if(!w){ fprintf(stderr,"cmc: out of memory\n"); exit(1); }
+	const char **act=(const char **)(void *)(w+cn);
+	si=cn; for(const QN *x=cur; x; x=x->prev){ si--; w[si]=x->w; act[si]=x->step; }
+	int wr=spec_write_trace(g_trace_out,g_trace_fmt,w,act,cn,-1,NULL);
+	free(w);
+	if(wr){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
 	printf("Trace written to %s (%s, %d states).\n",g_trace_out,g_trace_fmt,cn);
 	return 0;
 }
@@ -1760,6 +1802,29 @@ static int check_new(const QN *x){
 	if(bad<0) return 0;
 	printf("Error: Invariant %s is violated.\n", S.inv[bad].name);
 	return print_trace(x) ? 3 : 1;
+}
+
+/* Check every action property (`always [E]_vars`) on the step from
+ * `from` to `to`, the state of `x`, as TLC checks an implied action on each
+ * transition it generates, inside the model or not, to a new state or
+ * a seen one.  A step that changes no variable is a stutter, which
+ * [E]_vars allows.  Returns 0 if they hold, else the exit status (1 for
+ * a violation, after its trace; 3 on an evaluation error). */
+static int check_step(const State *from, const State *to, const QN *x){
+	if(state_eq(from,to)) return 0;
+	char err[256]; Value cur[SP_MAXVAR], nxt[SP_MAXVAR];
+	st_views(from,cur); st_views(to,nxt);
+	Env env=env_new(cur); env.nxt=nxt;
+	size_t m=ar_mark(); int rc=0;
+	for(int i=0;i<S.nprop && !rc;i++){
+		if(S.prop[i].kind!=2) continue;
+		int h; if(!sp_eval_bool(S.prop[i].a,&env,&h,"an action property",err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); rc=3; break; }
+		if(h) continue;
+		printf("Error: Action property %s is violated.\n",S.prop[i].name);
+		rc=print_trace(x) ? 3 : 1;
+	}
+	ar_release(m);
+	return rc;
 }
 
 /* =====================================================================
@@ -1922,39 +1987,178 @@ out:	free(num); free(low); free(stk); free(cs); free(ce); free(on);
 	return nscc;
 }
 
-/* the bad region of mask (see the section comment): reg[i] is set for
- * each masked state that reaches, through masked states, an SCC a fair
- * run can stay in forever.  Returns 0 ok, -1 on OOM. */
-static int lv_bad_region(const unsigned char *mask, unsigned char *reg){
+/* the fairness the spec puts on action a: 0 none, 1 WF, 2 SF */
+static int act_fair(int a){
+	if(!act_active(&S.act[a])) return 0;
+	return S.afair[a]>S.fair_weak ? S.afair[a] : S.fair_weak;
+}
+
+/* The fair core of mask (see the section comment): core[i] is set for
+ * each masked state in a component a fair run can stay in forever.
+ * The work mask starts as mask; each round splits it into SCCs.  An SCC
+ * in which an SF action is enabled somewhere and taken nowhere loses
+ * the states that enable such an action, and what is left goes to the
+ * next round.  Any other SCC is final, and fair iff every WF action is
+ * disabled somewhere in it or taken inside it.  An SCC that loses
+ * states loses an SF action for good, so the rounds end.  Returns 0
+ * ok, -1 on OOM. */
+static int lv_fair_core(const unsigned char *mask, unsigned char *core){
 	int n=lv.n, na=S.nact, rc=-1;
-	int *comp=malloc(sizeof(int)*(size_t)n), *queue=malloc(sizeof(int)*(size_t)n);
-	unsigned char *dis=NULL, *tak=NULL, *fair=NULL;
-	if(!comp||!queue) goto out;
-	int nscc=lv_scc(mask,comp); if(nscc<0) goto out;
-	dis=calloc((size_t)nscc*(size_t)na+1,1); tak=calloc((size_t)nscc*(size_t)na+1,1); fair=calloc((size_t)nscc+1,1);
-	if(!dis||!tak||!fair) goto out;
-	for(int u=0;u<n;u++){
-		if(!mask[u]) continue;
-		size_t c=(size_t)comp[u];
-		for(int a=0;a<na;a++) if(!lv.en[(size_t)u*(size_t)na+(size_t)a]) dis[c*(size_t)na+(size_t)a]=1;
-		for(int e=lv.head[u];e!=-1;e=lv.next[e]){ int v=lv.to[e];
-			if(mask[v] && comp[v]==comp[u]) tak[c*(size_t)na+(size_t)lv.act[e]]=1; }
-	}
-	for(int c=0;c<nscc;c++){
-		fair[c]=1;
-		if(!S.fair_weak) continue;
-		for(int a=0;a<na;a++){
-			if(!act_active(&S.act[a])) continue;
-			if(!dis[(size_t)c*(size_t)na+(size_t)a] && !tak[(size_t)c*(size_t)na+(size_t)a]) fair[c]=0;
+	int *comp=malloc((sizeof(int)+1)*(size_t)n+1);
+	unsigned char *work=(unsigned char *)(comp+n), *dis=NULL, *en, *tak, *cut, *shed;
+	if(!comp) return -1;
+	memcpy(work,mask,(size_t)n); memset(core,0,(size_t)n);
+	for(int left=1; left;){
+		int nscc=lv_scc(work,comp); if(nscc<0) goto out;
+		/* per SCC and action: disabled somewhere, enabled somewhere,
+		 * taken inside, SF and to be cut; then per SCC: sheds states */
+		size_t cells=(size_t)nscc*(size_t)na;
+		free(dis); dis=calloc(cells*4+(size_t)nscc+1,1); if(!dis) goto out;
+		en=dis+cells; tak=en+cells; cut=tak+cells; shed=cut+cells;
+		for(int u=0;u<n;u++){
+			if(!work[u]) continue;
+			size_t c=(size_t)comp[u]*(size_t)na;
+			for(int a=0;a<na;a++){ if(lv.en[(size_t)u*(size_t)na+(size_t)a]) en[c+(size_t)a]=1; else dis[c+(size_t)a]=1; }
+			for(int e=lv.head[u];e!=-1;e=lv.next[e]){ int v=lv.to[e];
+				if(work[v] && comp[v]==comp[u]) tak[c+(size_t)lv.act[e]]=1; }
+		}
+		/* which SF actions each SCC must shed: enabled, never taken */
+		for(int c=0;c<nscc;c++){ size_t o=(size_t)c*(size_t)na;
+			for(int a=0;a<na;a++) if(act_fair(a)==2 && en[o+(size_t)a] && !tak[o+(size_t)a]){ cut[o+(size_t)a]=1; shed[c]=1; }
+		}
+		left=0;
+		for(int u=0;u<n;u++){
+			if(!work[u]) continue;
+			size_t o=(size_t)comp[u]*(size_t)na;
+			if(shed[comp[u]]){
+				int keep=1;
+				for(int a=0;a<na;a++) if(cut[o+(size_t)a] && lv.en[(size_t)u*(size_t)na+(size_t)a]) keep=0;
+				work[u]=(unsigned char)keep; left|=keep;
+				continue;
+			}
+			int fair=1;
+			for(int a=0;a<na;a++) if(act_fair(a)==1 && !dis[o+(size_t)a] && !tak[o+(size_t)a]) fair=0;
+			core[u]=(unsigned char)fair; work[u]=0;
 		}
 	}
-	int qt=0;
-	for(int u=0;u<n;u++){ reg[u]=mask[u] && fair[comp[u]]; if(reg[u]) queue[qt++]=u; }
+	rc=0;
+out:	free(comp); free(dis);
+	return rc;
+}
+
+/* the fair core of mask into core[], and its bad region: reg[i] is set
+ * for each masked state that reaches, through masked states, the fair
+ * core.  Returns 0 ok, -1 on OOM. */
+static int lv_bad_region(const unsigned char *mask, unsigned char *core, unsigned char *reg){
+	int n=lv.n, qt=0;
+	int *queue=malloc(sizeof(int)*(size_t)n+1);
+	if(!queue || lv_fair_core(mask,core)){ free(queue); return -1; }
+	memcpy(reg,core,(size_t)n);
+	for(int u=0;u<n;u++) if(reg[u]) queue[qt++]=u;
 	for(int qh=0; qh<qt; qh++){ int v=queue[qh];
 		for(int k=lv.rhead[v];k<lv.rhead[v+1];k++){ int u=lv.rsrc[k];
 			if(mask[u] && !reg[u]){ reg[u]=1; queue[qt++]=u; } } }
+	free(queue);
+	return 0;
+}
+
+/* A lasso counterexample under construction: the states s[0 .. n-1].st
+ * of the liveness graph, each reached from the one before by action
+ * s[i].act (s[0].act is -1, the initial state). */
+typedef struct { struct { int st, act; } *s; int n, cap; } Lasso;
+
+static int lasso_push(Lasso *q, int st, int act){
+	if(q->n==q->cap){
+		int nc=q->cap*2+64;
+		void *ns=realloc(q->s,sizeof q->s[0]*(size_t)nc); if(!ns) return -1;
+		q->s=ns; q->cap=nc;
+	}
+	q->s[q->n].st=st; q->s[q->n].act=act; q->n++;
+	return 0;
+}
+static int lasso_last(const Lasso *q){ return q->s[q->n-1].st; }
+
+/* The shortest path from src to a state with goal[] set, through states
+ * with allow[] set (every state when allow is NULL), appended to q past
+ * src, which q already ends in.  Returns the state reached, src itself
+ * when goal[src] is set, or -1 on OOM or when no goal is reachable,
+ * which the callers rule out. */
+static int lv_path(int src, const unsigned char *allow, const unsigned char *goal, Lasso *q){
+	if(goal[src]) return src;
+	int n=lv.n, qt=0, hit=-1;
+	int *par=malloc(sizeof(int)*3*(size_t)n); if(!par) return -1;
+	int *pe=par+n, *fifo=pe+n;
+	for(int i=0;i<n;i++) par[i]=-1;
+	par[src]=src; fifo[qt++]=src;
+	for(int qh=0; qh<qt && hit<0; qh++){ int u=fifo[qh];
+		for(int e=lv.head[u]; e!=-1; e=lv.next[e]){ int v=lv.to[e];
+			if(par[v]!=-1 || (allow && !allow[v])) continue;
+			par[v]=u; pe[v]=e; fifo[qt++]=v;
+			if(goal[v]){ hit=v; break; }
+		}
+	}
+	/* walk back to src, then append forwards (fifo is free now) */
+	int k=0; for(int v=hit; v>=0 && v!=src; v=par[v]) fifo[k++]=v;
+	while(k>0){ int v=fifo[--k]; if(lasso_push(q,v,lv.act[pe[v]])){ hit=-1; break; } }
+	free(par);
+	return hit;
+}
+
+/* Is fair action a still owed on the walk q->s[from .. q->n-1], the
+ * steps between them taken?  WF(a) is met once a is taken or disabled at
+ * a state of the walk, SF(a) once a is taken or if it is enabled at no
+ * state of the walk. */
+static int lv_owed(const Lasso *q, int from, int a){
+	int na=S.nact, f=act_fair(a), en=0;
+	if(!f) return 0;
+	for(int i=from;i<q->n;i++){
+		if(i>from && q->s[i].act==a) return 0;
+		en|=lv.en[(size_t)q->s[i].st*(size_t)na+(size_t)a];
+		if(f==1 && !lv.en[(size_t)q->s[i].st*(size_t)na+(size_t)a]) return 0;
+	}
+	return f==1 || en;
+}
+
+/* Close a fair cycle that starts at entry, the last state of q and a
+ * state of the fair core, staying inside entry's SCC of the core (each
+ * such SCC is one the fixpoint in lv_fair_core() kept).  While a fair
+ * action is owed (lv_owed()), walk to the nearest state of the SCC that
+ * discharges it: one with an a step inside the SCC, then take it, or
+ * for WF one where a is disabled.  Such a state exists: in a kept SCC a
+ * WF action is disabled somewhere or taken inside it, and an SF action
+ * enabled in it is taken inside it.  Once nothing is owed, walk back to
+ * entry, and go on while that leg left something owed.  Each round
+ * discharges an action for good or closes the cycle, so the walk ends.
+ * When nothing was ever owed the cycle is a stutter at entry, *loopact
+ * -1; otherwise *loopact is the action of the step back to entry, which
+ * q does not hold.  Returns 0, or -1 on OOM. */
+static int lv_cycle(const unsigned char *core, Lasso *q, int *loopact){
+	int n=lv.n, na=S.nact, entry=lasso_last(q), start=q->n-1, rc=-1;
+	int *comp=malloc((sizeof(int)+2)*(size_t)n);
+	if(!comp) return -1;
+	unsigned char *in=(unsigned char *)(comp+n), *goal=in+n;
+	if(lv_scc(core,comp)<0) goto out;
+	for(int u=0;u<n;u++) in[u]=(unsigned char)(core[u] && comp[u]==comp[entry]);
+	for(;;){
+		int a=0; while(a<na && !lv_owed(q,start,a)) a++;
+		int last=lasso_last(q);
+		if(a==na && last==entry) break;
+		for(int u=0;u<n;u++){
+			goal[u]=0;
+			if(!in[u]) continue;
+			if(a==na){ goal[u]=u==entry; continue; }
+			if(act_fair(a)==1 && !lv.en[(size_t)u*(size_t)na+(size_t)a]) goal[u]=1;
+			for(int e=lv.head[u];e!=-1;e=lv.next[e]) if(lv.act[e]==a && in[lv.to[e]]) goal[u]=1;
+		}
+		int u=lv_path(last,in,goal,q);
+		if(u<0) goto out;
+		if(a==na || !lv.en[(size_t)u*(size_t)na+(size_t)a]) continue;
+		int e=lv.head[u]; while(lv.act[e]!=a || !in[lv.to[e]]) e=lv.next[e];
+		if(lasso_push(q,lv.to[e],a)) goto out;
+	}
+	*loopact = q->n>start+1 ? q->s[--q->n].act : -1;
 	rc=0;
-out:	free(comp); free(queue); free(dis); free(tak); free(fair);
+out:	free(comp);
 	return rc;
 }
 
@@ -1969,28 +2173,81 @@ static int lv_holds(const char *expr, int u, int *holds, char *err, size_t errca
 	return ok ? 0 : -1;
 }
 
-/* check all liveness properties; returns index+1 of a violated property
- * (name via *name), 0 if all hold, -1 on error */
-static int liveness_check(const State *init, const char **name, char *err, size_t errcap){
+/* Print the lasso q, whose cycle runs from its last state back to state
+ * q->s[loop] by action loopact (-1: it stutters there), as TLC prints
+ * a temporal counterexample, and write it to the --trace-out file if
+ * one was named.  Returns 0, or 3 if that file could not be written. */
+static int print_lasso(const Lasso *q, int loop, int loopact){
+	const char *la = loopact<0 ? NULL : S.act[loopact].name;
+	printf("Error: The following behavior constitutes a counter-example:\n");
+	for(int i=0;i<q->n;i++){
+		static State st; lv_get(q->s[i].st,&st);
+		Value vv[SP_MAXVAR]; st_views(&st,vv);
+		printf("State %d: <%s>\n  ",i+1,i?S.act[q->s[i].act].name:"Initial predicate");
+		for(int vi=0;vi<S.nvar;vi++){ printf("%s%s=",vi?" ":"",S.var[vi].name); val_print(&vv[vi]); }
+		printf("\n");
+	}
+	if(la) printf("Back to state %d: <%s>\n",loop+1,la);
+	else printf("State %d: Stuttering\n",q->n+1);
+	if(!g_trace_out) return 0;
+	const long **w=malloc((size_t)q->n*2*sizeof *w);
+	if(!w){ fprintf(stderr,"cmc: out of memory\n"); exit(1); }
+	const char **act=(const char **)(void *)(w+q->n);
+	for(int i=0;i<q->n;i++){ w[i]=lv.pool+lv.off[q->s[i].st]; act[i]=i?S.act[q->s[i].act].name:NULL; }
+	int wr=spec_write_trace(g_trace_out,g_trace_fmt,w,act,q->n,loop,la);
+	free(w);
+	if(wr){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
+	printf("Trace written to %s (%s, %d states, loop at state %d).\n",g_trace_out,g_trace_fmt,q->n,loop+1);
+	return 0;
+}
+
+/* The counterexample to a property whose goal fails on the bad region
+ * reg[] with fair core core[] (see the section comment): a shortest
+ * path from the initial state to a state of start[], where the property
+ * fails, on through the bad region to the core, then a fair cycle
+ * there.  Prints it; returns 1, 3 if the trace file could not be
+ * written, or -1 on OOM. */
+static int lv_lasso(const unsigned char *start, const unsigned char *reg, const unsigned char *core, char *err, size_t errcap){
+	Lasso q={0}; int rc=-1, loopact;
+	if(lasso_push(&q,0,-1) || lv_path(0,NULL,start,&q)<0 || lv_path(lasso_last(&q),reg,core,&q)<0) goto out;
+	int loop=q.n-1;
+	if(lv_cycle(core,&q,&loopact)) goto out;
+	rc=print_lasso(&q,loop,loopact) ? 3 : 1;
+out:	if(rc<0) snprintf(err,errcap,"out of memory");
+	free(q.s);
+	return rc;
+}
+
+/* Check all liveness properties.  At the first violated one, print the
+ * violation and its lasso; returns 1, or 3 if the trace file could not
+ * be written.  Returns 0 if all hold, -1 on error (message in err). */
+static int liveness_check(const State *init, char *err, size_t errcap){
 	if(S.nprop==0) return 0;
 	if(g_symok){ snprintf(err,errcap,"liveness properties cannot be checked under symmetry reduction"); return -1; }
 	int rc=0;
-	unsigned char *mask=NULL, *reg=NULL;
+	unsigned char *mask=NULL, *reg=NULL, *core=NULL, *start=NULL;
 	if(lv_build(init,err,errcap)){ rc=-1; goto out; }
-	mask=malloc((size_t)lv.n); reg=malloc((size_t)lv.n);
-	if(!mask||!reg){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+	mask=malloc((size_t)lv.n*4);
+	if(!mask){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+	reg=mask+lv.n; core=reg+lv.n; start=core+lv.n;
 	for(int pi=0; pi<S.nprop && rc==0; pi++){ const SpProp *P=&S.prop[pi];
+		if(P->kind==2) continue;	/* an action property: checked on each step */
 		const char *goal = P->kind==0 ? P->a : P->b;
 		for(int u=0;u<lv.n;u++){ int g; if(lv_holds(goal,u,&g,err,errcap)){ rc=-1; goto out; } mask[u]=!g; }
-		if(lv_bad_region(mask,reg)){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
-		if(P->kind==0){ if(reg[0]){ *name=P->name; rc=pi+1; } continue; }
-		for(int u=0;u<lv.n && rc==0;u++){
-			if(!reg[u]) continue;
-			int a; if(lv_holds(P->a,u,&a,err,errcap)){ rc=-1; goto out; }
-			if(a){ *name=P->name; rc=pi+1; }
+		if(lv_bad_region(mask,core,reg)){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+		/* where the property fails: init for eventually, each A state
+		 * of the bad region for A ~> B */
+		int bad=0;
+		for(int u=0;u<lv.n;u++){
+			int a=P->kind==0 ? u==0 : 1;
+			if(reg[u] && a && P->kind==1 && lv_holds(P->a,u,&a,err,errcap)){ rc=-1; goto out; }
+			start[u]=(unsigned char)(reg[u] && a); bad|=start[u];
 		}
+		if(!bad) continue;
+		printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",P->name);
+		rc=lv_lasso(start,reg,core,err,errcap);
 	}
-out:	free(mask); free(reg); lv_free();
+out:	free(mask); lv_free();
 	return rc;
 }
 
@@ -2005,6 +2262,28 @@ static int set_defines(char **defs, int ndefs){
 	return 0;
 }
 
+static int g_coverage;	/* cmc --spec --coverage */
+void cmc_spec_set_coverage(int on){ g_coverage=on; }
+
+/* The --coverage report, after the search: per active action, in TLC's
+ * -coverage form "<A>: distinct:generated" (the new states it found,
+ * and every successor it produced, a stutter or a seen state included),
+ * then how many explored states enable it.  The initial state is Init's
+ * one generated state, distinct if it is inside the model.  An action
+ * enabled in no explored state is vacuous, and named as a warning.
+ * Counts cover the states explored, all of them on a complete run. */
+static void print_coverage(int init_new, const size_t *en, const size_t *gen, const size_t *nw){
+	printf("The coverage statistics:\n");
+	printf("<Init>: %d:1\n",init_new);
+	for(int a=0;a<S.nact;a++){
+		if(!act_active(&S.act[a])) continue;
+		printf("<%s>: %zu:%zu  (enabled in %zu states)\n",S.act[a].name,nw[a],gen[a],en[a]);
+	}
+	printf("End of statistics.\n");
+	for(int a=0;a<S.nact;a++)
+		if(act_active(&S.act[a]) && !en[a]) printf("Warning: action %s is never enabled.\n",S.act[a].name);
+}
+
 int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt){
 	g_trace_out=trace_out; g_trace_fmt=trace_fmt;
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
@@ -2012,7 +2291,8 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	if(sym_init(err,sizeof err)){ fprintf(stderr,"cmc: %s: %s\n",path,err); return 3; }
 	/* the liveness graph (lv_build) knows no constraints; TLC's meaning
 	 * for a property under a constraint is not modelled, so refuse it */
-	if(S.nprop && (S.ncon || S.nacon)){ fprintf(stderr,"cmc: %s: a liveness property cannot be checked under a constraint or an action constraint\n",path); return 3; }
+	int nactp=0; for(int i=0;i<S.nprop;i++) nactp+=S.prop[i].kind==2;
+	if(S.nprop>nactp && (S.ncon || S.nacon)){ fprintf(stderr,"cmc: %s: a liveness property cannot be checked under a constraint or an action constraint\n",path); return 3; }
 	/* parse-check every invariant and guard once (over the init state) */
 	State init; if(sp_init_state(&init,err,sizeof err)){ fprintf(stderr,"cmc: %s: init: %s\n",path,err); return 3; }
 
@@ -2027,6 +2307,10 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	if (!q) { fprintf(stderr, "cmc: out of memory\n"); return 1; }
 	QN *root = qn_new(&init);
 	size_t distinct=0, generated=1; int maxdepth=0;
+	/* --coverage: per action, the states it is enabled in, its
+	 * successors (TLC's "generated") and the new states among them
+	 * (TLC's "distinct") */
+	size_t cov_en[SP_MAXACT]={0}, cov_gen[SP_MAXACT]={0}, cov_new[SP_MAXACT]={0};
 	int SUCCAP = 4096; State *succ = malloc((size_t)SUCCAP * sizeof *succ);
 	if (!succ) { fprintf(stderr, "cmc: out of memory\n"); free(q); free(root); return 1; }
 
@@ -2040,7 +2324,8 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	 * counted once, through the second. */
 	int ret = check_new(root), in = 1;
 	if(!ret && sp_in_model(NULL,&init,&in,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); ret=3; }
-	if(!ret && in){ seen_insert(&init); q[qt++]=root; distinct=1; }
+	int init_in = !ret && in;
+	if(init_in){ seen_insert(&init); q[qt++]=root; distinct=1; }
 	else free(root);
 	while(qh<qt && !ret){
 		QN *cur=q[qh];
@@ -2054,15 +2339,18 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 			int ns=0; int rc=0; Env env=env_new(NULL);
 			bind_params(&S.act[ai],&env,0,&cst,succ,&ns,SUCCAP,err,sizeof err,&rc);
 			if(rc<0){ fprintf(stderr,"cmc: action %s: %s\n",S.act[ai].name,err); ret=3; break; }
-			nsucc+=ns;
+			nsucc+=ns; cov_gen[ai]+=(size_t)ns; cov_en[ai]+=ns>0;
 			for(int k=0;k<ns && !ret;k++){
 				generated++;
 				if(sp_in_model(&cst,&succ[k],&in,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); ret=3; break; }
-				if(in && !seen_insert(&succ[k])) continue;
-				if(seen_n>=SP_MAXSTATES){ printf("INCOMPLETE: more than %d states\n",SP_MAXSTATES); ret=2; break; }
+				int fresh = in && seen_insert(&succ[k]);
+				if(fresh && seen_n>=SP_MAXSTATES){ printf("INCOMPLETE: more than %d states\n",SP_MAXSTATES); ret=2; break; }
+				if(fresh) cov_new[ai]++;
+				if(in && !fresh && !nactp) continue;
 				QN *nn=qn_new(&succ[k]); nn->prev=cur; snprintf(nn->step,sizeof nn->step,"%s",S.act[ai].name); nn->depth=cur->depth+1;
-				ret=check_new(nn);
-				if(!in || ret){ free(nn); continue; }
+				if(fresh || !in) ret=check_new(nn);
+				if(!ret) ret=check_step(&cst,&succ[k],nn);
+				if(!fresh || ret){ free(nn); continue; }
 				if(qt>=qcap){ qcap*=2; QN **nq=realloc(q,qcap*sizeof *q); if(!nq){ fprintf(stderr,"cmc: out of memory\n"); free(nn); ret=1; break; } q=nq; }
 				q[qt++]=nn; distinct++;
 			}
@@ -2075,14 +2363,11 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	}
 	if(ret==0){
 		/* safety held; now check any liveness properties on the full graph */
-		if(S.nprop>0){
-			const char *pn=NULL; char lerr[256];
-			int lr=liveness_check(&init,&pn,lerr,sizeof lerr);
+		if(S.nprop>nactp){
+			char lerr[256];
+			int lr=liveness_check(&init,lerr,sizeof lerr);
 			if(lr<0){ fprintf(stderr,"cmc: liveness: %s\n",lerr); ret=3; }
-			else if(lr>0){
-				printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",pn); ret=1;
-				if(trace_out) printf("No trace written: a liveness violation is reported without a path.\n");
-			}
+			else ret=lr;
 		}
 		if(ret==0){
 			printf("Model checking completed. No error has been found.\n");
@@ -2091,6 +2376,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 			printf("  %d invariant%s, %d propert%s held.\n", S.ninv, S.ninv==1?"":"s", S.nprop, S.nprop==1?"y":"ies");
 		}
 	}
+	if(g_coverage && ret!=3) print_coverage(init_in, cov_en, cov_gen, cov_new);
 	for(size_t i=0;i<qt;i++) free(q[i]);
 	free(q); free(succ); free(seen);
 	return ret;
@@ -2593,7 +2879,7 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 	/* Next = disjunction of actions */
 	fprintf(o,"Next ==\n"); { int any=0; for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o,"  \\/ %s\n",S.act[a].name); any=1; } if(!any) fprintf(o,"  FALSE\n"); } fprintf(o,"\n");
 	fprintf(o,"Spec == Init /\\ [][Next]_vars");
-	if(S.fair_weak){ for(int a=0;a<S.nact;a++){ if(!act_active(&S.act[a])) continue; fprintf(o," /\\ WF_vars(%s)",S.act[a].name); } }
+	for(int a=0;a<S.nact;a++){ int k=act_fair(a); if(k) fprintf(o," /\\ %s_vars(%s)",k==2?"SF":"WF",S.act[a].name); }
 	fprintf(o,"\n\n");
 	/* the type invariant, from the variables' declared types */
 	fprintf(o,"TypeOK ==\n");
@@ -2606,6 +2892,7 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 	/* liveness properties */
 	for(int i=0;i<S.nprop;i++){ SpProp *P=&S.prop[i]; fprintf(o,"%s ==\n  ",P->name);
 		if(P->kind==0){ fprintf(o,"<>("); tla_expr_fixup(P->a,o); fprintf(o,")"); }
+		else if(P->kind==2){ fprintf(o,"[][("); tla_expr_fixup(P->a,o); fprintf(o,")]_vars"); }
 		else { fprintf(o,"("); tla_expr_fixup(P->a,o); fprintf(o,") ~> ("); tla_expr_fixup(P->b,o); fprintf(o,")"); }
 		fprintf(o,"\n"); }
 	emit_proof(o);

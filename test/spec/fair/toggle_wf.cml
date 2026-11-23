@@ -1,0 +1,4 @@
+# weak fairness on every action: flip for ever is fair (violated)
+module toggle_wf
+extends toggle
+fairness weak

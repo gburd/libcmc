@@ -1,0 +1,4 @@
+# weak fairness on every action: the cycle 0 <-> 1 is fair (violated)
+module inner_wf
+extends inner
+fairness weak

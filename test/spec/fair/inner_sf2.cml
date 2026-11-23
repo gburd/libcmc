@@ -1,0 +1,5 @@
+# SF on up as well: up is enabled at 1 on every cycle, so a fair run
+# reaches 2 infinitely often and SF on finish takes it (holds)
+module inner_sf2
+extends inner_sf
+fair strong up

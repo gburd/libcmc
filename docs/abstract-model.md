@@ -84,7 +84,8 @@ SMT-encodable -- not full TLA+.
 - `symmetry SET` -- declare SET's values interchangeable, collapsing
   symmetric states (see below).  SET is a constant set of at most 8
   values; anything else is an error.
-- `fairness weak` and `property NAME: ...` -- liveness (see below).
+- `fairness weak|strong`, `fair weak|strong ACTION` and
+  `property NAME: ...` -- liveness and action properties (see below).
 - `deadlock = off` (or `deadlock = on`, the default) -- whether a state
   with no enabled action is an error (see below).
 - `constraint NAME: EXPR` and `action_constraint NAME: EXPR` -- bound
@@ -160,7 +161,8 @@ checked but not counted, so the search can end with 0 distinct states,
 as TLC's does.
 
 A constraint narrows the search, not the specification, so a liveness
-property under one, and `--refine` against a spec with one, are
+property (an action property is fine: it is checked step by step, as
+TLC does) under one, and `--refine` against a spec with one, are
 refused (exit 3): neither is modelled.  `cmc --emit-tla` writes each
 constraint as an operator, and `cmc --emit-cfg` names it under
 `CONSTRAINT` or `ACTION_CONSTRAINT`.
@@ -365,8 +367,16 @@ led to it (Apalache leaves that out).  `json` writes a plain array, one
 object per state with its `index`, its `action` (`null` for the first)
 and its `vars`, an integer as a number, a function as an object keyed
 by its arguments, a record as an object of its fields and a sequence as
-an array.  A liveness violation has no path to write, and
-a pass writes no file.
+an array.  A pass writes no file.
+
+A liveness violation writes the lasso cmc prints (see Liveness): ITF
+lists the prefix and the cycle and marks the state the cycle goes back
+to with ADR-015's `"loop": INDEX`, and the header's `#meta` names the
+closing action as `loopAction` (`Stuttering` for a cycle that stays put).
+JSON lists the same states, then the loop state again, with that action
+and `"back_to": INDEX`.  Apalache 0.63 writes no `loop` for a temporal
+violation; it repeats the loop state and adds its own `__InLoop`
+variables, so the Apalache gate compares invariant traces only.
 
 The spec gate checks that each file parses, holds the printed actions
 plus the initial state, and ends in the printed state; the Apalache gate
@@ -399,9 +409,67 @@ property reaches_max: eventually x == N
 Under weak fairness (every continuously-enabled action eventually fires),
 `eventually E` requires every behaviour to reach `E`, and `A ~> B`
 requires every `A` to be followed by a `B`.  A violation is a fair cycle
-that avoids the goal.  This is bounded, in-process liveness on the
+that avoids the goal, printed as TLC prints it: the states of a path
+to it, then `Back to state N: <action>` for the step that closes the
+cycle, or `State N: Stuttering` when the run just stops there.  The
+prefix takes a shortest path to a state where the property fails, then
+a shortest one on to the cycle, and the cycle takes each action the
+fairness asks it to take, so the lasso is a fair run that never meets
+the goal.  The emit gate checks that TLC prints a lasso of the same
+length, going back to the same state, on every violated property.  This is bounded, in-process liveness on the
 abstract model; `cmc --emit-tla` emits the fairness and the property so
 TLC can check the same thing.
+
+Fairness can be strong, and it can be per action:
+
+```
+fair weak flip            # WF_vars(flip)
+fair strong finish        # SF_vars(finish)
+fairness strong           # SF_vars(A) for every action A
+```
+
+Weak fairness forbids a run that from some point on has an action
+continuously enabled and never takes it; strong fairness forbids one
+that has it enabled infinitely often and never takes it.  An action
+with more than one fairness line gets the strongest.  A parameterized
+action `A(p in S)` is fair as a whole, as TLA+'s `WF_vars(A)` with `A ==
+\E p \in S : ...`: some instance is taken, not each one.  The check
+finds a fair cycle by TLC's method for strong fairness: split the
+non-goal states into strongly connected components; a component in
+which a strongly fair action is enabled somewhere and taken nowhere
+loses the states that enable it, and the rest is split again; a
+component left standing is fair when every weakly fair action is
+disabled somewhere in it or taken inside it.  The `toggle` and `inner`
+models in `test/spec/fair/` give different verdicts under weak and
+strong fairness, and TLC agrees on each.
+
+An action property is TLA+'s `[][E]_vars`:
+
+```
+property monotone: always [x' >= x]_vars
+```
+
+Every step that changes a variable must satisfy E, an expression over
+the variables before (`x`) and after (`x'`) the step; a stutter is
+allowed.  It is checked on every step the search generates, to a new
+state, a seen one, or one outside a `constraint`, as TLC checks it, and
+a violation is reported with the shortest trace that ends in the bad
+step ("Error: Action property monotone is violated.").
+
+## Coverage
+
+`cmc --spec FILE --coverage` prints, after the search, each action's
+line of TLC's `-coverage` report: `<A>: distinct:generated`, the new
+states it found and all the successors it produced (stutters and states
+already seen included), and how many explored states enable it.  An
+action no explored state enables is named in a warning, since a model
+in which it never fires checks nothing about it.  The counts match
+TLC's on the same model (see `test/spec_calibrate.sh`), with one
+difference: TLC counts the successors of an action that has an
+existential quantifier in its guard once per witness of the
+quantifier, so its "generated" can be larger; cmc counts each
+successor once.  The distinct count, the one that shows vacuity, is
+the same.
 
 ## Exit status
 

@@ -1,0 +1,16 @@
+# test/spec/fair/param.cml: the fairness of a parameterized action is
+# that of its disjunction, as WF_vars(go) for go == \E i \in 0 .. 1 :
+# ...  go(0) flips x for ever, which takes go, so WF on go holds on a
+# run that never takes go(1) and never finishes (violated).  Fairness
+# per instance would make go(1) fire and the property hold.
+module param
+var x : 0 .. 1
+var done : 0 .. 1
+init x == 0 and done == 0
+action go(i in 0 .. 1):
+  when done == 0
+  x' = (1 - x) * (1 - i) + x * i
+  done' = i
+deadlock = off
+fair weak go
+property finishes: eventually done == 1

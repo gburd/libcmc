@@ -24,6 +24,7 @@
 .Fl -spec Ar file
 .Op Fl -define Ar tag ...
 .Op Fl -no-deadlock
+.Op Fl -coverage
 .Op Fl -trace-out Ar file Op Fl -trace-format Cm itf | json
 .Nm
 .Fl -spec Ar file
@@ -186,8 +187,49 @@ bound the search as TLC's
 and
 .Cm ACTION_CONSTRAINT
 do.
+A
+.Cm property
+is
+.Cm eventually Ar E ,
+.Ar A Cm ~> Ar B ,
+or the action property
+.Cm always [ Ns Ar E Ns Cm ]_vars ,
+TLA+'s
+.Li [][E]_vars :
+every step that changes a variable satisfies
+.Ar E ,
+an expression over
+.Ar x
+and
+.Ar x' .
+.Cm fairness weak
+and
+.Cm fairness strong
+make every action weakly or strongly fair
+.Pq Li WF_vars , SF_vars ;
+.Cm fair weak Ar action
+and
+.Cm fair strong Ar action
+make one action so.
+The fairness of a parameterized action is that of its disjunction over
+the parameters, as
+.Li WF_vars(A)
+is for the
+.Li \eE
+the emitted module gives it.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.It Fl -coverage
+With
+.Fl -spec ,
+after the search print, per action, what TLC's
+.Fl coverage
+prints for it,
+.Ar distinct : Ns Ar generated
+.Pq the new states it found, and every successor it produced, a stutter or a state already seen included ,
+and the number of explored states that enable it.
+An action that no explored state enables is named in a warning: it is
+vacuous in the model.
 .It Fl -no-deadlock
 With
 .Fl -spec ,
@@ -265,10 +307,23 @@ the bound abstract variables' values, and
 the abstract action the step refined, with its parameters, or
 .Ql stutter
 .Pq Fl -refine-steps ; null without it .
-A liveness or
-.Ic eventually
-violation has no path, so no file is written, and neither is one on a
-pass.
+With
+.Fl -spec ,
+a liveness violation writes its lasso: in
+.Cm itf
+the states of the prefix and the cycle, with ADR-015's
+.Ql loop
+holding the index of the state the cycle goes back to and the header's
+.Ql #meta
+naming that last action as
+.Ql loopAction
+.Pq Ql Stuttering No when the cycle stutters ;
+in
+.Cm json
+the same states, then the loop state again with that action and a
+.Ql back_to
+index.
+No file is written on a pass.
 A file that cannot be written is exit 3.
 .It Fl -emit-tla Ar file
 Translate the abstract specification

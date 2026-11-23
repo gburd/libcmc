@@ -24,6 +24,12 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
  * large to enumerate. */
 int cmc_spec_inductive(const char *path, char **defs, int ndefs);
 
+/* With a nonzero `on`, cmc_spec_main() also prints action coverage
+ * (cmc --spec --coverage): per action, the new states and successors
+ * it produced and the states that enable it, with a warning for an
+ * action no explored state enables. */
+void cmc_spec_set_coverage(int on);
+
 /* ---- refinement support (Milestone C) ------------------------------
  * The refinement checker runs an implementation and, at each reached
  * state, asks the abstract model whether the implementation's state --

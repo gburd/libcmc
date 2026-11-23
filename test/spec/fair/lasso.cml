@@ -1,0 +1,32 @@
+# test/spec/fair/lasso.cml: a counterexample whose cycle leaves out the
+# start.  x climbs from 0 to 2, then flips between 2 and 3 forever, so
+# under weak fairness `eventually x == 4` fails on a lasso of a
+# two-state prefix and a two-state cycle back to state 3.  stop is
+# enabled at 2 only, so weak fairness does not force it, but the cycle
+# must visit 3, where it is disabled; stop comes first, so the cycle
+# walks to 3 for it before flip is due.  The action property holds.  The
+# emit gate checks that cmc prints the lasso TLC prints.
+
+module lasso
+
+var x : 0 .. 4
+
+init x == 0
+
+action up:
+  when x < 2
+  x' = x + 1
+
+action stop:
+  when x == 2
+  x' = 4
+
+action flip:
+  when x >= 2
+  x' = 5 - x
+
+fairness weak
+
+property bounded: always [x' <= 4]_vars
+
+property reaches: eventually x == 4

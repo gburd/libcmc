@@ -1,0 +1,17 @@
+# test/spec/fair/toggle.cml: weak and strong fairness differ.  flip
+# toggles x for ever; finish is enabled only while x == 1, so it is
+# enabled infinitely often but never continuously.  Weak fairness on
+# finish allows a run that flips for ever; strong fairness does not.
+# With no fairness the property fails; toggle_*.cml add fairness.
+module toggle
+var x : 0 .. 1
+var done : 0 .. 1
+init x == 0 and done == 0
+action flip:
+  when done == 0
+  x' = 1 - x
+action finish:
+  when x == 1 and done == 0
+  done' = 1
+deadlock = off
+property finishes: eventually done == 1
