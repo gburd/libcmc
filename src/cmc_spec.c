@@ -147,7 +147,7 @@ typedef struct {
 	int nasgn; char lhs[SP_MAXVAR][SP_NAME]; char rhs[SP_MAXVAR][SP_EXPR];
 	char tag[SP_NAME];			/* a [TAG] gate: action active only if -D TAG */
 } Action;
-typedef struct { char name[SP_NAME]; char expr[SP_EXPR]; } SpInv;
+typedef struct { char name[SP_NAME]; char expr[SP_EXPR]; int inductive; } SpInv;	/* inductive: an invariant marked [inductive] */
 typedef struct { char name[SP_NAME]; int kind; char a[SP_EXPR]; char b[SP_EXPR]; } SpProp;	/* kind: 0 eventually(a), 1 a~>b, 2 always [a]_vars */
 
 static struct {
@@ -1266,7 +1266,14 @@ static int sp_load_into(const char *path){
 		if(!strncmp(s,"invariant",9)){
 			char *rest=sp_trim(s+9); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: invariant needs name:\n",path,ln); goto bad; }
 			*col=0; if(S.ninv>=SP_MAXINV){ fprintf(stderr,"cmc: too many invariants\n"); goto bad; }
-			CPY(S.inv[S.ninv].name,sp_trim(rest),"invariant name"); CPY(S.inv[S.ninv].expr,sp_trim(col+1),"invariant"); S.ninv++; in_action=0; continue;
+			/* invariant NAME [inductive]: EXPR claims it inductive, a claim
+			 * --check-inductive tests and --emit-tla states for TLAPS */
+			char *nm=sp_trim(rest), *mk=strchr(nm,'['); int ind=0;
+			if(mk){
+				if(strcmp(sp_trim(mk),"[inductive]")){ fprintf(stderr,"cmc: %s:%d: an invariant's only mark is [inductive], not %s\n",path,ln,sp_trim(mk)); goto bad; }
+				*mk=0; nm=sp_trim(nm); ind=1;
+			}
+			CPY(S.inv[S.ninv].name,nm,"invariant name"); CPY(S.inv[S.ninv].expr,sp_trim(col+1),"invariant"); S.inv[S.ninv].inductive=ind; S.ninv++; in_action=0; continue;
 		}
 		/* otherwise: an assignment  lhs' = rhs  inside an action */
 		if(in_action && cur){
@@ -1545,6 +1552,8 @@ static int in_domains(const Value *vv, char *err, size_t errcap){
 	return 0;
 }
 
+static int g_ind;	/* set while --check-inductive expands its states */
+
 /* apply action a with bound params (in env) to st, producing *out;
  * returns 1 if the guard held and the step was taken, 0 if disabled,
  * -1 on an error.  Every successor lies in its variables' types. */
@@ -1560,11 +1569,17 @@ static int sp_step(const Action *a, Env *env, const State *st, State *out, char 
 		Value v; if(!sp_eval(a->rhs[i],env,&v,err,errcap)) goto out;
 		nxt[vi]=v;
 	}
-	if(in_domains(nxt,err,errcap) || st_pack(out,nxt,err,errcap)) goto out;
+	/* --check-inductive judges a successor outside the types (one that
+	 * leaves TypeOK) as a counterexample to induction, not a model error */
+	if((!g_ind && in_domains(nxt,err,errcap)) || st_pack(out,nxt,err,errcap)) goto out;
 	rc=1;
 out:	ar_release(m);
 	return rc;
 }
+
+/* When not NULL, bind_params() records in bp_env[k] the parameter
+ * bindings that produced succ[k], so a trace can name them. */
+static Env *bp_env;
 
 /* recursively bind an action's parameters over their finite domains and
  * invoke the body for each combination */
@@ -1575,7 +1590,7 @@ static void bind_params(const Action *a, Env *env, int pi, const State *st,
 		static State out;	/* not on the stack: a state is SP_STATEW words */
 		int r=sp_step(a,env,st,&out,err,errcap);
 		if(r<0){ *rc=-1; return; }
-		if(r==1){ if(*nsucc<cap) succ[(*nsucc)++]=out; else { snprintf(err,errcap,"too many successors"); *rc=-1; } }
+		if(r==1){ if(*nsucc<cap){ if(bp_env) bp_env[*nsucc]=*env; succ[(*nsucc)++]=out; } else { snprintf(err,errcap,"too many successors"); *rc=-1; } }
 		return;
 	}
 	/* evaluate the param domain in the current state */
@@ -1785,22 +1800,23 @@ static int sp_in_model(const State *from, const State *to, int *in, char *err, s
 	return rc;
 }
 
-/* print v on stdout: an integer, TRUE or FALSE, {..}, a function as
+/* print v on o: an integer, TRUE or FALSE, {..}, a function as
  * [k:v,...], a record as [a |-> v, ...], a sequence as <<..>> */
-static void val_print(const Value *v){
-	if(v->tag==T_INT){ printf("%ld",v->i); return; }
-	if(v->tag==T_BOOL){ printf("%s",v->i?"TRUE":"FALSE"); return; }
-	if(v->tag==T_SET){ printf("{"); for(int j=0;j<val_n(v);j++) printf("%s%ld",j?", ":"",set_e(v,j)); printf("}"); return; }
+static void val_fprint(FILE *o, const Value *v){
+	if(v->tag==T_INT){ fprintf(o,"%ld",v->i); return; }
+	if(v->tag==T_BOOL){ fprintf(o,"%s",v->i?"TRUE":"FALSE"); return; }
+	if(v->tag==T_SET){ fprintf(o,"{"); for(int j=0;j<val_n(v);j++) fprintf(o,"%s%ld",j?", ":"",set_e(v,j)); fprintf(o,"}"); return; }
 	long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX]; int n=comp_kids(v,key,kid);
-	printf(v->tag==T_SEQ?"<<":"[");
+	fprintf(o,v->tag==T_SEQ?"<<":"[");
 	for(int j=0;j<n;j++){
-		if(v->tag==T_FUN) printf("%s%ld:",j?",":"",key[j]);
-		else if(v->tag==T_REC) printf("%s%s |-> ",j?", ":"",S.fld[key[j]]);
-		else if(j) printf(", ");
-		val_print(&kid[j]);
+		if(v->tag==T_FUN) fprintf(o,"%s%ld:",j?",":"",key[j]);
+		else if(v->tag==T_REC) fprintf(o,"%s%s |-> ",j?", ":"",S.fld[key[j]]);
+		else if(j) fprintf(o,", ");
+		val_fprint(o,&kid[j]);
 	}
-	printf(v->tag==T_SEQ?">>":"]");
+	fprintf(o,v->tag==T_SEQ?">>":"]");
 }
+static void val_print(const Value *v){ val_fprint(stdout,v); }
 
 /* Where cmc_spec_main() was asked to write a counterexample, if
  * anywhere (--trace-out), and in which format. */
@@ -2582,9 +2598,19 @@ out:	ar_release(mark);
 	return rc;
 }
 
+/* The abstract state the last check built, and what the step to it
+ * refined, for cmc_refine_note(): R_have is 0 until a state is built;
+ * R_act is empty for a state-level check, else "init", "stutter", the
+ * matched action with its parameters, or (R_bad set) why none matched. */
+static State R_last;
+static int R_have, R_bad;
+static char R_act[160];
+
 int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap){
 	/* build the abstract state: each variable's Value from its binding */
-	State st; if(build_abstract(obs,&st,err,errcap)) return -2;
+	State st; R_have=0; R_act[0]=0; R_bad=0;
+	if(build_abstract(obs,&st,err,errcap)) return -2;
+	R_last=st; R_have=1;
 	/* check the abstract invariants on the built state */
 	int bad=sp_check(&st,err,errcap);
 	if(bad==-2) return -2;
@@ -2625,20 +2651,31 @@ static const char *first_unbound_var(void){
 
 /* does some active abstract action step take `from` to exactly `to`?  An
  * action gated out by a [TAG] that was not --define'd is not part of the
- * transition relation, as in the search and the TLA+ emitter. */
+ * transition relation, as in the search and the TLA+ emitter.  On a
+ * match, the first action in declaration order that makes the step, and
+ * its parameters, go into R_act as `name(p=v, ...)`. */
 static int abstract_step_exists(const State *from, const State *to, char *err, size_t errcap){
 	enum { C2_SUCC = 4096 };
 	State *succ = malloc((size_t)C2_SUCC * sizeof *succ);
-	if(!succ){ snprintf(err,errcap,"out of memory"); return -2; }
+	Env *envs = malloc((size_t)C2_SUCC * sizeof *envs);
+	if(!succ || !envs){ free(succ); free(envs); snprintf(err,errcap,"out of memory"); return -2; }
 	int found=0;
+	bp_env=envs;
 	for(int ai=0; ai<S.nact && !found; ai++){
 		if(!act_active(&S.act[ai])) continue;
 		int ns=0, rc=0; Env env=env_new(NULL);
 		bind_params(&S.act[ai],&env,0,from,succ,&ns,C2_SUCC,err,errcap,&rc);
-		if(rc<0){ free(succ); return -2; }
-		for(int k=0;k<ns;k++) if(state_eq(&succ[k],to)){ found=1; break; }
+		if(rc<0){ found=-2; break; }
+		for(int k=0;k<ns && !found;k++) if(state_eq(&succ[k],to)){
+			size_t n=(size_t)snprintf(R_act,sizeof R_act,"%s",S.act[ai].name);
+			for(int p=0;p<envs[k].np && n<sizeof R_act;p++)
+				n+=(size_t)snprintf(R_act+n,sizeof R_act-n,"%s%s=%ld",p?", ":"(",envs[k].pname[p],envs[k].pval[p]);
+			if(envs[k].np && n<sizeof R_act) snprintf(R_act+n,sizeof R_act-n,")");
+			found=1;
+		}
 	}
-	free(succ);
+	bp_env=NULL;
+	free(succ); free(envs);
 	return found;
 }
 
@@ -2653,24 +2690,58 @@ int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errc
 		const char *u=first_unbound_var();
 		if(u){ snprintf(err,errcap,"--refine-steps needs every spec variable bound; '%s' has no [map] entry (map it, or use --refine for the state-level check)",u); return -2; }
 	}
-	State cur; if(build_abstract(obs,&cur,err,errcap)) return -2;
-	/* C2 subsumes C1: the invariant must hold at every state */
+	State cur; R_have=0; R_bad=0;
+	if(build_abstract(obs,&cur,err,errcap)) return -2;
+	R_last=cur; R_have=1;
+	/* C2 subsumes C1: the invariant must hold at every state.  It is
+	 * reported before a step that matches no action, as it always was;
+	 * the step is still named, so the trace shows what led there. */
 	int bad=sp_check(&cur,err,errcap);
 	if(bad==-2) return -2;
-	if(bad>=0){ *name=S.inv[bad].name; return bad; }
 	if(C2_have){
-		if(!state_eq(&C2_prev,&cur)){	/* not a stutter */
+		if(state_eq(&C2_prev,&cur)) snprintf(R_act,sizeof R_act,"stutter");
+		else {
 			int e=abstract_step_exists(&C2_prev,&cur,err,errcap);
 			if(e==-2) return -2;
-			if(e==0){ *name="no matching abstract action"; C2_prev=cur; C2_have=1; return -3; }
+			if(e==0){ snprintf(R_act,sizeof R_act,"no matching abstract action"); R_bad=1; }
 		}
 	} else {
 		/* the first observation of a behaviour must be an initial state */
 		State init; if(sp_init_state(&init,err,errcap)) return -2;
-		if(!state_eq(&init,&cur)){ *name="the first state is not the spec's init"; return -3; }
+		if(state_eq(&init,&cur)) snprintf(R_act,sizeof R_act,"init");
+		else { snprintf(R_act,sizeof R_act,"not the spec's init"); R_bad=1; }
 	}
+	if(bad>=0){ *name=S.inv[bad].name; return bad; }
+	if(R_bad && !C2_have){ *name="the first state is not the spec's init"; return -3; }
+	if(R_bad){ *name="no matching abstract action"; C2_prev=cur; return -3; }
 	C2_prev=cur; C2_have=1;
 	return -1;
+}
+
+/* What the last cmc_refine_check() or cmc_refine_step() built, for a
+ * trace: the abstract action into act (empty after a state-level
+ * check) and the bound variables' values into vals, as `x=1 f=[0:1]`,
+ * or with json set as a JSON object, `{"x":1,"f":{"0":1}}`.  An unbound
+ * variable is not shown: C1 does not observe it.  Returns 0, or -1 if
+ * the last check built no state (it failed to evaluate). */
+int cmc_refine_note(int json, char *act, size_t actcap, char *vals, size_t valcap){
+	if(!R_have) return -1;
+	snprintf(act,actcap,"%s",R_act);
+	FILE *m=fmemopen(vals,valcap,"w");
+	if(!m) return -1;	/* GCOVR_EXCL_LINE: fmemopen of a caller's buffer */
+	Value vv[SP_MAXVAR]; st_views(&R_last,vv);
+	int first=1;
+	for(int vi=0;vi<S.nvar;vi++){
+		int bound=0;
+		for(int b=0;b<B_nmap && !bound;b++) if(var_index(B_map[b].var)==vi) bound=1;
+		if(!bound) continue;
+		if(json){ fprintf(m,"%s\"%s\":",first?"{":",",S.var[vi].name); trace_value(m,&vv[vi],0); }
+		else { fprintf(m,"%s%s=",first?"":" ",S.var[vi].name); val_fprint(m,&vv[vi]); }
+		first=0;
+	}
+	if(json) fputs(first?"{}":"}",m);
+	fclose(m);
+	return 0;
 }
 
 /* =====================================================================
@@ -2774,8 +2845,85 @@ static void ty_tla(int ti, FILE *o){
 	fputs(" }",o);
 }
 
+/* the TLA+ set of the values of Ty node ti, for TypeOK: the domain, a
+ * function set [D -> R], a record set [a : T, ...], and a sequence of
+ * at most max elements as the union, over each length n, of the n-tuples
+ * {<<e1, ..., en>> : e1 \in T, ...}.  Apalache refuses Seq(T), an
+ * infinite set, and enumerates this one.  depth names the bound
+ * variables of nested sequences apart. */
+static void ty_set_tla(int ti, int depth, FILE *o){
+	const Ty *T=&S.ty[ti];
+	if(T->kind==TY_DOM){ fputc('(',o); tla_expr_fixup(T->dom,o); fputc(')',o); return; }
+	if(T->kind==TY_FUN){ fputs("[(",o); tla_expr_fixup(T->dom,o); fputs(") -> ",o); ty_set_tla(T->sub,depth+1,o); fputc(']',o); return; }
+	if(T->kind==TY_SEQ){
+		fputs("({<<>>}",o);
+		for(long n=1;n<=T->max;n++){
+			fputs(" \\cup {<<",o);
+			for(long j=1;j<=n;j++) fprintf(o,"%se%d_%ld",j>1?", ":"",depth,j);
+			fputs(">> : ",o);
+			for(long j=1;j<=n;j++){ fprintf(o,"%se%d_%ld \\in ",j>1?", ":"",depth,j); ty_set_tla(T->sub,depth+1,o); }
+			fputc('}',o);
+		}
+		fputc(')',o); return;
+	}
+	fputc('[',o);
+	for(int j=0;j<T->nf;j++){ fprintf(o,"%s%s : ",j?", ":"",S.fld[T->fid[j]]); ty_set_tla(T->fty[j],depth+1,o); }
+	fputc(']',o);
+}
+
+/* For the invariants marked [inductive]: IndInv, their conjunction with
+ * TypeOK, and the TLAPS proof outline of Spec => []IndInv (Init =>
+ * IndInv, IndInv /\ [Next]_vars => IndInv', then PTL), with each marked
+ * invariant as its corollary.  The constants' values are an ASSUME so
+ * the proof can use them.  PTL is TLAPS's pragma for its temporal
+ * decision procedure, defined here as module TLAPS defines it, so the
+ * module needs no EXTENDS TLAPS (which TLC and Apalache do not ship). */
+static void emit_proof(FILE *o){
+	int nind=0;
+	for(int i=0;i<S.ninv;i++) nind+=S.inv[i].inductive;
+	if(!nind) return;
+	fprintf(o,"\n\\* The invariants marked [inductive], with TypeOK: check with\n");
+	fprintf(o,"\\* apalache-mc check --init=IndInv --inv=IndInv --length=1, or cmc --spec\n");
+	fprintf(o,"\\* --check-inductive, and prove with TLAPS (tlapm).\n");
+	fprintf(o,"IndInv ==\n  /\\ TypeOK\n");
+	for(int i=0;i<S.ninv;i++) if(S.inv[i].inductive) fprintf(o,"  /\\ %s\n",S.inv[i].name);
+	if(S.ncst){ fprintf(o,"\nASSUME ConstOK ==\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  /\\ %s = %ld\n",S.cst[i].name,S.cst[i].val); }
+	fprintf(o,"\nPTL == TRUE (*{ by (prover: \"ls4\") }*)\n\n");
+	/* the definitions a step must open: every def, invariant and action */
+	char dl[8192]; FILE *d=fmemopen(dl,sizeof dl,"w");
+	if(!d) return;	/* GCOVR_EXCL_LINE: fmemopen of a static buffer */
+	fprintf(d,"IndInv, TypeOK");
+	for(int i=0;i<S.ninv;i++) if(S.inv[i].inductive) fprintf(d,", %s",S.inv[i].name);
+	for(int i=0;i<S.ndefs;i++) fprintf(d,", %s",S.def[i].name);
+	fclose(d);
+	fprintf(o,"THEOREM Inductive == Spec => []IndInv\n");
+	fprintf(o,"<1>1. Init => IndInv\n  BY %sDEF Init, %s\n",S.ncst?"ConstOK ":"",dl);
+	fprintf(o,"<1>2. IndInv /\\ [Next]_vars => IndInv'\n  BY %sDEF Next, vars",S.ncst?"ConstOK ":"");
+	for(int a=0;a<S.nact;a++) if(act_active(&S.act[a])) fprintf(o,", %s",S.act[a].name);
+	fprintf(o,", %s\n",dl);
+	fprintf(o,"<1>3. QED\n  BY <1>1, <1>2, PTL DEF Spec\n\n");
+	for(int i=0;i<S.ninv;i++) if(S.inv[i].inductive)
+		fprintf(o,"THEOREM Spec => []%s\n  BY Inductive, PTL DEF IndInv\n\n",S.inv[i].name);
+}
+
+/* Does the model declare a name the emitted module defines itself for
+ * the type invariant and the proof outline?  TLA+ refuses a second
+ * definition, so report it and return 1. */
+static int emit_clash(const char *path){
+	static const char *own[]={"TypeOK","IndInv","ConstOK","PTL","Inductive"};
+	for(size_t k=0;k<sizeof own/sizeof own[0];k++){
+		int f; (void)cst_lookup(own[k],&f);
+		f=f || var_index(own[k])>=0 || def_index(own[k])>=0;
+		for(int i=0;i<S.ninv && !f;i++) f=!strcmp(S.inv[i].name,own[k]);
+		for(int i=0;i<S.nact && !f;i++) f=!strcmp(S.act[i].name,own[k]);
+		if(f){ fprintf(stderr,"cmc: %s: %s is a name the emitted TLA+ defines; rename it\n",path,own[k]); return 1; }
+	}
+	return 0;
+}
+
 int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
+	if(emit_clash(path)) return 3;
 	FILE *o=stdout;
 	fprintf(o,"---- MODULE %s ----\n",S.modname);
 	fprintf(o,"\\* Generated from %s by cmc --emit-tla.  Run with TLC,\n",path);
@@ -2830,6 +2978,9 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 	fprintf(o,"Spec == Init /\\ [][Next]_vars");
 	for(int a=0;a<S.nact;a++){ int k=act_fair(a); if(k) fprintf(o," /\\ %s_vars(%s)",k==2?"SF":"WF",S.act[a].name); }
 	fprintf(o,"\n\n");
+	/* the type invariant, from the variables' declared types */
+	fprintf(o,"TypeOK ==\n");
+	for(int i=0;i<S.nvar;i++){ fprintf(o,"  /\\ %s \\in ",S.var[i].name); ty_set_tla(S.var[i].ty,0,o); fprintf(o,"\n"); }
 	/* invariants */
 	for(int i=0;i<S.ninv;i++){ fprintf(o,"%s ==\n  ",S.inv[i].name); tla_expr_fixup(S.inv[i].expr,o); fprintf(o,"\n"); }
 	/* state and action constraints, as TLC's CONSTRAINT and ACTION_CONSTRAINT */
@@ -2841,6 +2992,7 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 		else if(P->kind==2){ fprintf(o,"[][("); tla_expr_fixup(P->a,o); fprintf(o,")]_vars"); }
 		else { fprintf(o,"("); tla_expr_fixup(P->a,o); fprintf(o,") ~> ("); tla_expr_fixup(P->b,o); fprintf(o,")"); }
 		fprintf(o,"\n"); }
+	emit_proof(o);
 	fprintf(o,"====\n");
 	return 0;
 }
@@ -2853,10 +3005,297 @@ int cmc_emit_cfg(const char *path, char **defs, int ndefs, int deadlock_off){
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
 	printf("SPECIFICATION Spec\n");
 	for(int i=0;i<S.ncst;i++) printf("CONSTANT %s = %ld\n",S.cst[i].name,S.cst[i].val);
+	printf("INVARIANT TypeOK\n");
 	for(int i=0;i<S.ninv;i++) printf("INVARIANT %s\n",S.inv[i].name);
 	for(int i=0;i<S.nprop;i++) printf("PROPERTY %s\n",S.prop[i].name);
 	for(int i=0;i<S.ncon;i++) printf("CONSTRAINT %s\n",S.con[i].name);
 	for(int i=0;i<S.nacon;i++) printf("ACTION_CONSTRAINT %s\n",S.acon[i].name);
 	if(S.deadlock_off || deadlock_off) printf("CHECK_DEADLOCK FALSE\n");
 	return 0;
+}
+
+/* =====================================================================
+ * Proof hooks: cmc --spec FILE --check-inductive.  The invariants marked
+ * [inductive] are claimed inductive: their conjunction Inv, with the
+ * type invariant TypeOK (every variable in its declared type), holds at
+ * Init and is kept by every step of Next from ANY state that satisfies
+ * it, reachable or not.  The check enumerates every value of every
+ * variable's type, so it is exhaustive over the declared domains, not
+ * only over the reachable states, and reports a counterexample to
+ * induction (a state and a step) when there is one.  It is the check
+ * Apalache makes with --init=IndInv --inv=IndInv --length=1.
+ * ===================================================================== */
+
+/* the most states of TypeOK the check enumerates; past it, exit 3 */
+#define IND_MAX 1000000L
+
+/* a list of value encodings, one after another, with their offsets */
+typedef struct { long *w; size_t nw, wcap; size_t *off; long n, ncap; } VList;
+
+static void vl_free(VList *l){ free(l->w); free(l->off); memset(l,0,sizeof *l); }
+
+/* room for one more value of nw words; 0, or -1 when out of memory */
+static int vl_room(VList *l, size_t nw){
+	if(l->n==l->ncap){
+		long nc=l->ncap?l->ncap*2:64; size_t *no=realloc(l->off,(size_t)nc*sizeof *no);
+		if(!no) return -1;	/* GCOVR_EXCL_LINE: at most IND_MAX offsets */
+		l->off=no; l->ncap=nc;
+	}
+	if(l->nw+nw>l->wcap){
+		size_t nc=l->wcap?l->wcap*2:256; while(nc<l->nw+nw) nc*=2;
+		long *nw2=realloc(l->w,nc*sizeof *nw2);
+		if(!nw2) return -1;	/* GCOVR_EXCL_LINE: bounded by IND_MAX values */
+		l->w=nw2; l->wcap=nc;
+	}
+	l->off[l->n++]=l->nw;
+	return 0;
+}
+
+/* the number of values of type ti, saturating past IND_MAX; -1 on an
+ * error evaluating a domain (message in err) */
+static long ty_count(int ti, char *err, size_t errcap);
+
+/* The integers of a TY_DOM domain or a function's key set, into *out (a
+ * malloc'd array, *n elements).  A range LO .. HI is expanded from its
+ * bounds, as dom_has() reads it, and refused past IND_MAX elements.
+ * Returns 0, or -1 with the reason in err. */
+static int dom_ints(const char *dom, long **out, long *n, char *err, size_t errcap){
+	Env env=env_new(NULL); size_t m=ar_mark(); int rc=-1;
+	const char *dd=strstr(dom,"..");
+	*out=NULL; *n=0;
+	if(dd && !strchr(dom,'{')){
+		char lo[SP_EXPR]; snprintf(lo,sizeof lo,"%.*s",(int)(dd-dom),dom);
+		Value l,h; if(!sp_eval(lo,&env,&l,err,errcap) || !sp_eval(dd+2,&env,&h,err,errcap)) goto out;
+		if(l.tag!=T_INT || h.tag!=T_INT){ snprintf(err,errcap,"the bounds of %s are not integers",dom); goto out; }
+		if(h.i>=l.i && h.i-l.i>=IND_MAX){ snprintf(err,errcap,"the domain %s has more than %ld values",dom,IND_MAX); goto out; }
+		*n=h.i>=l.i?h.i-l.i+1:0;
+		*out=malloc((size_t)(*n?*n:1)*sizeof **out);
+		if(!*out){ snprintf(err,errcap,"out of memory"); goto out; }	/* GCOVR_EXCL_LINE */
+		for(long k=0;k<*n;k++) (*out)[k]=l.i+k;
+		rc=0; goto out;
+	}
+	Value set; if(!sp_eval_set(dom,&env,&set,err,errcap)) goto out;
+	*n=val_n(&set);
+	*out=malloc((size_t)(*n?*n:1)*sizeof **out);
+	if(!*out){ snprintf(err,errcap,"out of memory"); goto out; }	/* GCOVR_EXCL_LINE */
+	for(long k=0;k<*n;k++) (*out)[k]=set_e(&set,(int)k);
+	rc=0;
+out:	ar_release(m);
+	return rc;
+}
+
+/* a*b, saturating at IND_MAX+1 */
+static long sat_mul(long a, long b){ return (a && b>IND_MAX/a) ? IND_MAX+1 : a*b; }
+
+static long ty_count(int ti, char *err, size_t errcap){
+	const Ty *T=&S.ty[ti]; long *k, n, c=1;
+	if(T->kind==TY_REC){
+		for(int j=0;j<T->nf;j++){ long f=ty_count(T->fty[j],err,errcap); if(f<0) return -1; c=sat_mul(c,f); }
+		return c;
+	}
+	if(T->kind==TY_SEQ){
+		long e=ty_count(T->sub,err,errcap), p=1; if(e<0) return -1;
+		c=0; for(long len=0;len<=T->max && c<=IND_MAX;len++){ c+=p; p=sat_mul(p,e); }
+		return c>IND_MAX?IND_MAX+1:c;
+	}
+	if(dom_ints(T->dom,&k,&n,err,errcap)) return -1;
+	free(k);
+	if(T->kind==TY_DOM) return n;
+	long e=ty_count(T->sub,err,errcap); if(e<0) return -1;
+	for(long j=0;j<n;j++) c=sat_mul(c,e);
+	return c;
+}
+
+/* Write into l, one value each, every combination of one value from each
+ * of the k lists kid[0 .. k): a compound of tag T_FUN, T_REC or T_SEQ
+ * whose j-th child is from kid[j], under key[j] (key NULL for a
+ * sequence).  An empty list makes no combination.  Returns 0, or -1 on
+ * out of memory. */
+static int vl_product(VList *l, int tag, int k, const long *key, VList **kid){
+	long idx[SP_MAPMAX+SP_MAXFLD]={0};
+	/* every type has a value: init lies in it, and sp_init_state() ran first */
+	for(int j=0;j<k;j++) if(!kid[j]->n) return 0;	/* GCOVR_EXCL_LINE */
+	for(;;){
+		size_t nw=3;
+		for(int j=0;j<k;j++) nw+=(key?1:0)+enc_len(kid[j]->w+kid[j]->off[idx[j]]);
+		if(vl_room(l,nw)) return -1;	/* GCOVR_EXCL_LINE: bounded by IND_MAX values */
+		long *p=l->w+l->nw;
+		*p++=tag; *p++=(long)nw; *p++=k;
+		for(int j=0;j<k;j++){
+			const long *c=kid[j]->w+kid[j]->off[idx[j]]; size_t cl=enc_len(c);
+			if(key) *p++=key[j];
+			memcpy(p,c,cl*sizeof *p); p+=cl;
+		}
+		l->nw+=nw;
+		/* the next combination, the last list fastest */
+		int j=k-1;
+		while(j>=0 && ++idx[j]==kid[j]->n){ idx[j]=0; j--; }
+		if(j<0) return 0;
+	}
+}
+
+/* every value of type ti, into l (a function, record or sequence over
+ * every combination of its parts' values).  The caller has bounded the count
+ * with ty_count().  Returns 0, or -1 with the reason in err. */
+static int vl_type(int ti, VList *l, char *err, size_t errcap){
+	const Ty *T=&S.ty[ti];
+	if(T->kind==TY_SEQ){
+		/* every length from 0 to the bound, each element of the element type */
+		VList el={0}; VList *kid[SP_MAPMAX]; int rc=0;
+		if(vl_type(T->sub,&el,err,errcap)){ vl_free(&el); return -1; }
+		for(int j=0;j<SP_MAPMAX;j++) kid[j]=&el;
+		for(int len=0;len<=T->max && !rc;len++) rc=vl_product(l,T_SEQ,len,NULL,kid);
+		vl_free(&el);
+		if(rc) snprintf(err,errcap,"out of memory");	/* GCOVR_EXCL_LINE */
+		return rc;
+	}
+	if(T->kind==TY_DOM){
+		long *v, n; if(dom_ints(T->dom,&v,&n,err,errcap)) return -1;
+		for(long j=0;j<n;j++){
+			if(vl_room(l,2)){ free(v); snprintf(err,errcap,"out of memory"); return -1; }	/* GCOVR_EXCL_LINE */
+			l->w[l->nw]=T_INT; l->w[l->nw+1]=v[j]; l->nw+=2;
+		}
+		free(v); return 0;
+	}
+	enum { KMAX=SP_MAPMAX+SP_MAXFLD };
+	VList sub[KMAX]; VList *kid[KMAX]; long key[KMAX]; int k=0, rc=-1;
+	memset(sub,0,sizeof sub);
+	if(T->kind==TY_REC){
+		k=T->nf;
+		for(int j=0;j<k;j++){ key[j]=T->fid[j]; kid[j]=&sub[j]; if(vl_type(T->fty[j],&sub[j],err,errcap)) goto out; }
+	} else {
+		long *keys, n; if(dom_ints(T->dom,&keys,&n,err,errcap)) return -1;
+		/* key[] holds at most SP_MAPMAX keys; a larger function cannot
+		 * pass sp_init_state(), which runs first */
+		if(n>SP_MAPMAX){ free(keys); snprintf(err,errcap,"the function domain %s has more than %d keys",T->dom,SP_MAPMAX); return -1; }	/* GCOVR_EXCL_LINE */
+		k=(int)n; for(int j=0;j<k;j++){ key[j]=keys[j]; kid[j]=&sub[0]; }
+		free(keys);
+		if(vl_type(T->sub,&sub[0],err,errcap)) goto out;
+	}
+	if(vl_product(l,T->kind==TY_REC?T_REC:T_FUN,k,key,kid)){ snprintf(err,errcap,"out of memory"); goto out; }	/* GCOVR_EXCL_LINE */
+	rc=0;
+out:	for(int j=0;j<KMAX;j++) vl_free(&sub[j]);
+	return rc;
+}
+
+/* Does state st satisfy IndInv, TypeOK and every invariant marked
+ * [inductive]?  Sets *holds, and *why to the first part that fails
+ * ("TypeOK" or an invariant's name).  Returns 0, or -1 on an evaluation
+ * error (message in err). */
+static int ind_holds(const State *st, int *holds, const char **why, char *err, size_t errcap){
+	Value vv[SP_MAXVAR]; st_views(st,vv);
+	char terr[256];
+	*holds=1;
+	if(in_domains(vv,terr,sizeof terr)){ *holds=0; *why="TypeOK"; return 0; }
+	Env env=env_new(vv); size_t m=ar_mark(); int rc=0;
+	for(int i=0;i<S.ninv && *holds && !rc;i++){
+		if(!S.inv[i].inductive) continue;
+		if(!sp_eval_bool(S.inv[i].expr,&env,holds,"an invariant",err,errcap)) rc=-1;
+		else if(!*holds) *why=S.inv[i].name;
+	}
+	ar_release(m);
+	return rc;
+}
+
+/* print a state on one line, as the --spec trace prints it */
+static void ind_print(const char *label, const State *st){
+	Value vv[SP_MAXVAR]; st_views(st,vv);
+	printf("  %s:",label);
+	for(int vi=0;vi<S.nvar;vi++){ printf(" %s=",S.var[vi].name); val_print(&vv[vi]); }
+	printf("\n");
+}
+
+/* The states of TypeOK, one per combination of the variables' values
+ * (vals[vi]), are visited in order by an odometer over idx[]; the state
+ * of the current combination into st. */
+static void ind_state(VList *vals, const long *idx, State *st){
+	size_t o=0;
+	for(int vi=0;vi<S.nvar;vi++){
+		const long *w=vals[vi].w+vals[vi].off[idx[vi]]; size_t n=enc_len(w);
+		memcpy(st->w+o,w,n*sizeof *w); o+=n;
+	}
+	st->nw=(int)o;
+}
+
+/* Expand one state of TypeOK /\ Inv by every active action: a
+ * successor outside TypeOK /\ Inv is a counterexample to induction,
+ * printed with the step.  Returns 0 if every successor holds, 1 on a
+ * counterexample, 3 on an evaluation error. */
+static int ind_expand(const State *st, State *succ, Env *envs, int cap){
+	char err[256];
+	for(int ai=0;ai<S.nact;ai++){
+		if(!act_active(&S.act[ai])) continue;
+		int ns=0, rc=0; Env env=env_new(NULL);
+		bp_env=envs;
+		bind_params(&S.act[ai],&env,0,st,succ,&ns,cap,err,sizeof err,&rc);
+		bp_env=NULL;
+		if(rc<0){ fprintf(stderr,"cmc: action %s, from a state of TypeOK: %s\n",S.act[ai].name,err); return 3; }
+		for(int k=0;k<ns;k++){
+			int h; const char *why=NULL;
+			if(ind_holds(&succ[k],&h,&why,err,sizeof err)){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); return 3; }
+			if(h) continue;
+			printf("Error: the invariant is not inductive: a step of %s leaves %s.\n",S.act[ai].name,why);
+			printf("Error: a counterexample to induction (a state of TypeOK and the invariant, then a step):\n");
+			ind_print("state",st);
+			printf("    1. %s",S.act[ai].name);
+			for(int p=0;p<envs[k].np;p++) printf("%s%s=%ld",p?", ":"(",envs[k].pname[p],envs[k].pval[p]);
+			printf("%s\n",envs[k].np?")":"");
+			ind_print("after",&succ[k]);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+int cmc_spec_inductive(const char *path, char **defs, int ndefs){
+	char err[256];
+	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
+	/* Step 1: what is claimed, and the model it is claimed of */
+	int nind=0;
+	for(int i=0;i<S.ninv;i++) nind+=S.inv[i].inductive;
+	if(!nind){ fprintf(stderr,"cmc: %s: no invariant is marked [inductive]\n",path); return 3; }
+	if(S.ncon || S.nacon){ fprintf(stderr,"cmc: %s: --check-inductive with a constraint or an action constraint is not supported\n",path); return 3; }
+	printf("cmc: spec %s, checking that TypeOK /\\ ",S.modname);
+	for(int i=0,f=0;i<S.ninv;i++) if(S.inv[i].inductive){ printf("%s%s",f?" /\\ ":"",S.inv[i].name); f=1; }
+	printf(" is inductive\n");
+	/* Step 2: Init => IndInv, at the one initial state */
+	State init; if(sp_init_state(&init,err,sizeof err)){ fprintf(stderr,"cmc: %s: init: %s\n",path,err); return 3; }
+	int h; const char *why=NULL;
+	if(ind_holds(&init,&h,&why,err,sizeof err)){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); return 3; }
+	if(!h){ printf("Error: the initial state does not satisfy %s.\n",why); ind_print("state",&init); return 1; }
+	/* Step 3: bound the states of TypeOK, the product of the variables'
+	 * types, and refuse a product past IND_MAX */
+	long total=1;
+	for(int vi=0;vi<S.nvar;vi++){
+		long c=ty_count(S.var[vi].ty,err,sizeof err);
+		if(c<0){ fprintf(stderr,"cmc: %s: var %s: %s\n",path,S.var[vi].name,err); return 3; }
+		total=sat_mul(total,c);
+	}
+	if(total>IND_MAX){ fprintf(stderr,"cmc: %s: TypeOK has more than %ld states, too many to check exhaustively; narrow the variables' domains\n",path,IND_MAX); return 3; }
+	/* Step 4: every state of TypeOK, by an odometer over the variables'
+	 * values; each that satisfies the invariant is expanded */
+	VList vals[SP_MAXVAR]; memset(vals,0,sizeof vals);
+	int ret=0; long idx[SP_MAXVAR]={0}, nind_st=0;
+	enum { ISUCC=4096 };
+	State *succ=malloc((size_t)ISUCC*sizeof *succ), *st=malloc(sizeof *st);
+	Env *envs=malloc((size_t)ISUCC*sizeof *envs);
+	if(!succ || !st || !envs){ fprintf(stderr,"cmc: out of memory\n"); ret=3; }	/* GCOVR_EXCL_LINE */
+	for(int vi=0;vi<S.nvar && !ret;vi++)
+		if(vl_type(S.var[vi].ty,&vals[vi],err,sizeof err)){ fprintf(stderr,"cmc: %s: var %s: %s\n",path,S.var[vi].name,err); ret=3; }
+	g_ind=1;
+	for(long n=0;n<total && !ret;n++){
+		ind_state(vals,idx,st);
+		if(ind_holds(st,&h,&why,err,sizeof err)){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); ret=3; break; }
+		if(h){ nind_st++; ret=ind_expand(st,succ,envs,ISUCC); }
+		int vi=S.nvar-1;
+		while(vi>=0 && ++idx[vi]==vals[vi].n){ idx[vi]=0; vi--; }
+	}
+	g_ind=0;
+	if(!ret){
+		printf("The invariant is inductive: Init satisfies it, and every step from each of the %ld states\n",nind_st);
+		printf("of TypeOK that satisfy it (of %ld states in TypeOK) keeps it.\n",total);
+	}
+	for(int vi=0;vi<S.nvar;vi++) vl_free(&vals[vi]);
+	free(succ); free(st); free(envs);
+	return ret;
 }

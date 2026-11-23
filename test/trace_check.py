@@ -29,6 +29,8 @@ def printed(out):
         fail("no counterexample in the output")
     acts = []
     for line in out[m.end():].splitlines():
+        if line.startswith("         spec: "):
+            continue
         step = re.match(r"    \d+\. (.*)$|       (\S.*)$", line)
         if not step:
             break
@@ -144,8 +146,41 @@ def check_proc(out, tr):
     if "  node states: " + nodes not in out.splitlines():
         fail("final node states %r are not the ones cmc printed" % nodes)
     reps = "".join(" (n%d,%d)" % (r["node"], r["value"]) for r in last["replies"])
-    if "  replies:" + (reps or " none") not in out.splitlines():
+    # a refinement report prints no replies line; every other one does
+    refine = any("spec" in w for w in tr)
+    if not refine and "  replies:" + (reps or " none") not in out.splitlines():
         fail("final replies %r are not the ones cmc printed" % reps)
+    check_spec_terms(out, tr)
+
+
+def spec_text(v):
+    """A spec value of a proc trace (an int, or a function as an object
+    keyed by its arguments) as cmc prints it."""
+    if isinstance(v, dict):
+        return "[" + ",".join("%s:%s" % (k, spec_text(x)) for k, x in v.items()) + "]"
+    return str(v)
+
+
+def check_spec_terms(out, tr):
+    """With --refine, every world the check judged carries "spec", and
+    the spec lines cmc printed are those worlds' actions and states, in
+    order.  Without it, no world carries one and none is printed."""
+    lines = [x[len("         spec: "):] for x in out.splitlines() if x.startswith("         spec: ")]
+    if not any("spec" in w for w in tr):
+        if lines:
+            fail("cmc printed spec lines but the worlds carry no spec")
+        return
+    want = []
+    for w in tr:
+        if "spec" not in w:
+            fail("world %d has no spec" % w["index"])
+        sp = w["spec"]
+        if sp is None:
+            continue
+        vals = " ".join("%s=%s" % (k, spec_text(x)) for k, x in sp["state"].items())
+        want.append(vals if sp["action"] is None else "%s -> %s" % (sp["action"], vals))
+    if want != lines:
+        fail("spec lines %r, the worlds say %r" % (lines, want))
 
 
 def parse_type(text):

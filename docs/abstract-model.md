@@ -86,6 +86,8 @@ SMT-encodable -- not full TLA+.
   A bracket inside a parameter domain, `j in 0 .. f[i]`, is part of the
   domain, and a header with anything else in it is an error.
 - `invariant NAME: EXPR` -- checked in every reachable state.
+  `invariant NAME [inductive]: EXPR` also claims it inductive (see
+  [Proof hooks](#proof-hooks)).
 - `symmetry SET` -- declare SET's values interchangeable, collapsing
   symmetric states (see below).  SET is a constant set of at most 8
   values; anything else is an error.
@@ -238,6 +240,24 @@ which the state-level check cannot see.  It needs every spec variable to
 have a binding (matching an action step needs the whole abstract state)
 and refuses otherwise.
 
+A counterexample reads in the spec's terms as well as the program's.
+Below each listed step after which the check judges the world (settled,
+not between or inside nodes' steps), a `spec:` line gives the abstract
+state the binding built there; with `--refine-steps` it also names the
+abstract action the step refined, with its parameters, or `stutter`:
+
+```
+Error: the implementation does not refine the spec: a step has no matching abstract action.
+Error: The behavior up to this point is (1 actions):
+         spec: init -> c=0
+    1. timeout n0
+         spec: no matching abstract action -> c=2
+```
+
+`--trace-out` carries the same in each world's `spec` object
+(`{"action": "stutter", "state": {"c": 1}}`; `null` at a world the
+check does not judge).
+
 ## The TLA+ bridge
 
 ```
@@ -270,6 +290,72 @@ unchanged.  `make check-emit-apalache` verifies that the generated TLA+
 type-checks in Apalache and agrees with `cmc --spec`.  Apalache is
 optional (not a build dependency); the gate fetches it once or uses
 `$APALACHE_MC`, and needs Java 21+.
+
+## Proof hooks
+
+An invariant that holds in every reachable state need not be
+*inductive*: a step from some unreachable state that satisfies it may
+break it, and a proof by induction over the steps then fails.  Mark the
+invariants you claim are inductive:
+
+```
+invariant mutual_exclusion [inductive]: (count i in 0 .. N-1 : pc[i] == 2) <= 1
+invariant lock_matches [inductive]: held == (count i in 0 .. N-1 : pc[i] == 2)
+```
+
+`cmc --spec FILE --check-inductive` checks the claim.  It enumerates
+every state of the declared types (TypeOK), not only the reachable ones,
+and for each that satisfies the marked invariants takes every step of
+every action.  It reports a counterexample to induction, a state and
+the step out, or that the conjunction is inductive:
+
+```
+Error: the invariant is not inductive: a step of enter leaves mutual_exclusion.
+Error: a counterexample to induction (a state of TypeOK and the invariant, then a step):
+  state: pc=[0:1,1:2] held=0
+    1. enter(i=0)
+  after: pc=[0:2,1:2] held=1
+```
+
+That is mutual exclusion alone (test/spec/ind/mutex_ind.cml with
+lock_matches unmarked): it holds in every reachable state, but not from
+the state where process 1 is critical and the lock is free.  The check
+is exhaustive over the declared domains, so it refuses (exit 3) a
+TypeOK of more than 1,000,000 states or a function of more than 12
+keys, and a model with a constraint.  A step that leaves a variable's
+type is a counterexample too, since TypeOK is part of the claim.
+
+`cmc --emit-tla` writes `TypeOK` for every model (and `--emit-cfg` names
+it as an invariant), and for the marked invariants `IndInv == TypeOK /\
+...`, the constants' values as an `ASSUME`, and the theorem with a TLAPS
+proof outline:
+
+```
+THEOREM Inductive == Spec => []IndInv
+<1>1. Init => IndInv
+  BY ConstOK DEF Init, IndInv, TypeOK, mutual_exclusion, lock_matches
+<1>2. IndInv /\ [Next]_vars => IndInv'
+  BY ConstOK DEF Next, vars, try, enter, leave, IndInv, TypeOK, ...
+<1>3. QED
+  BY <1>1, <1>2, PTL DEF Spec
+```
+
+`PTL` is defined in the module as TLAPS's `TLAPS` module defines it,
+so TLC and Apalache read the module without that library.  The outline
+is the shape TLAPS expects; whether its two leaves go through depends on
+the backends: on counter.cml with its invariant marked, TLAPS 1.6.0-pre
+proves all 11 obligations, and on mutex_ind.cml it proves 12 of 14 and
+needs facts about `Cardinality` for the other two.  Apalache's check of
+the same claim is
+
+```
+apalache-mc check --cinit=CInit --init=IndInv --inv=IndInv --length=1 mutex_ind.tla
+```
+
+and `make check-emit-apalache` requires it to agree with `cmc
+--check-inductive` on each model in test/spec/ind, as `make
+check-emit-tla` requires TLC (from `INIT IndInv`) to find as many states
+in IndInv as cmc counts.
 
 ## Counterexamples as files
 

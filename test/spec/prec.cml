@@ -5,7 +5,7 @@
 # finds the same 3 states here (x % 6 would let inc run to x = 4).
 module prec
 
-var x : 0 .. 5
+var x : 0 .. (11 mod 6)
 
 init x == 0
 
@@ -15,4 +15,4 @@ action inc:
 
 deadlock = off
 
-invariant ok: (x / 2) * 2 <= x and (x mod 2) + 1 >= 1 and (x == 0 or all i in 0 .. x : i < 3 and i >= 0)
+invariant ok [inductive]: (x / 2) * 2 <= x and (x mod 2) + 1 >= 1 and (x == 0 or all i in 0 .. x : i < 3 and i >= 0)

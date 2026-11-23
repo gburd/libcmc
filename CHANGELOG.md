@@ -78,6 +78,38 @@ constrain*.cml).
   apalache_gate, which compares cmc's ITF file for each planted bug
   with the one Apalache writes.
 
+Proof hooks (docs/plans/2.3-tla-users.md, item 10).  `invariant NAME
+[inductive]: EXPR` claims an invariant inductive, and `cmc --spec FILE
+--check-inductive` checks the claim: it enumerates every state of the
+declared types, not only the reachable ones, and for each that
+satisfies TypeOK and the marked invariants takes every step, reporting
+a counterexample to induction (the state, and the step with its
+parameters) or that the conjunction is inductive.  A TypeOK of more
+than 1,000,000 states is refused (exit 3).  `cmc --emit-tla` now writes
+`TypeOK` for every model, and `--emit-cfg` names it, so TLC checks the
+declared types too; for marked invariants it also writes `IndInv`, the
+constants as an `ASSUME`, and `THEOREM Spec => []IndInv` with a TLAPS
+proof outline.  A model that names something TypeOK, IndInv, ConstOK,
+PTL or Inductive is refused by `--emit-tla`.  Gates: spec_gate
+proof-hook rows; emit_gate inductive rows, where TLC from `INIT IndInv`
+gives the same verdict and as many states as cmc counts in IndInv;
+apalache_gate inductive rows, where Apalache's inductive check gives
+the same verdict, on test/spec/ind (a mutex invariant that is
+inductive only with its strengthening, a queue of records, and a step
+out of a type).  TLAPS 1.6.0-pre proves the outline for counter in
+full and 12 of 14 obligations for the mutex; it is not part of a gate.
+
+Counterexamples of `cmc --model-file ... --refine SPEC --bind FILE` read
+in spec terms (docs/plans/2.3-tla-users.md, item 8).  Below each listed
+step after which the refinement check judges the world, a `spec:` line
+gives the abstract state the binding built (the bound variables), and
+with `--refine-steps` the abstract action the step refined, with its
+parameters, or `stutter`; `--trace-out` json carries the same in each
+world's `spec` object.  A binding still builds only integers and
+functions of integers, and refuses record and sequence variables.
+Gate: proc_gate trace rows on mono-bug (C2) and paxos2-bug (C1), which
+trace_check.py checks line by line against the file.
+
 The abstract language (`.cml`) gains records, bounded sequences and
 named operators, as a TLA+ user writes them.  A variable can be a record
 `[a : T, b : T]`, a sequence `Seq(T, N)` of at most N elements, or a

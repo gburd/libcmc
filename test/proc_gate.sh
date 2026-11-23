@@ -1355,12 +1355,15 @@ expect "restart: restarts = 0 keeps the crash final"     0 "No error has been fo
 # durlog's trace has an unnumbered STEP; restart's carries a durable
 # record across a crash.
 trace_proc() {
-	f="$OUT/trace-$2.json"; : > "$f"
-	$PFX "$CMC" $(run "$1" "$2") --trace-out "$f" > "$OUT/trace.txt" 2>&1
+	m=$1 bin=$2 needle=$3; shift 3
+	f="$OUT/trace-$bin.json"; : > "$f"
+	case $m in /*) ma=$(runx "$m" "$bin") ;; *) ma=$(run "$m" "$bin") ;; esac
+	# shellcheck disable=SC2086
+	$PFX "$CMC" $ma "$@" --trace-out "$f" > "$OUT/trace.txt" 2>&1
 	rc=$?
 	if [ $rc = 1 ] && python3 "$HERE/test/trace_check.py" proc "$OUT/trace.txt" "$f" > "$OUT/tc.txt" 2>&1 &&
-	   grep -q "$3" "$f"; then
-		echo "ok   trace json $2: the worlds cmc printed"
+	   grep -q -- "$needle" "$f"; then
+		echo "ok   trace json $bin: the worlds cmc printed"
 	else
 		echo "FAIL trace json $2 -> exit $rc"; sed 's/^/     /' "$OUT/trace.txt" "$OUT/tc.txt" | head -30; fail=1
 	fi
@@ -1368,6 +1371,20 @@ trace_proc() {
 if command -v python3 > /dev/null 2>&1; then
 	trace_proc durlog durlog-bug '"action":"step n1","number":null'
 	trace_proc restart restart-bug '"durable":\[[0-9]'
+	# with --refine the trace is in spec terms too: each judged world
+	# names the abstract state the binding built and, for --refine-steps,
+	# the action the step refined, in the output and in the file
+	trace_proc "$HERE/test/proc/mono.model" mono-bug '"spec":{"action":"no matching abstract action","state":{"c":2}}' \
+		--refine "$HERE/test/proc/mono.cml" --bind "$HERE/test/proc/mono.bind" --refine-steps
+	grep -q '^         spec: init -> c=0$' "$OUT/trace.txt" || { echo "FAIL trace mono-bug: no spec line for init"; fail=1; }
+	trace_proc "$HERE/examples/spec/paxos2-refine.model" paxos2-bug '"spec":{"action":null,"state":{"chosen":{"1":1,"2":1}}}' \
+		--refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos2.bind"
+	grep -q '^         spec: chosen=\[1:0,2:0\]$' "$OUT/trace.txt" || { echo "FAIL trace paxos2-bug: no spec line for the first world"; fail=1; }
+	# C2 with an action parameter, ending in a violated invariant: the
+	# ack refines ack(v=5), and the trace names it at the violation
+	printf 'module rp\nvar n : 0 .. 9\ninit n == 0\naction ack(v in 0 .. 9):\n  when n == 0\n  n%s = v\ninvariant none: n == 0\n' "'" > "$OUT/rp.cml"
+	printf '[map]\nn = "5 * (count r in replies : r.val == 5)"\n' > "$OUT/rp.bind"
+	trace_proc repl repl '"spec":{"action":"ack(v=5)","state":{"n":5}}' --refine "$OUT/rp.cml" --bind "$OUT/rp.bind" --refine-steps
 else
 	echo "skip trace json rows: no python3"
 fi

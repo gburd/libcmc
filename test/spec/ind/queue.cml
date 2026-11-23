@@ -1,0 +1,33 @@
+# test/spec/ind/queue.cml: a bounded queue of tagged messages, for the
+# induction check over records and sequences.  A producer appends
+# [tag |-> t, val |-> v] while the queue is short; a consumer takes the
+# head.  sent counts the appends, and each message's val is at most
+# sent.  increasing holds in every reachable state but is not inductive
+# alone: from <<[val |-> 2]>> with sent = 1 a put appends a second 2.
+# bounded strengthens it: with every val at most sent, the next append
+# is larger than all of them.  The gate checks both claims.
+
+module queue
+
+const L = 2                 # the queue holds at most L messages
+const V = 2                 # values 0 .. V
+
+var q : Seq([tag : 0 .. 1, val : 0 .. V], L)
+var sent : 0 .. V
+
+init q == <<>> and sent == 0
+
+action put(t in 0 .. 1):
+  when Len(q) < L and sent < V
+  q' = Append(q, [tag |-> t, val |-> sent + 1])
+  sent' = sent + 1
+
+action take():
+  when Len(q) > 0
+  q' = Tail(q)
+
+deadlock = off
+
+# over the constant range 1 .. L, as Apalache needs a quantifier's range
+invariant increasing [inductive]: all i in 1 .. L : i >= Len(q) or q[i].val < q[i + 1].val
+invariant bounded [inductive]: all i in 1 .. L : i > Len(q) or (q[i].val >= 1 and q[i].val <= sent)

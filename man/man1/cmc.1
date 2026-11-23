@@ -27,6 +27,10 @@
 .Op Fl -coverage
 .Op Fl -trace-out Ar file Op Fl -trace-format Cm itf | json
 .Nm
+.Fl -spec Ar file
+.Fl -check-inductive
+.Op Fl -define Ar tag ...
+.Nm
 .Fl -emit-tla Ar file
 .Op Fl -define Ar tag ...
 .Op Fl -no-deadlock
@@ -291,6 +295,19 @@ records and whether it is
 and the
 .Ql replies .
 With
+.Fl -refine ,
+each object also has a
+.Ql spec :
+the world in the terms of the abstract spec, null where the
+refinement check does not judge it (between two nodes' steps, or inside
+one), else
+.Ql state ,
+the bound abstract variables' values, and
+.Ql action ,
+the abstract action the step refined, with its parameters, or
+.Ql stutter
+.Pq Fl -refine-steps ; null without it .
+With
 .Fl -spec ,
 a liveness violation writes its lasso: in
 .Cm itf
@@ -320,11 +337,46 @@ annotation.
 Name the output after the module
 .Pq Pa NAME.tla
 so TLC accepts it.
+The module defines
+.Li TypeOK ,
+each variable in its declared type, and, when an invariant is marked
+.Li [inductive] ,
+.Li IndInv
+.Pq TypeOK and the marked invariants ,
+the constants' values as an
+.Li ASSUME ,
+and the theorem
+.Li Spec => []IndInv
+with a TLAPS proof outline: Init => IndInv, IndInv /\e [Next]_vars =>
+IndInv', and the temporal step by
+.Li PTL ,
+followed by Spec => []NAME for each marked invariant.
+TLAPS may need more steps where an obligation leans on facts it lacks
+.Pq Cardinality , for one .
+A model that declares one of the names TypeOK, IndInv, ConstOK, PTL or
+Inductive is refused.
+.It Fl -check-inductive
+With
+.Fl -spec ,
+check that the invariants marked
+.Li [inductive] ,
+with TypeOK, form an inductive invariant: they hold in the initial
+state, and every step of every action from
+.Em every
+state of the declared types that satisfies them, reachable or not,
+leads to a state that satisfies them.
+This is the check Apalache makes with
+.Li --init=IndInv --inv=IndInv --length=1 .
+Every value of every variable's type is enumerated; a product of more
+than 1,000,000 states, or a function of more than 12 keys, is exit 3.
+A counterexample to induction (a state and the step out of the
+invariant, with the action's parameters) is exit 1.
+A model with no marked invariant, or with a constraint, is exit 3.
 .It Fl -emit-cfg Ar file
 Write the TLC configuration for the module
 .Fl -emit-tla
-writes: its constants, every invariant, property, state and action
-constraint by name, and
+writes: its constants, TypeOK and every invariant, property, state and
+action constraint by name, and
 .Cm CHECK_DEADLOCK FALSE
 when the deadlock check is off.
 .It Fl -define Ar tag
@@ -346,6 +398,14 @@ the abstract
 At each reached implementation state the abstract invariants are
 checked against the mapped state, so one abstract model validates many
 implementations.
+A counterexample is shown in spec terms too: below each listed step
+after which the check judges the world, a
+.Ql spec:
+line gives the abstract state the binding built there (the bound
+variables only) and, with
+.Fl -refine-steps ,
+the abstract action the step refined
+.Pq Ql init , Ql stutter , or Ql NAME(p=v, ...) .
 Requires
 .Fl -bind .
 .It Fl -bind Ar file
@@ -356,6 +416,8 @@ for
 .Fl -refine .
 Each spec variable is bound at most once, a function variable entry by
 entry; a line the reader cannot use is an error.
+A binding builds integers and functions of integers only: a record or
+sequence variable, or a function of them, is refused.
 .It Fl -refine-steps
 Check refinement at the level of
 .Em steps ,

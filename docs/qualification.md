@@ -150,6 +150,7 @@ in the kernel, untouched.
 | a thread blocked in, or busy outside, the calls the checker sees | refused | exit 1 after 10 s with no checked call | proc_gate kernelfd |
 | `--trace-out` JSON counterexample | exact | each listed step and the world after it: node records, durable records, crashed flags, replies; the network and timers are not written | proc_gate trace rows |
 | `--refine` (C1) and `--refine-steps` (C2) | exact for the bound variables | C2 needs every spec variable bound; checks init, gated actions, exact states | proc_gate mono, spec_gate C2 rows |
+| a `--refine` counterexample in spec terms | exact for the bound variables | each judged world's abstract state and, with C2, the action (and parameters) the step refined or `stutter`, printed and in `--trace-out`; a binding builds integers and functions of integers only (records and sequences refused) | proc_gate trace mono-bug, paxos2-bug rows |
 
 ## Abstract checker (`cmc --spec`)
 
@@ -175,6 +176,8 @@ in the kernel, untouched.
 | every emitted module parses | exact | SANY parses the `--emit-tla` output of every `.cml` in examples/spec and test/spec that `cmc --spec` accepts, with each `[TAG]` defined in turn (74 modules) | emit_gate SANY rows |
 | `--emit-tla` names and `count` extents | exact | a keyword is rewritten only as a whole word (votedFor, small, min stay names); a count body ends at its enclosing bracket or comma | spec_gate names rows, emit_gate names |
 | operator precedence | exact | TLA+'s; `/` or `mod` beside `* / mod`, `mod` beside `+ -`, and `and` beside `or` unparenthesised are exit 3, as SANY refuses them | spec_gate precedence rows, emit_gate prec |
+| `--check-inductive` (TypeOK and the `[inductive]` invariants) | exact over the declared domains | every state of TypeOK, reachable or not, and every step from those in the invariant; a step out of a type is a counterexample; TypeOK past 1,000,000 states, a function past 12 keys, or a constraint, exit 3 | spec_gate proof-hook rows, emit_gate inductive rows (TLC from `INIT IndInv`: same verdict, same states in IndInv), apalache_gate inductive rows (`--init=IndInv --inv=IndInv --length=1`: same verdict) |
+| `--emit-tla` TypeOK, IndInv and the TLAPS outline | approximate (a proof outline) | the outline is the shape TLAPS expects; its leaves may need more steps (TLAPS 1.6.0-pre proves counter in full, mutex_ind 12 of 14 obligations; tlapm is not in a gate) | emit_gate (TLC reads every emitted module and checks TypeOK), apalache_gate |
 | `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
 | declared domains | exact | init and every successor must lie in each variable's domain | spec_gate boundpass, succbound |

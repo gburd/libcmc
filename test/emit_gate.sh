@@ -222,6 +222,47 @@ for src in "$HERE"/examples/spec/*.cml "$HERE"/test/spec/*.cml "$HERE"/test/spec
 	done
 done
 echo "ok   SANY parsed $nsany emitted modules"
+# Proof hooks, against TLC: with INIT IndInv and NEXT Next, TLC starts
+# from every state of the IndInv that cmc --emit-tla writes for the
+# invariants marked [inductive], takes the steps, and checks IndInv.
+# An inductive one reaches no state outside IndInv, so TLC finds as many
+# distinct states as cmc --spec --check-inductive counts in IndInv; one
+# that is not has a step out of it, which both report.  WEAK unmarks
+# the strengthening, as in apalache_gate.
+ind() {
+	cml=$1 mod=$2 want=$3 weak=$4
+	d="$OUT/ind-$mod"; mkdir -p "$d"
+	if [ -n "$weak" ]; then
+		sed "s/^invariant $weak \[inductive\]:/invariant $weak:/" "$HERE/test/spec/ind/$cml.cml" > "$d/$mod.cml"
+	else
+		cp "$HERE/test/spec/ind/$cml.cml" "$d/$mod.cml"
+	fi
+	"$CMC" --emit-tla "$d/$mod.cml" > "$d/$mod.tla" 2>&1
+	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
+	{ printf 'INIT IndInv\nNEXT Next\nINVARIANT IndInv\nCHECK_DEADLOCK FALSE\n'
+	  "$CMC" --emit-cfg "$d/$mod.cml" | grep '^CONSTANT'; } > "$d/$mod.cfg"
+	"$CMC" --spec "$d/$mod.cml" --check-inductive > "$d/cmc.txt" 2>&1; rc=$?
+	bash "$TLC" "$d/$mod.tla" "$d/$mod.cfg" -workers 1 > "$d/out.txt" 2>&1
+	tv=$(verdict "$d/out.txt")
+	case $rc in 0) cv=PASS ;; 1) cv=VIOLATION ;; *) cv="ERROR (exit $rc)" ;; esac
+	if [ "$cv" != "$want" ] || [ "$tv" != "$want" ]; then
+		echo "FAIL inductive $mod [$want]: cmc --check-inductive says $cv, TLC says $tv"; echo x>"$OUT/fail"; return
+	fi
+	if [ "$want" = PASS ]; then
+		cn=$(num "$d/cmc.txt" 'each of the [0-9]+') td=$(num "$d/out.txt" 'generated, [0-9]+ distinct')
+		if [ -z "$cn" ] || [ "$cn" != "$td" ]; then
+			echo "FAIL inductive $mod: cmc counts $cn states in IndInv, TLC finds $td"; echo x>"$OUT/fail"; return
+		fi
+		echo "ok   inductive $mod [$want]: TLC agrees (IndInv has $td states)"
+	else
+		echo "ok   inductive $mod [$want]: TLC agrees"
+	fi
+}
+ind mutex_ind mutex_ind PASS ""
+ind mutex_ind mutex_weak VIOLATION lock_matches
+ind queue queue PASS ""
+ind queue queue_weak VIOLATION bounded
+ind escape escape VIOLATION ""
 
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "emit_gate: ok (generated TLA+ parses and agrees with cmc --spec)" || echo "emit_gate: FAILED"

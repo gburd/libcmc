@@ -16,6 +16,14 @@
  * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
 int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt);
 
+/* cmc --spec FILE --check-inductive: check that TypeOK and the
+ * invariants marked [inductive] hold at Init and are kept by every step
+ * from every state of the declared types that satisfies them, reachable
+ * or not.  Returns 0 inductive, 1 a counterexample to induction (or an
+ * initial state outside it), 3 a model error, or a type product too
+ * large to enumerate. */
+int cmc_spec_inductive(const char *path, char **defs, int ndefs);
+
 /* With a nonzero `on`, cmc_spec_main() also prints action coverage
  * (cmc --spec --coverage): per action, the new states and successors
  * it produced and the states that enable it, with a warning for an
@@ -65,6 +73,14 @@ int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t err
  * previous state. */
 int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errcap);
 void cmc_refine_reset(void);
+
+/* For a counterexample in spec terms: what the last cmc_refine_check()
+ * or cmc_refine_step() built.  act gets the abstract action the step
+ * refined ("init", "stutter", "NAME(p=v, ...)", or why none matched;
+ * empty after a state-level check), vals the bound variables' values,
+ * as text or, with json set, a JSON object.  Returns 0, or -1 if the
+ * last check built no abstract state. */
+int cmc_refine_note(int json, char *act, size_t actcap, char *vals, size_t valcap);
 
 /* Milestone D: translate the .cml spec to TLA+ on stdout (for TLC,
  * Apalache, TLAPS), and write the TLC .cfg that goes with it.

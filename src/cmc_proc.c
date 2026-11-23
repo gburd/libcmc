@@ -6265,12 +6265,47 @@ act_name(const Act *a, char *b, size_t n)
 static FILE *g_trace;
 static const char *g_trace_path;
 
+/* With --refine: is the abstract model checked (g_refine), and at the
+ * level of steps (g_refine_c2)?  print_trace() then shows each world in
+ * spec terms. */
+static int g_refine, g_refine_c2;
+
+/* The current world in spec terms, for print_trace(): when the world is
+ * one the refinement check judges (settled, not mid-step), run that
+ * check and print what it built, the abstract state and, for C2, the
+ * action the step refined (or "stutter").  json gets the same as a JSON
+ * value, or null at a world the check does not judge.  Returns 1 if the
+ * world was judged. */
+static int
+spec_terms(char *json, size_t cap)
+{
+	char act[192], vals[4096], err[256];
+	const char *nm = NULL;
+	snprintf(json, cap, "null");
+	if (!world_settled() || mid_world()) return 0;
+	int rr = refine_check_state(g_refine_c2, &nm, err, sizeof err);
+	if (rr == -2 || cmc_refine_note(0, act, sizeof act, vals, sizeof vals))
+	{
+		/* the search stopped at the first error, so a trace only reaches
+		 * one at its last world */
+		printf("         spec: cannot evaluate the binding here: %s\n", err);
+		return 1;
+	}
+	if (g_refine_c2) printf("         spec: %s -> %s\n", act, vals);
+	else printf("         spec: %s\n", vals);
+	(void) cmc_refine_note(1, act, sizeof act, vals, sizeof vals);
+	if (g_refine_c2) snprintf(json, cap, "{\"action\":\"%s\",\"state\":%s}", act, vals);
+	else snprintf(json, cap, "{\"action\":null,\"state\":%s}", vals);
+	return 1;
+}
+
 /* One world of the trace file: the action that led to it (null for the
  * first world; a STEP is unnumbered, as print_trace() lists it) and the
  * world as report() prints it, each node's volatile and durable records
- * and whether it is crashed, and the replies. */
+ * and whether it is crashed, and the replies.  With --refine, spec is
+ * the world in spec terms (spec_terms()). */
 static void
-trace_world(int idx, int num, const char *act)
+trace_world(int idx, int num, const char *act, const char *spec)
 {
 	FILE *o = g_trace;
 	fprintf(o, "%s{\"index\":%d,", idx ? ",\n" : "", idx);
@@ -6288,7 +6323,9 @@ trace_world(int idx, int num, const char *act)
 	}
 	fprintf(o, "],\"replies\":[");
 	for (int i = 0; i < nrep; i++) fprintf(o, "%s{\"node\":%d,\"value\":%d}", i ? "," : "", rep_src[i], rep_val[i]);
-	fprintf(o, "]}");
+	fprintf(o, "]");
+	if (g_refine) fprintf(o, ",\"spec\":%s", spec);
+	fprintf(o, "}");
 }
 
 /* Replay seq from a fresh launch, printing each action by name.  The
@@ -6298,7 +6335,7 @@ trace_world(int idx, int num, const char *act)
 static void
 print_trace(const int *seq, int len)
 {
-	char nm[96];
+	char nm[96], spec[8192] = "null";
 	Act a[MAXACT]; int na, n = 0, k = 0;
 	for (int pass = 0; pass < 2; pass++)
 	{
@@ -6307,7 +6344,11 @@ print_trace(const int *seq, int len)
 			die(3, "could not write %s: %s", g_trace_path, strerror(errno));
 		int out = pass == 1 && g_trace;
 		if (pass == 1) printf("Error: The behavior up to this point is (%d actions):\n", n);
-		if (out) { fprintf(g_trace, "[\n"); trace_world(0, 0, NULL); }
+		/* with --refine, each judged world in spec terms; C2 judges the
+		 * worlds of this one replay as a behaviour, from its first */
+		if (pass == 1 && g_refine_c2) cmc_refine_reset();
+		if (pass == 1 && g_refine) spec_terms(spec, sizeof spec);
+		if (out) { fprintf(g_trace, "[\n"); trace_world(0, 0, NULL, spec); }
 		for (int i = 0; i < len; i++)
 		{
 			if (seq[i] >= na) die(1, "replay of the counterexample diverged at step %d", i);
@@ -6318,7 +6359,8 @@ print_trace(const int *seq, int len)
 			else printf("    %d. %s\n", ++k, nm);
 			apply(&a[seq[i]]);
 			na = enum_actions(a);
-			if (out) trace_world(i + 1, step ? 0 : k, nm);
+			if (pass == 1 && g_refine) spec_terms(spec, sizeof spec);
+			if (out) trace_world(i + 1, step ? 0 : k, nm, spec);
 		}
 		if (pass == 0) kill_all();
 		if (out)
@@ -6503,6 +6545,7 @@ cmc_proc_main(const CmcProcOptions *po)
 {
 	if (load_model(po->model_file)) return 3;
 	g_trace_path = po->trace_out;
+	g_refine = po->refine; g_refine_c2 = po->refine_steps;
 	if (po->binary)
 		snprintf(M.binary, sizeof M.binary, "%s", po->binary);
 	if (!*M.binary)
