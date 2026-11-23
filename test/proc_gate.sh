@@ -965,9 +965,10 @@ scm earlydial 3 "a blocking connect on a socket whose non-blocking connect has n
 
 echo "-- a libpq-style client: non-blocking connect, POLLOUT, SO_ERROR"
 # nbconnect.c makes the socket calls libpq's connectDBStart() and
-# PQconnectPoll() make.  Each mode runs natively on loopback (the server
-# first, except in refused, where nothing listens), and its record is
-# then the model's invariant: cmc must reach it and no other.  On 2.1.0
+# PQconnectPoll() make.  Each mode runs natively on loopback (node 0
+# forks the server on a port the kernel picks, except in refused, where
+# nothing listens), and its record is then the model's invariant: cmc
+# must reach it and no other.  On 2.1.0
 # the first non-blocking connect ended the check (exit 3).
 $CC -O1 -no-pie -w -o "$B/proc/nbconnect" "$T/nbconnect.c" || { echo "proc_gate: nbconnect.c does not build"; fail=1; }
 NB=$OUT/nbconnect
@@ -997,12 +998,7 @@ record_model() {
 		"$bin" "$mode" "$env" "$invs" "$((k - 2))" "$h1" "$((k - 1))" "$h2" > "$model"
 }
 for m in ok early refused; do
-	(
-		cd "$NB" || exit 1
-		if [ "$m" != refused ]; then timeout 30 "$B/proc/nbconnect" 1 "$m" 3>/dev/null > /dev/null 2>&1 & sleep 0.1; fi
-		timeout 30 "$B/proc/nbconnect" 0 "$m" 3>"$NB/$m.state" > /dev/null 2>&1
-		wait
-	)
+	(cd "$NB" && timeout 30 "$B/proc/nbconnect" 0 "$m" 3>"$NB/$m.state" > /dev/null 2>&1)
 	if ! record_model "$B/proc/nbconnect" "$m" "$NB/$m.state" "timeouts = 0" "$NB/$m.model"; then
 		echo "FAIL nbconnect $m: the native run left no record"; fail=1; continue
 	fi
@@ -1468,33 +1464,28 @@ expect "unmodelled: a partial state record is refused"    3 "partial volatile st
 # cmc, which must reach exactly the code Linux gave.  Node 0's code is
 # two bytes; a digit is one call's result (see tcpsem.c).
 $CC -O1 -no-pie -w -o "$B/proc/tcpsem" "$T/tcpsem.c" || { echo "proc_gate: tcpsem.c does not build"; fail=1; }
-tcpsem_native() {	# MODE FIRST PAUSE: run natively, print node 0's two code bytes
+tcpsem_native() {	# MODE: run natively (node 0 forks node 1), print node 0's two code bytes
 	d="$OUT/tcpsem-$1"; mkdir -p "$d"
-	other=$((1 - $2))
-	# a run that hangs (under load the second process can start before
-	# the first listens) fails the row instead of hanging the gate
-	( cd "$d" && exec timeout 30 "$B/proc/tcpsem" "$2" "$1" 3>"$d/n$2.state" ) & pa=$!
-	sleep "$3"
-	( cd "$d" && exec timeout 30 "$B/proc/tcpsem" "$other" "$1" 3>"$d/n$other.state" ) & pb=$!
-	wait $pa; wait $pb
+	# a run that hangs fails the row instead of hanging the gate
+	( cd "$d" && exec timeout 30 "$B/proc/tcpsem" 0 "$1" 3>"$d/n0.state" )
 	od -An -tu1 "$d/n0.state" | tr -s ' ' '\n' | grep -v '^$' | tail -2 | tr '\n' ' '
 }
-tcpsem_row() {	# MODE FIRST PAUSE HI LO ENV [CMC_HI]: CMC_HI, when cmc's answer differs by design
-	got=$(tcpsem_native "$1" "$2" "$3")
-	if [ "$got" = "$4 $5 " ]; then echo "ok   tcpsem $1: Linux gives $4,$5"
-	else echo "FAIL tcpsem $1: Linux gave '$got', the fixture expects '$4 $5'"; fail=1; fi
-	hi=${7:-$4}
+tcpsem_row() {	# MODE HI LO ENV [CMC_HI]: CMC_HI, when cmc's answer differs by design
+	got=$(tcpsem_native "$1")
+	if [ "$got" = "$2 $3 " ]; then echo "ok   tcpsem $1: Linux gives $2,$3"
+	else echo "FAIL tcpsem $1: Linux gave '$got', the fixture expects '$2 $3'"; fail=1; fi
+	hi=${5:-$2}
 	printf '[target]\nbinary = %s\nnodes = 2\nargs = %s\n[environment]\n%s\n[fields]\nhi = 0\nlo = 1\n[invariants]\nlinux = "node[0].hi < 1 or (node[0].hi == %s and node[0].lo == %s) or node[0].lo == 9"\nreached = "eventually node[0].hi == %s and node[0].lo == %s"\n' \
-		"$B/proc/tcpsem" "$1" "$6" "$hi" "$5" "$hi" "$5" > "$OUT/tcpsem-$1.model"
+		"$B/proc/tcpsem" "$1" "$4" "$hi" "$3" "$hi" "$3" > "$OUT/tcpsem-$1.model"
 	expect "tcpsem $1: cmc reaches Linux's result and no other" 0 "No error has been found" --model-file "$OUT/tcpsem-$1.model"
 }
-tcpsem_row finwrite 1 0.1 13 44 "timeouts = 0"
-tcpsem_row rstdata  1 0.1 7 24  "timeouts = 0"
-tcpsem_row backlog  1 0.1 0 24  "timeouts = 1"
-# redial: natively node 1's process is stopped (its host refuses the
+tcpsem_row finwrite 13 44 "timeouts = 0"
+tcpsem_row rstdata  7 24  "timeouts = 0"
+tcpsem_row backlog  0 24  "timeouts = 1"
+# redial: natively node 1 is not listening yet (its host refuses the
 # dial, 6); under cmc it crashes, a host that answers nothing, so the
 # dial times out (8) before the same ENOTCONN and redial
-tcpsem_row redial   0 0.3 6 51  "crashes = 1
+tcpsem_row redial   6 51  "crashes = 1
 restarts = 1" 8
 
 # the world encoding (soundness plan 3.1, 3.2): worlds whose futures
