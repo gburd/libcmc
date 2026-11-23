@@ -62,7 +62,7 @@ $(B):
 
 $(B)/cmc.o: src/cmc.c include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(B)/cmc_cli.o: src/cmc_cli.c src/cmc_proc.h src/cmc_spec.h include/cmc.h | $(B)
+$(B)/cmc_cli.o: src/cmc_cli.c src/cmc_proc.h src/cmc_spec.h src/cmc_tla.h include/cmc.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 $(B)/cmc_proc.o: src/cmc_proc.c src/cmc_proc.h src/cmc_fs.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
@@ -70,7 +70,9 @@ $(B)/cmc_fs.o: src/cmc_fs.c src/cmc_fs.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
 $(B)/cmc_spec.o: src/cmc_spec.c src/cmc_spec.h | $(B)
 	$(CC) $(ALL_CFLAGS) -c -o $@ $<
-$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o $(B)/cmc_spec.o $(B)/cmc_fs.o
+$(B)/cmc_tla.o: src/cmc_tla.c src/cmc_tla.h | $(B)
+	$(CC) $(ALL_CFLAGS) -c -o $@ $<
+$(LIB): $(B)/cmc.o $(B)/cmc_cli.o $(B)/cmc_proc.o $(B)/cmc_spec.o $(B)/cmc_tla.o $(B)/cmc_fs.o
 	$(AR) rcs $@ $^
 $(B)/cmc-preload.so: src/cmc_preload.c | $(B)
 	$(CC) $(ALL_CFLAGS) -fPIC -shared -o $@ $<
@@ -127,6 +129,7 @@ check: check-unit check-examples check-calibration-fast
 check-examples: $(B)/test_cmc $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/proc_gate.sh $(B)
 	test/spec_gate.sh $(B)
+	test/tla_gate.sh $(B)
 
 # check-examples plus the rows too slow for every push (hc to depth 15
 # and its planted bug, about 8 minutes)
@@ -157,6 +160,7 @@ ASAN_FLAGS = -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-
 check-asan:
 	$(MAKE) B=$(ASAN_B) CFLAGS="$(ASAN_FLAGS)" $(ASAN_B)/cmc
 	CFLAGS="$(ASAN_FLAGS)" test/spec_gate.sh $(ASAN_B)
+	test/tla_gate.sh $(ASAN_B)
 
 check-calibration: $(B)/cmc
 	calib/hc/calibrate.sh $(B)/cmc all

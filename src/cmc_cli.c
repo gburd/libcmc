@@ -18,6 +18,7 @@
 #include "cmc.h"
 #include "cmc_proc.h"
 #include "cmc_spec.h"
+#include "cmc_tla.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -53,6 +54,7 @@ usage(void)
 			"         [--net fifo|bag] [--live-steps K]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
 			"         [--define TAG ...] [--no-deadlock]\n"
+			"       cmc --spec | --emit-cml FILE.tla [--config FILE.cfg] [--no-deadlock]\n"
 			"       cmc --version\n"
 			"models:");
 	for (size_t k = 0; k < nmodels; k++)
@@ -462,24 +464,35 @@ proc_main(int argc, char **argv)
 	return cmc_proc_main(&po);
 }
 
-/* cmc --spec FILE, cmc --emit-tla FILE or cmc --emit-cfg FILE (mode),
+/* --check-inductive was given (spec_main() sets it, spec_run() reads it) */
+static bool g_ind;
+
+static int tla_main(const char *path, const char *cfg, const char *mode, char **defs,
+					int ndefs, int nodl, const char *trace_out, const char *trace_fmt);
+static int spec_run(const char *path, const char *mode, char **defs, int ndefs, int nodl,
+					const char *trace_out, const char *trace_fmt);
+
+/* cmc --spec FILE, cmc --emit-tla FILE, cmc --emit-cfg FILE or cmc
+ * --emit-cml FILE.tla (mode), with --config FILE.cfg for a TLA+ module,
  * with --define TAG ... and --no-deadlock: every other option is an
  * error, and so is an option with no value */
 static int
 spec_main(int argc, char **argv, const char *mode)
 {
 	const char *path = NULL,
+			   *cfg = NULL,
 			   *trace_out = NULL,
 			   *trace_fmt = NULL;
 	char	   *defs[16];
 	int			ndefs = 0;
 	int			nodl = 0;
-	bool		spec = !strcmp(mode, "--spec"),
-				ind = false;
+	bool		spec = !strcmp(mode, "--spec");
 
+	g_ind = false;
 	for (int j = 1; j < argc; j++)
 	{
 		bool		def = !strcmp(argv[j], "--define"),
+					conf = !strcmp(argv[j], "--config"),
 					out = spec && !strcmp(argv[j], "--trace-out"),
 					fmt = spec && !strcmp(argv[j], "--trace-format");
 
@@ -490,7 +503,7 @@ spec_main(int argc, char **argv, const char *mode)
 		}
 		if (spec && !strcmp(argv[j], "--check-inductive"))
 		{
-			ind = true;
+			g_ind = true;
 			continue;
 		}
 		if (spec && !strcmp(argv[j], "--coverage"))
@@ -498,7 +511,7 @@ spec_main(int argc, char **argv, const char *mode)
 			cmc_spec_set_coverage(1);
 			continue;
 		}
-		if (!def && !out && !fmt && strcmp(argv[j], mode))
+		if (!def && !conf && !out && !fmt && strcmp(argv[j], mode))
 		{
 			fprintf(stderr, "cmc: %s is not supported with %s\n", argv[j], mode);
 			return 3;
@@ -507,6 +520,8 @@ spec_main(int argc, char **argv, const char *mode)
 			usage();
 		if (def)
 			defs[ndefs++] = argv[++j];
+		else if (conf)
+			cfg = argv[++j];
 		else if (out)
 			trace_out = argv[++j];
 		else if (fmt)
@@ -514,6 +529,68 @@ spec_main(int argc, char **argv, const char *mode)
 		else
 			path = argv[++j];
 	}
+	if (!path)
+		usage();
+	return tla_main(path, cfg, mode, defs, ndefs, nodl, trace_out, trace_fmt);
+}
+
+/* run mode on the model at path: a .cml file, or a TLA+ module (named
+ * *.tla, or read with --config) translated to .cml first (cmc_tla.c) */
+static int
+tla_main(const char *path, const char *cfg, const char *mode, char **defs,
+		 int ndefs, int nodl, const char *trace_out, const char *trace_fmt)
+{
+	size_t		n = strlen(path);
+	bool		tla = cfg || (n > 4 && !strcmp(path + n - 4, ".tla"));
+	char	   *text = NULL,
+				cfgbuf[4096],
+				err[512];
+	int			rc;
+
+	if (!tla && !strcmp(mode, "--emit-cml"))
+	{
+		fprintf(stderr, "cmc: --emit-cml reads a TLA+ module (FILE.tla or --config FILE)\n");
+		return 3;
+	}
+	if (tla)
+	{
+		if (!cfg)
+		{
+			/* TLC's default: the .cfg beside the module */
+			snprintf(cfgbuf, sizeof cfgbuf, "%.*s.cfg", (int) (n - 4), path);
+			cfg = cfgbuf;
+		}
+		if (ndefs)
+		{
+			fprintf(stderr, "cmc: --define is for .cml models; a TLA+ module's constants are set in its .cfg\n");
+			return 3;
+		}
+		text = cmc_tla_translate(path, cfg, err, sizeof err);
+		if (!text)
+		{
+			fprintf(stderr, "cmc: %s\n", err);
+			return 3;
+		}
+		if (!strcmp(mode, "--emit-cml"))
+		{
+			fputs(text, stdout);
+			free(text);
+			return 0;
+		}
+		cmc_spec_set_text(path, text);
+	}
+	rc = spec_run(path, mode, defs, ndefs, nodl, trace_out, trace_fmt);
+	cmc_spec_set_text(NULL, NULL);
+	free(text);
+	return rc;
+}
+
+static int
+spec_run(const char *path, const char *mode, char **defs, int ndefs, int nodl,
+		 const char *trace_out, const char *trace_fmt)
+{
+	bool		spec = !strcmp(mode, "--spec");
+
 	if (!spec)
 	{
 		if (trace_out || trace_fmt) { fprintf(stderr, "cmc: --trace-out is for --spec\n"); return 3; }
@@ -523,7 +600,7 @@ spec_main(int argc, char **argv, const char *mode)
 	}
 	if (trace_check(&trace_fmt, trace_out, "itf"))
 		return 3;
-	if (ind)
+	if (g_ind)
 	{
 		/* an induction check has no behaviour to write, and no deadlock */
 		if (trace_out || nodl) { fprintf(stderr, "cmc: --check-inductive takes neither --trace-out nor --no-deadlock\n"); return 3; }
@@ -559,7 +636,7 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 	 * and cmc --emit-cfg FILE.cml: write the TLC .cfg that goes with it */
 	for (int i = 1; i < argc; i++)
 		if (!strcmp(argv[i], "--spec") || !strcmp(argv[i], "--emit-tla") ||
-			!strcmp(argv[i], "--emit-cfg"))
+			!strcmp(argv[i], "--emit-cfg") || !strcmp(argv[i], "--emit-cml"))
 			return spec_main(argc, argv, argv[i]);
 	cmc_options_default(&o);
 	o.progress_s = 60;

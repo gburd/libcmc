@@ -27,6 +27,14 @@
 .Op Fl -coverage
 .Op Fl -trace-out Ar file Op Fl -trace-format Cm itf | json
 .Nm
+.Fl -spec Ar file.tla
+.Op Fl -config Ar file.cfg
+.Op Fl -no-deadlock
+.Op Fl -trace-out Ar file Op Fl -trace-format Cm itf | json
+.Nm
+.Fl -emit-cml Ar file.tla
+.Op Fl -config Ar file.cfg
+.Nm
 .Fl -spec Ar file
 .Fl -check-inductive
 .Op Fl -define Ar tag ...
@@ -219,6 +227,133 @@ is for the
 the emitted module gives it.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.Pp
+A
+.Ar file
+named
+.Pa *.tla ,
+or given with
+.Fl -config ,
+is a TLA+ module, checked with its TLC configuration: the
+.Fl -config
+file, or by default the
+.Pa .cfg
+beside the module, as TLC finds it.
+The module is translated to the
+.Pa .cml
+model it means and that model is checked, so the verdict, counts and
+trace are the ones the
+.Pa .cml
+gives.
+The reader takes one module that
+.Cm EXTENDS
+only Naturals, Integers, FiniteSets, Sequences and TLC;
+.Cm CONSTANTS
+bound in the configuration to integers,
+.Cm TRUE ,
+.Cm FALSE ,
+model values or sets of those;
+.Cm VARIABLES ;
+definitions
+.Li Op(p, ...) == e ,
+each seeing only those above it, expanded where they are used;
+.Cm ASSUME
+of
+.Li C \e in Nat ,
+.Li Int
+or
+.Li BOOLEAN ;
+an
+.Li Init
+that is a conjunction of
+.Li x = e ;
+a
+.Li Next
+that is a disjunction of actions, each a conjunction of guards,
+.Li x' = e ,
+.Li x' \e in S
+and
+.Cm UNCHANGED ,
+under
+.Li \e E
+parameters; and
+.Li Spec == Init /\e [][Next]_vars
+with
+.Li WF_vars(A)
+and
+.Li SF_vars(A)
+conjuncts, each A one action of Next.
+A
+.Cm THEOREM
+and its proof are skipped.
+An
+.Cm INVARIANT
+whose conjuncts are all
+.Li x \e in T
+.Pq a TypeOK
+gives the variables their types, which the checker enforces on every
+state.
+Expressions are the
+.Pa .cml
+set: integers, booleans,
+.Li \e in ,
+.Li \e A ,
+.Li \e E ,
+.Li Cardinality ,
+functions, records, sequences and tuples,
+.Cm EXCEPT
+with paths and
+.Li @ ,
+.Cm IF ,
+and bullet lists of
+.Li /\e
+and
+.Li \e/
+laid out as TLA+ defines them.
+A variable's type is inferred from
+.Li Init
+and the actions; an integer is any of TLC's, a sequence holds at most
+12 elements.
+The configuration may give
+.Cm CONSTANT(S) ,
+.Cm SPECIFICATION
+or
+.Cm INIT
+and
+.Cm NEXT ,
+.Cm INVARIANT(S) ,
+.Cm PROPERTY Ns / Ns Cm PROPERTIES
+.Pq Li <>P , Li "P ~> Q" No and Li [][A]_vars ,
+.Cm CONSTRAINT(S) ,
+.Cm ACTION_CONSTRAINT(S) ,
+.Cm CHECK_DEADLOCK ,
+.Cm SYMMETRY
+of
+.Li Permutations(C)
+for a set C of model values, and a
+.Cm VIEW
+of all the variables.
+Anything else, such as
+.Cm LET ,
+.Cm CHOOSE ,
+strings, set operators, a constant substitution
+.Pq Li <- ,
+or a fairness condition
+.Pa .cml
+does not have, is refused with its line and name (exit 3).
+.Fl -define
+is refused: a module's switches are its constants.
+.It Fl -config Ar file
+The TLC configuration for a TLA+ module read with
+.Fl -spec
+or
+.Fl -emit-cml .
+.It Fl -emit-cml Ar file.tla
+Print the
+.Pa .cml
+model a TLA+ module and its configuration translate to, as
+.Fl -spec
+would check it.
 .It Fl -coverage
 With
 .Fl -spec ,
@@ -723,6 +858,18 @@ Model checking completed. No error has been found.
 $ cmc --model-file kvserver.model --binary ./kvserver-bug
 Error: Invariant no_lost_ack is violated.
 \&...
+.Ed
+.Pp
+Check a TLA+ module with its TLC configuration, as TLC would, and print
+the
+.Pa .cml
+it reads as:
+.Bd -literal -offset indent
+$ cmc --spec logrep.tla --config logrep_read_safe.cfg
+\&...
+21213 states generated, 4439 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 16.
+$ cmc --emit-cml logrep.tla --config logrep_read_safe.cfg
 .Ed
 .Pp
 Check every property of the toy lock server, an in-process model:

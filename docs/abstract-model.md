@@ -104,8 +104,10 @@ records `[a |-> E, b |-> E]` and field access `r.a`; sequences (and
 tuples, which are sequences) `<<E, E>>`, `s[i]` from 1, `Len(s)`,
 `Head(s)`, `Tail(s)`, `Append(s, e)`, `SubSeq(s, m, n)` and `s \o t`;
 comparisons `== != < <= > >=`, `A in SET`; boolean `and or not`;
-quantifiers `all V in SET : E`, `some V in SET : E`; and `count V in SET
-: E` (cardinality).
+quantifiers `all V in SET : E`, `some V in SET : E`; `count V in SET
+: E` (cardinality); and `if C then A else B`, TLA+'s `IF`, which
+evaluates only the branch it takes and whose `else` branch extends as
+far right as it can.
 
 Precedence is TLA+'s, and the mixes TLA+ refuses are refused: `/` or
 `mod` next to another `*`, `/` or `mod` (`x mod 3 * 2`, `x * 2 / 2`),
@@ -291,6 +293,94 @@ type-checks in Apalache and agrees with `cmc --spec`.  Apalache is
 optional (not a build dependency); the gate fetches it once or uses
 `$APALACHE_MC`, and needs Java 21+.
 
+## Reading TLA+
+
+```
+cmc --spec logrep.tla --config logrep_read_safe.cfg
+cmc --emit-cml logrep.tla --config logrep_read_safe.cfg
+```
+
+`cmc --spec` reads a TLA+ module and its TLC configuration directly.  A
+file named `*.tla`, or one given with `--config`, is a module; without
+`--config` the configuration is the `.cfg` beside it, as TLC finds it.
+The reader translates the module to the `.cml` model it means and
+checks that, so everything above holds for it, and `--emit-cml` prints
+the translation.  It reads the part of TLA+ that `.cml` can express and
+refuses the rest with the line and the construct (exit 3), never by
+guessing.
+
+The module may `EXTENDS` only `Naturals`, `Integers`, `FiniteSets`,
+`Sequences` and `TLC`.  It declares `CONSTANTS`, which the configuration
+binds, and `VARIABLES`.  A definition `Op(p, ...) == e` is expanded where
+it is used, with each argument passed by name and each bound name
+renamed apart, as TLA+ substitutes; a definition sees only those above
+it, so none is recursive, and one the model never uses may hold
+anything.  `ASSUME` may say `C \in Nat`, `Int` or `BOOLEAN`, and is
+checked against the configuration.
+
+`Init` is a conjunction of `x = e`, one per variable.  `Next` is read as
+a disjunction of actions: a disjunct that primes a variable is split at
+each `\/`, `\E` and `IF` in it, an `\E` becomes the action's
+parameters, and what is left must be a conjunction of guards, `x' = e`,
+`x' \in S` (a parameter over S) and `UNCHANGED`, saying what every
+variable's next value is.  An action takes the name of the innermost
+definition that holds it, `Recv` for `\E f \in Followers : Recv(f)`.
+A disjunct whose guard is a constant `FALSE`, such as a `USE_BUG`
+switch, is left out.  `Spec` is `Init /\ [][Next]_vars`, with `vars` all
+the variables, and for liveness any number of `WF_vars(A)` and
+`SF_vars(A)` conjuncts, each A one action of Next (its own `\E`
+parameters inside it), read as `.cml`'s `fair weak A` and `fair strong
+A`.  Fairness on a disjunction of actions, or on an action under an
+`\E` of Next (fair per parameter value), is refused.  A theorem and its
+proof are skipped, and `ASSUME` may also say `C = n`.
+
+Expressions are the `.cml` ones in their TLA+ spelling: `=`, `#`,
+`\in`, `\A`, `\E`, `=>`, `<=>`, `Cardinality(S)` and
+`Cardinality({x \in S : P})`, `\div` and `%`, `[x \in S |-> e]`,
+`[f EXCEPT ![k].a = @ + 1]`, records `[a |-> e]` and `r.a`, tuples and
+sequences with the `Sequences` operators, `IF THEN ELSE`, `x \in Nat`
+and `/\` and `\/` bullet lists, an item ending at the first token at or
+left of its bullet's column.  TLA+'s variables have no types and
+`.cml`'s do, so the reader infers each from `Init` and every assignment:
+an integer becomes any of TLC's (`-2^31 .. 2^31-1`, so a value TLC could
+not hold is a model error here too), a function's key set comes from
+its `Init` value, a sequence holds at most 12 elements (a longer one is
+a model error, never cut short), and a variable that holds a boolean or
+a set, two types in two places, or a type that holds itself (`x' =
+<<x>>`), is refused at load, never searched.  An `INVARIANT` whose
+conjuncts are all `x \in T`, such as the `TypeOK` `cmc --emit-tla`
+writes, gives the variables their types instead: T is `LO .. HI`, a
+literal or constant set of integers, `[S -> T]`, `[a : T, ...]`, or
+`{<<>>} \cup {<<e1>> : e1 \in T} \cup ...` up to k elements (`Seq(T,
+k)`).  The checker enforces a variable's type on every state, so a
+value outside it is a model error (exit 3), where TLC reports the
+invariant violated (exit 1).
+
+The configuration may give `CONSTANT(S)` as `N = 3`, `TRUE`, `FALSE`,
+a model value `p1` or a set `{p1, p2}` of integers or model values;
+`SPECIFICATION`, or `INIT` and `NEXT`; `INVARIANT(S)`;
+`PROPERTY`/`PROPERTIES` of the forms `<>P`, `P ~> Q` and `[][A]_vars`;
+`CONSTRAINT(S)`; `ACTION_CONSTRAINT(S)`; and `CHECK_DEADLOCK`.  A model
+value becomes an integer from 1000000 up, which no arithmetic in a
+model reaches, so `SYMMETRY Sym` with `Sym == Permutations(P)` for a set
+P of model values is `.cml`'s `symmetry` over those integers: the
+dedicated range its obligation asks for.  `SYMMETRY` of anything else
+is refused, and so is a `VIEW` other than the tuple of all the
+variables.  A substitution `N <- Op`, `ALIAS` and `POSTCONDITION` are
+refused.
+
+Refused, by name: `LET`, `CHOOSE`, `CASE`, `SUBSET`, `UNION`, `DOMAIN`,
+`ENABLED`, `INSTANCE`, `RECURSIVE`, strings, set operators (`\cup`,
+`\X`, ...), sets of functions or records other than as a type
+invariant's types, unbounded and temporal quantifiers, a nondeterministic
+`Init`, a prime outside an assignment or an action constraint, and
+infix or function definitions.  Of the hand-written twins in the
+repository, the test/spec ones and examples/spec/logrep.tla (with a
+configuration that leaves out its `TypeOK`, which uses `UNION`) read directly, with TLC's
+counts; paxos, fpaxos, caspaxos, fastpaxos and zab are refused (their
+messages are records with string tags in a set).  `make check` reads
+back every module `cmc --emit-tla` writes, with its `--emit-cfg`
+configuration, to the same verdict, counts and trace.
 ## Proof hooks
 
 An invariant that holds in every reachable state need not be

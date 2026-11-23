@@ -185,9 +185,29 @@ in the kernel, untouched.
 | sequences `Seq(T, N)`, tuples, `Len Head Tail Append SubSeq \o`, `s[i]` | exact | N at most 12; a value past N is exit 3, never cut; `Head`/`Tail` of `<<>>` and out-of-range positions are exit 3 | spec_gate sequences rows, distinct |
 | `def NAME(p, ...) = EXPR` | exact | at most 32 defs of 4 parameters; arguments by name, as TLA+; recursion refused at load | spec_gate def rows |
 | `def NAME(p, ...) = EXPR` | exact | at most 32 defs of 4 parameters; by-name arguments, as TLA+; recursion refused at load | spec_gate def rows |
+| `if C then A else B` (TLA+'s `IF`) | exact | the branch not taken is parsed, not evaluated, as TLC | spec_gate TLA+ reader IF row, emit_gate ifexpr |
 | text that does not fit a buffer | refused | exit 3 | spec_gate truncate |
 | a primed variable read, an init reading an unset variable, a variable assigned twice, a redeclared bound name | refused | exit 3 | spec_gate primed, init_order, duplicate, quantifier |
 | memory safety | checked | ASan and UBSan over the spec gate | `make check-asan` |
+
+## TLA+ reader (`cmc --spec FILE.tla --config FILE.cfg`)
+
+| construct | status | limit | gate |
+|---|---|---|---|
+| a module `cmc --emit-tla` writes, with its `--emit-cfg` configuration | exact | same exit status, verdict, distinct states, depth and trace as the `.cml`, for every `.cml` in examples/spec and test/spec with and without each `--define` (a `.cml` `symmetry` is left out of both sides: `--emit-cfg` does not write one) | tla_gate |
+| hand-written twins: counter, mutex, guard, deadlock, constrain, logrep | exact | TLC's verdict, distinct states, depth and trace length on the same `.tla` and `.cfg`; logrep with a `.cfg` that leaves out `TypeOK` | spec_calibrate read rows, spec_gate TLA+ reader rows |
+| paxos, fpaxos, caspaxos, fastpaxos, zab twins | refused | exit 3 naming the first construct: strings, `\X` | spec_gate twin refusals |
+| `CONSTANT(S)` of integers, `TRUE`, `FALSE`, model values, sets of them; `ASSUME C \in Nat/Int/BOOLEAN` | exact | an unbound, undeclared or substituted (`<-`) constant, or a false `ASSUME`, is exit 3 | spec_gate `.cfg` rows |
+| definitions `Op(p, ...) == e` | exact | expanded by name with bound names renamed apart; each sees only those above it, so recursion is exit 3 | spec_gate def and recursion rows |
+| `Init` as `x = e` conjuncts; `Next` as actions of guards, `x' = e`, `x' \in S`, `UNCHANGED` under `\E` | exact | a variable an action leaves unsaid, or both assigns and leaves `UNCHANGED`, a nondeterministic `Init`, a prime outside an assignment or action constraint: exit 3 | spec_gate action rows |
+| variable types | inferred | from `Init` and every assignment: integer (TLC's 32-bit range), function, record, sequence (at most 12 elements: a longer one is exit 3); a boolean or set variable, or conflicting types, is exit 3 | spec_gate type rows |
+| `WF_vars(A)`, `SF_vars(A)`, A one action of `Next` | exact | `.cml`'s `fair weak A`, `fair strong A`; fairness on a disjunction, or under an `\E` of Next, is exit 3 | spec_gate fairness rows, tla_gate test/spec/fair |
+| a type invariant (`x \in T` conjuncts: ranges, `[S -> T]`, `[a : T]`, the `Seq` union `--emit-tla` writes) | exact | gives the variables' .cml types, enforced on every state: a value outside is exit 3 (TLC: invariant violated, exit 1) | spec_gate TypeOK rows, tla_gate |
+| `THEOREM` and proofs; `ASSUME C = n` | skipped; checked | a proof is TLAPS's; an ASSUME false for the .cfg is exit 3 | spec_gate THEOREM row, tla_gate test/spec/ind |
+| a variable of no finite type (`x' = <<x>>`) | refused | exit 3 at load | spec_gate recursive-type row |
+| `PROPERTY` `<>P`, `P ~> Q`, `[][A]_vars`; `CONSTRAINT`, `ACTION_CONSTRAINT`, `CHECK_DEADLOCK`, `INIT`/`NEXT` | exact | other temporal forms are exit 3 | spec_gate `.cfg` rows, spec_calibrate read rows |
+| `SYMMETRY Permutations(P)`, P a set of model values | exact | model values are integers from 1000000; `SYMMETRY` of anything else, a `VIEW` other than all the variables, `ALIAS`: exit 3 | spec_gate symmetry rows |
+| `LET`, `CHOOSE`, `CASE`, `SUBSET`, `UNION`, `DOMAIN`, `ENABLED`, `INSTANCE`, `RECURSIVE`, strings, set operators, `[S -> T]`, unbounded and temporal quantifiers, infix and function definitions, `EXTENDS` of other modules | refused | exit 3 with file, line and construct | spec_gate refusal rows |
 
 ## In-process engine (`cmc --model`, `libcmc(3)`)
 

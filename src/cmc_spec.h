@@ -16,6 +16,10 @@
  * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
 int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt);
 
+/* Read `text` as the .cml file at `path` (NULL text: read files again).
+ * cmc --spec FILE.tla loads the translation of FILE.tla this way. */
+void cmc_spec_set_text(const char *path, const char *text);
+
 /* cmc --spec FILE --check-inductive: check that TypeOK and the
  * invariants marked [inductive] hold at Init and are kept by every step
  * from every state of the declared types that satisfies them, reachable

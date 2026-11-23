@@ -557,7 +557,7 @@ printf '#include "cmc.h"\nint main(int argc, char **argv) { return cmc_main(argc
 # it compiles the engine, so it takes the build's CFLAGS (a word list)
 # shellcheck disable=SC2086
 if $CC -std=c11 -D_POSIX_C_SOURCE=200809L -O1 -w ${CFLAGS:-} -DCMC_TREE_CAP=200 -I"$HERE/include" -o "$B/cap200/cmc" \
-	"$B/cap200/main.c" "$HERE/src/cmc_cli.c" "$HERE/src/cmc_proc.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc_fs.c" "$HERE/src/cmc.c"; then
+	"$B/cap200/main.c" "$HERE/src/cmc_cli.c" "$HERE/src/cmc_proc.c" "$HERE/src/cmc_spec.c" "$HERE/src/cmc_tla.c" "$HERE/src/cmc_fs.c" "$HERE/src/cmc.c"; then
 	CMC=$B/cap200/cmc
 	export CMC_PRELOAD="$B/cmc-preload.so"
 	expect_by 120 "tree bound: an endless thread stops at the built-in bound" 2 "200 worlds with a multi-threaded node were searched without merging" --model-file "$OUT/tp-spin.model"

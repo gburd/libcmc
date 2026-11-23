@@ -133,6 +133,7 @@ check test/spec prec prec PASS
 check test/spec names names PASS
 check test/spec guard guard PASS
 check test/spec guard guardb VIOLATION --define BUG
+check test/spec ifexpr ifexpr PASS
 # the deadlock check and TLC's CONSTRAINT and ACTION_CONSTRAINT, with
 # and without each (test/spec/deadlock*.cml, constrain*.cml)
 check test/spec deadlock deadlock DEADLOCK

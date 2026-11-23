@@ -5,6 +5,33 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+`cmc --spec FILE.tla --config FILE.cfg` reads a TLA+ module and its TLC
+configuration directly (docs/plans/2.3-tla-users.md, items 4 and 5).
+The new src/cmc_tla.c translates the module to the `.cml` model it
+means and the `.cml` checker checks that; `cmc --emit-cml` prints the
+translation.  It reads the subset `.cml` expresses (CONSTANTS bound by
+the .cfg, VARIABLES, non-recursive definitions, an Init of `x = e`, a
+Next of actions under `\E`, `WF_vars`/`SF_vars` per action, a TypeOK
+as the variables' types, THEOREMs skipped, records, sequences,
+`EXCEPT` paths and `@`, `IF`, bullet lists by column) and the .cfg keys
+CONSTANT(S), SPECIFICATION or INIT/NEXT, INVARIANT(S), PROPERTY,
+CONSTRAINT, ACTION_CONSTRAINT, CHECK_DEADLOCK, SYMMETRY over model
+values and a trivial VIEW; it refuses everything else with the file,
+line and construct (exit 3).  Variable types are inferred from Init and
+the assignments.  Gates: tla_gate reads back every module `--emit-tla`
+writes (69 round trips over examples/spec, test/spec, test/spec/fair
+and test/spec/ind) to the same
+verdict, counts and trace; spec_calibrate reads the counter, mutex,
+guard, deadlock, constrain and logrep twins directly and matches TLC;
+spec_gate has a row for each refusal.  The paxos-family and zab twins
+are refused (strings, `\X`).
+
+`.cml` gains `if C then A else B`, TLA+'s `IF`: only the branch taken
+is evaluated.  `cmc --emit-tla` writes it as `IF THEN ELSE`
+(test/spec/ifexpr.cml agrees with TLC: 11 distinct states, depth 7).
+An action's parameter set may now be a literal with commas, `p in {0,
+1}`.
+
 Fairness per action, strong fairness, action properties and action
 coverage for `cmc --spec` (docs/plans/2.3-tla-users.md, items 6 and 7),
 each checked against single-worker TLC 2.19 on the emitted module

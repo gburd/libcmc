@@ -676,6 +676,23 @@ static Value sp_setlit(Pst *s){
 	return mk_set(s,e,n);
 }
 
+/* if C then A else B, after the "if": TLA+'s IF.  C is a boolean; the
+ * branch it does not take is parsed but not evaluated (Pst.dead), as
+ * TLC evaluates only the branch it takes, so `if x == 0 then 0 else
+ * y / x` is defined at x = 0.  Like TLA+'s, the else branch extends as
+ * far right as it can. */
+static Value sp_if(Pst *s){
+	Value c=sp_or(s); if(!s->ok) return c;
+	if(!need(s,&c,T_BOOL,"if")) return c;
+	int take=s->dead ? -1 : c.i!=0;
+	if(!sp_word(s,"then")){ fail(s,"expected then after if"); return c; }
+	s->dead+=take!=1; Value a=sp_or(s); s->dead-=take!=1;
+	if(!s->ok) return a;
+	if(!sp_word(s,"else")){ fail(s,"expected else in if"); return a; }
+	s->dead+=take!=0; Value b=sp_or(s); s->dead-=take!=0;
+	return take==0 ? b : a;
+}
+
 /* atom: integer, TRUE/FALSE, @, a bound name, const, variable, def
  * call, sequence operator, ( EXPR ), and the [..], {..} and <<..>>
  * literals */
@@ -698,6 +715,7 @@ static Value sp_atom(Pst *s){
 	/* identifier-led: keywords, const, var, param, def, operator */
 	char id[SP_NAME]; int n=sp_ident(s,id,sizeof id);
 	if(n==0){ fail(s,"expected an expression"); return z; }
+	if(!strcmp(id,"if")) return sp_if(s);
 	if(!strcmp(id,"TRUE")) return vbool(1);
 	if(!strcmp(id,"FALSE")) return vbool(0);
 	int hit;
@@ -1120,8 +1138,13 @@ static int sp_load(const char *path){
 /* parse one .cml file, APPENDING its declarations to S (so an `extends`
  * base is merged in before the extending module's own additions).
  * `extends FILE` loads FILE first, resolved relative to this file. */
+/* the .cml text of a TLA+ module (cmc_tla.c), read in place of the file
+ * at g_text_path when set */
+static const char *g_text, *g_text_path;
+void cmc_spec_set_text(const char *path, const char *text){ g_text_path=path; g_text=text; }
+
 static int sp_load_into(const char *path){
-	FILE *f=fopen(path,"r");
+	FILE *f=g_text && !strcmp(path,g_text_path) ? fmemopen((void *)g_text,strlen(g_text),"r") : fopen(path,"r");
 	if(!f){ fprintf(stderr,"cmc: cannot open %s\n",path); return -1; }
 	char line[1024]; int ln=0; Action *cur=NULL; int in_action=0;
 	while(fgets(line,sizeof line,f)){
@@ -1228,8 +1251,11 @@ static int sp_load_into(const char *path){
 			CPY(cur->name,rest,"action name");
 			if(tag) CPY(cur->tag,tag,"action tag");
 			if(params){
-				/* parse  p in SET, q in SET */
-				char *save=NULL; for(char *t=strtok_r(params,",",&save); t; t=strtok_r(NULL,",",&save)){
+				/* parse  p in SET, q in SET, splitting at the commas outside
+				 * brackets, so a SET may be a literal {a, b} */
+				for(char *t=params, *nx; t; t=nx){
+					nx=top_find(t,","); if(nx) *nx++=0;
+					if(!*sp_trim(t)) continue;	/* inc(): no parameter, as strtok read it */
 					char *in=strstr(t," in "); if(!in){ fprintf(stderr,"cmc: %s:%d: action param needs 'in'\n",path,ln); goto bad; }
 					*in=0; if(cur->nparam>=SP_MAXPARAM){ fprintf(stderr,"cmc: too many params\n"); goto bad; }
 					CPY(cur->pname[cur->nparam],sp_trim(t),"parameter name"); CPY(cur->pdom[cur->nparam],sp_trim(in+4),"parameter domain"); cur->nparam++;
@@ -2755,7 +2781,8 @@ int cmc_refine_note(int json, char *act, size_t actcap, char *vals, size_t valca
  * word is a name and is written as it is */
 static const char *tla_kw(const char *w, size_t n){
 	static const char *kw[][2]={{"all","\\A"},{"some","\\E"},{"not","~"},{"and","/\\"},
-		{"or","\\/"},{"in","\\in"},{"mod","%"},{"except","EXCEPT"}};
+		{"or","\\/"},{"in","\\in"},{"mod","%"},{"except","EXCEPT"},
+		{"if","IF"},{"then","THEN"},{"else","ELSE"}};
 	for(size_t i=0;i<sizeof kw/sizeof kw[0];i++) if(strlen(kw[i][0])==n && !strncmp(w,kw[i][0],n)) return kw[i][1];
 	return NULL;
 }

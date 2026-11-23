@@ -56,15 +56,12 @@ examples/spec|logrep.cml|--define BUG|logrep.tla|logrep_bug.cfg|VIOLATION
 # the VIEW, TLC finds 2112 states at the same depth, 12).
 
 num() { grep -oE "$2" "$1" | grep -oE '[0-9]+' | head -1; }
-printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
-	[ -z "$cml" ] && continue
-	co="$OUT/${cml%.cml}-${cfg%.cfg}.cmc.txt"
-	to="$OUT/${cml%.cml}-${cfg%.cfg}.tlc.txt"
-	# shellcheck disable=SC2086
-	"$CMC" --spec "$HERE/$dir/$cml" $def > "$co" 2>&1
 
-	bash "$TLC" "$HERE/$dir/$tla" "$HERE/$dir/$cfg" -workers 1 > "$to" 2>&1
-
+# compare CMCOUT TLCOUT WANT LABEL: the two runs agree on the verdict
+# and, on a pass, the distinct states and depth, else on the shortest
+# trace's length
+compare() {
+	co=$1 to=$2 want=$3 label=$4
 	# the summary line: TLC's progress lines print "33,335 distinct
 	# states found" with a thousands separator
 	c_distinct=$(num "$co" 'generated, [0-9]+ distinct states found')
@@ -89,14 +86,55 @@ printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
 		c_trace=$(grep -oE 'is \([0-9]+ actions\)' "$co" | grep -oE '[0-9]+')
 		t_trace=$(($(grep -cE '^State [0-9]+:' "$to") - 1))
 		[ -n "$c_trace" ] && [ "$c_trace" = "$t_trace" ] || ok=0
-		echo "$cml [$want]: cmc trace=$c_trace tlc trace=$t_trace -> $([ $ok = 1 ] && echo MATCH || echo MISMATCH)"
+		echo "$label [$want]: cmc trace=$c_trace tlc trace=$t_trace -> $([ $ok = 1 ] && echo MATCH || echo MISMATCH)"
 	else
 		[ "$c_viol" = 0 ] && [ "$t_viol" = 0 ] || ok=0
 		[ -n "$c_distinct" ] && [ "$c_distinct" = "$t_distinct" ] || ok=0
 		[ -n "$c_depth" ] && [ "$c_depth" = "$t_depth" ] || ok=0
-		echo "$cml [$want]: cmc d=$c_distinct depth=$c_depth | tlc d=$t_distinct depth=$t_depth -> $([ $ok = 1 ] && echo MATCH || echo MISMATCH)"
+		echo "$label [$want]: cmc d=$c_distinct depth=$c_depth | tlc d=$t_distinct depth=$t_depth -> $([ $ok = 1 ] && echo MATCH || echo MISMATCH)"
 	fi
-	[ $ok = 1 ] || { echo "spec_calibrate: MISMATCH on $cml/$cfg"; echo "FAILMARKER" > "$OUT/fail"; }
+	[ $ok = 1 ] || { echo "spec_calibrate: MISMATCH on $label"; echo "FAILMARKER" > "$OUT/fail"; }
+}
+
+printf '%s\n' "$rows" | while IFS='|' read -r dir cml def tla cfg want; do
+	[ -z "$cml" ] && continue
+	co="$OUT/${cml%.cml}-${cfg%.cfg}.cmc.txt"
+	to="$OUT/${cml%.cml}-${cfg%.cfg}.tlc.txt"
+	# shellcheck disable=SC2086
+	"$CMC" --spec "$HERE/$dir/$cml" $def > "$co" 2>&1
+	bash "$TLC" "$HERE/$dir/$tla" "$HERE/$dir/$cfg" -workers 1 > "$to" 2>&1
+	compare "$co" "$to" "$want" "$cml/$cfg"
+done
+
+# The twins in the subset the TLA+ reader takes, read directly: `cmc
+# --spec FILE.tla --config FILE.cfg` against TLC on the same two files.
+# logrep_read_*.cfg leave out TypeOK, whose UNION the reader
+# refuses; the other twins are refused (test/spec_gate.sh pins why).
+read_rows="
+test/spec|counter.tla|counter.cfg|PASS
+test/spec|mutex.tla|mutex_safe.cfg|PASS
+test/spec|mutex.tla|mutex_bug.cfg|VIOLATION
+test/spec|guard.tla|guard_safe.cfg|PASS
+test/spec|guard.tla|guard_bug.cfg|VIOLATION
+test/spec|deadlock.tla|deadlock.cfg|DEADLOCK
+test/spec|deadlock.tla|deadlock_off.cfg|PASS
+test/spec|deadlock.tla|deadlock_c.cfg|PASS
+test/spec|deadlock.tla|deadlock_ac.cfg|PASS
+test/spec|constrain.tla|constrain.cfg|PASS
+test/spec|constrain.tla|constrain_c.cfg|PASS
+test/spec|constrain.tla|constrain_ac.cfg|PASS
+test/spec|constrain.tla|constrain_inv.cfg|VIOLATION
+test/spec|constrain.tla|constrain_acinv.cfg|VIOLATION
+examples/spec|logrep.tla|logrep_read_safe.cfg|PASS
+examples/spec|logrep.tla|logrep_read_bug.cfg|VIOLATION
+"
+printf '%s\n' "$read_rows" | while IFS='|' read -r dir tla cfg want; do
+	[ -z "$tla" ] && continue
+	co="$OUT/read-${tla%.tla}-${cfg%.cfg}.cmc.txt"
+	to="$OUT/read-${tla%.tla}-${cfg%.cfg}.tlc.txt"
+	"$CMC" --spec "$HERE/$dir/$tla" --config "$HERE/$dir/$cfg" > "$co" 2>&1
+	bash "$TLC" "$HERE/$dir/$tla" "$HERE/$dir/$cfg" -workers 1 > "$to" 2>&1
+	compare "$co" "$to" "$want" "read $tla/$cfg"
 done
 
 if [ -f "$OUT/fail" ]; then rm -f "$OUT/fail"; echo "spec_calibrate: FAILED"; exit 1; fi
