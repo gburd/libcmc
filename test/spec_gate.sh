@@ -255,6 +255,12 @@ expect "coverage: a never-enabled action is a warning" 1 "Warning: action stay i
 expect "coverage: is only for --spec"                3 "--coverage is not supported with --emit-tla" --emit-tla "$FD/mono.cml" --coverage
 printf 'module fx\nvar x : 0 .. 1\ninit x == 0\naction a:\n  x%s = 1 - x\nfair weak b\nproperty p: eventually x == 1\n' "'" > "$OUT/fx.cml"
 expect "a fair line naming no action is an error"    3 "fair b names no action" --spec "$OUT/fx.cml"
+# a weaker fairness line after a stronger one leaves it strong
+printf 'module fs\nvar x : 0 .. 1\nvar d : 0 .. 1\ninit x == 0 and d == 0\naction flip:\n  when d == 0\n  x%s = 1 - x\naction finish:\n  when x == 1 and d == 0\n  d%s = 1\ndeadlock = off\nfairness strong\nfairness weak\nproperty p: eventually d == 1\n' "'" "'" > "$OUT/fs.cml"
+expect "fairness weak after fairness strong stays strong" 0 "1 property held" --spec "$OUT/fs.cml"
+expect "coverage: an action --define leaves out is not listed" 0 "^<tick>: 3:3  (enabled in 3 states)" --spec "$HERE/examples/spec/ticker.cml" --coverage
+expect "coverage: no report on a model error"        3 "outside" --spec "$HERE/test/spec/sound/succbound.cml" --coverage
+expect "mono: an unwritable trace file is an error"  3 "could not write" --spec "$FD/mono_bad.cml" --trace-out /dev/full
 
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
 # the emitted module's shape (test/spec/shape.cml; emit_gate runs TLC on it)
@@ -604,6 +610,16 @@ bad "a function var without ->"     "function var needs ->"    "var f : [0 .. 1,
 bad "fairness other than weak or strong" "fairness is weak or strong" "$V\nfairness fast\n$I"
 bad "a fair line with no kind"      "fair needs weak or strong" "$V\nfair a\n$I"
 bad "a fair line with no action"    "fair needs weak or strong" "$V\nfair weak\n$I"
+bad "a fair line of another kind"   "fair needs weak or strong" "$V\nfair weakly a\n$I"
+bad "a fair line, strong run on"    "fair needs weak or strong" "$V\nfair strongest a\n$I"
+bad "fairness strong run on"        "fairness is weak or strong" "$V\nfairness strongly\n$I"
+bad "too many fair lines"           "too many fair lines"      "$V\n$(for i in $(seq 33); do printf 'fair weak a\\n'; done)$I"
+bad "a fair action name too long"   "fair action name"         "$V\nfair weak $(printf 'a%.0s' $(seq 80))\n$I"
+bad "always run on"                 "property must be"         "$V\nproperty p: alwaysx\n$I"
+bad "an action property without ["  "an action property is"    "$V\nproperty p: always x_vars]_vars\n$I"
+bad "an empty action property"      "an action property is"    "$V\nproperty p: always []_vars\n$I"
+bad "an action property too long"   "property"                 "$V\nproperty p: always [$(printf 'x == x and %.0s' $(seq 60))TRUE]_vars\n$I"
+bad "an action property without _vars" "an action property is"   "$V\nproperty p: always [x' >= x]\n$I"
 bad "an action property without _vars" "an action property is"   "$V\nproperty p: always [x' >= x]\n$I"
 bad "a property without a name"     "property needs name:"     "$V\nproperty x == 1\n$I"
 bad "a property of no known form"   "property must be"         "$V\nproperty p: x == 0\n$I"

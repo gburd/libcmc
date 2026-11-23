@@ -1973,16 +1973,17 @@ static int act_fair(int a){
  * ok, -1 on OOM. */
 static int lv_fair_core(const unsigned char *mask, unsigned char *core){
 	int n=lv.n, na=S.nact, rc=-1;
-	int *comp=malloc(sizeof(int)*(size_t)n);
-	unsigned char *work=malloc((size_t)n+1), *dis=NULL, *en=NULL, *tak=NULL, *cut=NULL, *shed=NULL;
-	if(!comp||!work) goto out;
+	int *comp=malloc((sizeof(int)+1)*(size_t)n+1);
+	unsigned char *work=(unsigned char *)(comp+n), *dis=NULL, *en, *tak, *cut, *shed;
+	if(!comp) return -1;
 	memcpy(work,mask,(size_t)n); memset(core,0,(size_t)n);
 	for(int left=1; left;){
 		int nscc=lv_scc(work,comp); if(nscc<0) goto out;
-		size_t cells=(size_t)nscc*(size_t)na+1;
-		free(dis); free(en); free(tak); free(cut); free(shed);
-		dis=calloc(cells,1); en=calloc(cells,1); tak=calloc(cells,1); cut=calloc(cells,1); shed=calloc((size_t)nscc+1,1);
-		if(!dis||!en||!tak||!cut||!shed) goto out;
+		/* per SCC and action: disabled somewhere, enabled somewhere,
+		 * taken inside, SF and to be cut; then per SCC: sheds states */
+		size_t cells=(size_t)nscc*(size_t)na;
+		free(dis); dis=calloc(cells*4+(size_t)nscc+1,1); if(!dis) goto out;
+		en=dis+cells; tak=en+cells; cut=tak+cells; shed=cut+cells;
 		for(int u=0;u<n;u++){
 			if(!work[u]) continue;
 			size_t c=(size_t)comp[u]*(size_t)na;
@@ -2010,7 +2011,7 @@ static int lv_fair_core(const unsigned char *mask, unsigned char *core){
 		}
 	}
 	rc=0;
-out:	free(comp); free(work); free(dis); free(en); free(tak); free(cut); free(shed);
+out:	free(comp); free(dis);
 	return rc;
 }
 
