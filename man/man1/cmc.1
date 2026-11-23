@@ -24,6 +24,7 @@
 .Fl -spec Ar file
 .Op Fl -define Ar tag ...
 .Op Fl -no-deadlock
+.Op Fl -coverage
 .Op Fl -trace-out Ar file Op Fl -trace-format Cm itf | json
 .Nm
 .Fl -emit-tla Ar file
@@ -182,8 +183,49 @@ bound the search as TLC's
 and
 .Cm ACTION_CONSTRAINT
 do.
+A
+.Cm property
+is
+.Cm eventually Ar E ,
+.Ar A Cm ~> Ar B ,
+or the action property
+.Cm always [ Ns Ar E Ns Cm ]_vars ,
+TLA+'s
+.Li [][E]_vars :
+every step that changes a variable satisfies
+.Ar E ,
+an expression over
+.Ar x
+and
+.Ar x' .
+.Cm fairness weak
+and
+.Cm fairness strong
+make every action weakly or strongly fair
+.Pq Li WF_vars , SF_vars ;
+.Cm fair weak Ar action
+and
+.Cm fair strong Ar action
+make one action so.
+The fairness of a parameterized action is that of its disjunction over
+the parameters, as
+.Li WF_vars(A)
+is for the
+.Li \eE
+the emitted module gives it.
 See
 .Lk https://gregburd.codeberg.page/libcmc/reference/plan-tlaplus-scope/ "the TLA+-scope plan" .
+.It Fl -coverage
+With
+.Fl -spec ,
+after the search print, per action, what TLC's
+.Fl coverage
+prints for it,
+.Ar distinct : Ns Ar generated
+.Pq the new states it found, and every successor it produced, a stutter or a state already seen included ,
+and the number of explored states that enable it.
+An action that no explored state enables is named in a warning: it is
+vacuous in the model.
 .It Fl -no-deadlock
 With
 .Fl -spec ,

@@ -41,7 +41,7 @@ usage(void)
 			"         [--bfs | --simulate [--seed N] [--walks K]] [--depth D]\n"
 			"         [--max-states N] [--time S] [--crashes N] [--drops N] [--timeouts N]\n"
 			"         [--trace-out FILE [--trace-format json]]\n"
-			"       cmc --spec FILE [--define TAG] [--trace-out FILE [--trace-format itf|json]]\n"
+			"       cmc --spec FILE [--define TAG] [--coverage] [--trace-out FILE [--trace-format itf|json]]\n"
 			"       cmc --model NAME [--tlc-cfg FILE | --cfg k=v,...]\n"
 			"         [--inv NAME[,NAME]] [--prop NAME[,NAME]] [--all-props]\n"
 			"         [--bfs | --dfs DEPTH | --simulate [--seed N] [--walks K] [--depth D]\n"
@@ -484,6 +484,11 @@ spec_main(int argc, char **argv, const char *mode)
 		if (!strcmp(argv[j], "--no-deadlock"))
 		{
 			nodl = 1;
+			continue;
+		}
+		if (spec && !strcmp(argv[j], "--coverage"))
+		{
+			cmc_spec_set_coverage(1);
 			continue;
 		}
 		if (!def && !out && !fmt && strcmp(argv[j], mode))

@@ -1,0 +1,4 @@
+# x' >= x fails on the wrap step, after 4 actions
+module mono_bad
+extends mono
+property bad: always [x' >= x]_vars

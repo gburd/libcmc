@@ -1,0 +1,5 @@
+# SF on finish alone: a run may stutter at x == 0, where finish is
+# disabled, so the property fails
+module toggle_sfonly
+extends toggle
+fair strong finish

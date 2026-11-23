@@ -229,6 +229,33 @@ echo "-- liveness: temporal properties under weak fairness"
 expect "ticker: eventually-max holds under fairness" 0 "1 property held" --spec "$HERE/examples/spec/ticker.cml"
 expect "ticker: a fair reset cycle breaks it"        1 "reaches_max is violated" --spec "$HERE/examples/spec/ticker.cml" --define RESET
 
+echo "-- fairness per action, strong fairness, action properties, coverage"
+# test/spec/fair/: each verdict is TLC's on the emitted module
+# (emit_gate.sh); toggle and inner tell weak from strong fairness
+FD=$HERE/test/spec/fair
+expect "toggle: no fairness, a run may stop"         1 "finishes is violated" --spec "$FD/toggle.cml"
+expect "toggle: WF on both, flip for ever is fair"   1 "finishes is violated" --spec "$FD/toggle_wf.cml"
+expect "toggle: SF on finish alone, a stutter at 0"  1 "finishes is violated" --spec "$FD/toggle_sfonly.cml"
+expect "toggle: WF flip and SF finish, it finishes"  0 "1 property held" --spec "$FD/toggle_sf.cml"
+expect "toggle: fairness strong, it finishes"        0 "1 property held" --spec "$FD/toggle_strong.cml"
+expect "inner: WF, the cycle 0 <-> 1 is fair"        1 "finishes is violated" --spec "$FD/inner_wf.cml"
+expect "inner: SF finish, 0 <-> 1 never enables it"  1 "finishes is violated" --spec "$FD/inner_sf.cml"
+expect "inner: SF up and finish, it finishes"        0 "1 property held" --spec "$FD/inner_sf2.cml"
+expect "param: WF on go(i) is fairness of the disjunction" 1 "finishes is violated" --spec "$FD/param.cml"
+expect "mono: two action properties hold"            0 "2 properties held" --spec "$FD/mono.cml"
+expect "mono: x' >= x fails on the wrap"             1 "Action property bad is violated" --spec "$FD/mono_bad.cml"
+expect "mono: the shortest trace ends in the bad step" 1 "is (4 actions)" --spec "$FD/mono_bad.cml"
+expect "mono: a step out of the model is checked"    1 "Action property bad is violated" --spec "$FD/mono_c.cml"
+expect "emit-tla: WF and SF per action"              0 "Spec == Init /. \[\]\[Next\]_vars /. WF_vars(flip) /. SF_vars(finish)$" --emit-tla "$FD/toggle_sf.cml"
+expect "emit-tla: fairness strong"                   0 "SF_vars(flip) /. SF_vars(finish)$" --emit-tla "$FD/toggle_strong.cml"
+expect "emit-tla: an action property"                0 "^  \[\]\[(x' >= x)\]_vars$" --emit-tla "$FD/mono_bad.cml"
+expect "coverage: distinct:generated per action (TLC's 3:6)" 0 "^<incx>: 3:6  (enabled in 6 states)" --spec "$HERE/test/spec/constrain_ac.cml" --coverage
+expect "coverage: an action seen only as a stutter"  0 "^<stay>: 0:1  (enabled in 1 states)" --spec "$FD/mono.cml" --coverage
+expect "coverage: a never-enabled action is a warning" 1 "Warning: action stay is never enabled" --spec "$FD/mono_bad.cml" --coverage
+expect "coverage: is only for --spec"                3 "--coverage is not supported with --emit-tla" --emit-tla "$FD/mono.cml" --coverage
+printf 'module fx\nvar x : 0 .. 1\ninit x == 0\naction a:\n  x%s = 1 - x\nfair weak b\nproperty p: eventually x == 1\n' "'" > "$OUT/fx.cml"
+expect "a fair line naming no action is an error"    3 "fair b names no action" --spec "$OUT/fx.cml"
+
 echo "-- the TLA+ bridge (cmc --emit-tla), structure only (check-emit-tla runs TLC)"
 # the emitted module's shape (test/spec/shape.cml; emit_gate runs TLC on it)
 expect "shape: holds, with both properties" 0 "9 distinct states found" --spec "$HERE/test/spec/shape.cml"
@@ -574,9 +601,13 @@ bad "a const that fails to evaluate" "const N: bad value"      "const N = M\n$V\
 bad "a const that is a boolean"     "const N: bad value"       "const N = TRUE\n$V\n$I"
 bad "a var without :"               "var needs :"              "var x 0 .. 1\ninit x == 0\n$I"
 bad "a function var without ->"     "function var needs ->"    "var f : [0 .. 1, 0 .. 1]\ninit f == 0\n$I"
-bad "fairness other than weak"      "only 'fairness weak'"     "$V\nfairness strong\n$I"
+bad "fairness other than weak or strong" "fairness is weak or strong" "$V\nfairness fast\n$I"
+bad "a fair line with no kind"      "fair needs weak or strong" "$V\nfair a\n$I"
+bad "a fair line with no action"    "fair needs weak or strong" "$V\nfair weak\n$I"
+bad "an action property without _vars" "an action property is"   "$V\nproperty p: always [x' >= x]\n$I"
 bad "a property without a name"     "property needs name:"     "$V\nproperty x == 1\n$I"
-bad "a property of no known form"   "property must be"         "$V\nproperty p: always x == 0\n$I"
+bad "a property of no known form"   "property must be"         "$V\nproperty p: x == 0\n$I"
+bad "an action property on a non-boolean" "expected a boolean in an action property" "$V\naction a:\n  x' = 1 - x\nproperty p: always [x']_vars"
 bad "an invariant without a name"   "invariant needs name:"    "$V\ninvariant x <= 1"
 bad "a when outside an action"      "when outside action"      "$V\nwhen x == 0\n$I"
 bad "an action parameter without in" "action param needs 'in'" "$V\naction a(i):\n  x' = 1\n$I"

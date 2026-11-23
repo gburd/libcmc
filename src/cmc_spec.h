@@ -16,6 +16,12 @@
  * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
 int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt);
 
+/* With a nonzero `on`, cmc_spec_main() also prints action coverage
+ * (cmc --spec --coverage): per action, the new states and successors
+ * it produced and the states that enable it, with a warning for an
+ * action no explored state enables. */
+void cmc_spec_set_coverage(int on);
+
 /* ---- refinement support (Milestone C) ------------------------------
  * The refinement checker runs an implementation and, at each reached
  * state, asks the abstract model whether the implementation's state --

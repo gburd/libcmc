@@ -1,0 +1,5 @@
+# the same under a state constraint: TLC checks an action property on
+# every generated step, one into a state outside the model too
+module mono_c
+extends mono_bad
+constraint low: y < 1

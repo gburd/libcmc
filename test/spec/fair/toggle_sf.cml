@@ -1,0 +1,6 @@
+# WF on flip and SF on finish: finish is enabled infinitely often,
+# so it is taken (holds)
+module toggle_sf
+extends toggle
+fair weak flip
+fair strong finish

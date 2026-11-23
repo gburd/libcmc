@@ -1,0 +1,4 @@
+# fairness strong: SF on every action (holds)
+module toggle_strong
+extends toggle
+fairness strong

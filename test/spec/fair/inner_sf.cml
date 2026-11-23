@@ -1,0 +1,5 @@
+# SF on finish too: the cycle 0 <-> 1 never enables finish, so it
+# stays fair (violated)
+module inner_sf
+extends inner_wf
+fair strong finish

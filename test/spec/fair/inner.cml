@@ -1,0 +1,27 @@
+# test/spec/fair/inner.cml: strong fairness that removes part of a
+# component.  x moves among 0, 1 and 2; finish is enabled only at
+# x == 2.  Under SF on finish, a run that keeps visiting 2 must finish,
+# but the cycle 0 <-> 1 never enables it, and is fair unless up is
+# strongly fair too (it is enabled at 1 on that cycle and never taken).
+# inner_*.cml add the fairness.
+module inner
+var x : 0 .. 2
+var done : 0 .. 1
+init x == 0 and done == 0
+action right:
+  when done == 0 and x == 0
+  x' = 1
+action left:
+  when done == 0 and x == 1
+  x' = 0
+action up:
+  when done == 0 and x == 1
+  x' = 2
+action down:
+  when done == 0 and x == 2
+  x' = 1
+action finish:
+  when done == 0 and x == 2
+  done' = 1
+deadlock = off
+property finishes: eventually done == 1

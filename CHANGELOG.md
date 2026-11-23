@@ -5,6 +5,30 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+Fairness per action, strong fairness, action properties and action
+coverage for `cmc --spec` (docs/plans/2.3-tla-users.md, items 6 and 7),
+each checked against single-worker TLC 2.19 on the emitted module
+(emit_gate rows on test/spec/fair/).
+
+- `fair weak A` and `fair strong A` give one action WF_vars or SF_vars,
+  and `fairness strong` gives every action SF_vars (`fairness weak` is
+  unchanged).  The liveness check handles strong fairness as TLC does,
+  splitting a component again after dropping the states that enable a
+  strongly fair action it never takes.  `--emit-tla` writes the
+  fairness into `Spec`.  A parameterized action is fair as its
+  disjunction over the parameters.  An unknown action name in a fair
+  line is an error.
+- `property NAME: always [E]_vars`, TLA+'s `[][E]_vars` over `x` and
+  `x'`, is checked on every generated step but a stutter, with the
+  shortest trace ("Error: Action property NAME is violated.").  It is
+  allowed under a constraint, since it needs no state graph.
+- `cmc --spec --coverage` prints each action's distinct:generated
+  counts, as TLC's `-coverage`, and how many states enable it, with a
+  warning for an action no explored state enables.  TLC counts the
+  successors of a guard with an existential once per witness, so its
+  generated count can be larger (Paxos phase2a, ZAB commit); the
+  distinct counts match.
+
 `cmc --spec` has TLC's checking options (docs/plans/2.3-tla-users.md,
 item 1), each calibrated against single-worker TLC 2.19 on the same
 model for verdict, distinct states and depth (spec_gate,

@@ -15,6 +15,7 @@ fail=0
 verdict() {
 	if grep -q 'Deadlock reached' "$1"; then echo DEADLOCK
 	elif grep -q 'Invariant .* is violated' "$1"; then echo VIOLATION
+	elif grep -q 'Action property .* is violated' "$1"; then echo ACTION
 	elif grep -q 'Temporal properties were violated\|Property .* is violated' "$1"; then echo TEMPORAL
 	elif grep -q 'No error has been found' "$1"; then echo PASS
 	else echo ERROR; fi
@@ -52,9 +53,42 @@ check() {
 			echo "FAIL $mod [$want]: cmc d=$cd_ depth=$cp_, TLC d=$td depth=$tp"; echo x>"$OUT/fail"; return
 		fi
 		echo "ok   $mod [$want]: TLC agrees (d=$td depth=$tp)"
+	elif [ "$want" = ACTION ]; then
+		# the shortest trace to the bad step: cmc's actions, TLC's states
+		ct=$(num "$d/cmc.txt" 'is \([0-9]+ actions') tt=$(($(grep -cE '^State [0-9]+:' "$d/out.txt") - 1))
+		if [ -z "$ct" ] || [ "$ct" != "$tt" ]; then
+			echo "FAIL $mod [$want]: cmc trace=$ct, TLC trace=$tt"; echo x>"$OUT/fail"; return
+		fi
+		echo "ok   $mod [$want]: TLC agrees (trace=$tt)"
 	else
 		echo "ok   $mod [$want]: TLC agrees"
 	fi
+}
+
+# cov DIR CML MODULE GEN [ARG...]: on a complete run, cmc --spec
+# --coverage reports for each action the distinct:generated counts TLC's
+# -coverage reports for the emitted module.  With GEN=distinct only the
+# distinct counts are compared: TLC counts an action's successors once
+# per witness of an existential quantifier in its guard, cmc once.
+cov() {
+	dir=$1 cml=$2 mod=$3 gen=$4; shift 4
+	d="$OUT/cov-$mod"; mkdir -p "$d"
+	src=$HERE/$dir/$cml.cml
+	"$CMC" --emit-tla "$src" "$@" > "$d/$mod.tla" 2>&1
+	"$CMC" --emit-cfg "$src" "$@" > "$d/$mod.cfg" 2>&1
+	"$CMC" --spec "$src" --coverage "$@" > "$d/cmc.txt" 2>&1
+	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
+	bash "$TLC" "$d/$mod.tla" "$d/$mod.cfg" -workers 1 -coverage 1 > "$d/out.txt" 2>&1
+	# "<A line ...>: d:g" in TLC, "<A>: d:g  (enabled ...)" in cmc
+	sed -n 's/^<\([A-Za-z0-9_]*\) line [^>]*>: \([0-9]*\):\([0-9]*\)$/\1 \2 \3/p' "$d/out.txt" | grep -v '^Init ' > "$d/tlc.cov"
+	sed -n 's/^<\([A-Za-z0-9_]*\)>: \([0-9]*\):\([0-9]*\)  (.*/\1 \2 \3/p' "$d/cmc.txt" > "$d/cmc.cov"
+	if [ "$gen" = distinct ]; then
+		cut -d' ' -f1,2 "$d/tlc.cov" > "$d/t" && cut -d' ' -f1,2 "$d/cmc.cov" > "$d/c"
+	else cp "$d/tlc.cov" "$d/t" && cp "$d/cmc.cov" "$d/c"; fi
+	if [ ! -s "$d/t" ] || ! cmp -s "$d/t" "$d/c"; then
+		echo "FAIL $mod coverage: cmc [$(tr '\n' ' ' < "$d/cmc.cov")] TLC [$(tr '\n' ' ' < "$d/tlc.cov")]"; echo x>"$OUT/fail"; return
+	fi
+	echo "ok   $mod coverage: TLC agrees ($gen: $(tr '\n' ' ' < "$d/tlc.cov"))"
 }
 
 echo "-- the TLA+ bridge: cmc --emit-tla produces TLC-checkable modules"
@@ -121,6 +155,31 @@ check test/spec/sound unfair unfair TEMPORAL
 check test/spec/sound once once PASS
 check test/spec/sound leads leads TEMPORAL
 check test/spec/sound leadscross leadscross PASS
+# fairness per action and strong fairness (test/spec/fair/): toggle and
+# inner give different verdicts under WF and SF, and TLC fixes each; the
+# action properties hold, fail, and fail on a step out of the model
+check test/spec/fair toggle toggle TEMPORAL
+check test/spec/fair toggle_wf toggle_wf TEMPORAL
+check test/spec/fair toggle_sfonly toggle_sfonly TEMPORAL
+check test/spec/fair toggle_sf toggle_sf PASS
+check test/spec/fair toggle_strong toggle_strong PASS
+check test/spec/fair inner_wf inner_wf TEMPORAL
+check test/spec/fair inner_sf inner_sf TEMPORAL
+check test/spec/fair inner_sf2 inner_sf2 PASS
+check test/spec/fair param param TEMPORAL
+check test/spec/fair mono mono PASS
+check test/spec/fair mono_bad mono_bad ACTION
+check test/spec/fair mono_c mono_c ACTION
+# action coverage (cmc --spec --coverage) against TLC's -coverage: an
+# action constraint, a stutter-only action, two protocols, and Paxos
+# and ZAB, where a guard (phase2a, commit) has an existential TLC counts
+# per witness
+cov test/spec constrain_ac constrain_ac all
+cov test/spec/fair mono mono all
+cov examples/spec twophase twophase all
+cov examples/spec hc hc all
+cov examples/spec paxos paxos distinct
+cov examples/spec zab zab distinct
 # one of each form the bridge emits (test/spec/shape.cml), an invariant
 # and both properties
 check test/spec shape shape PASS
