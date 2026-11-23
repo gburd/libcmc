@@ -202,7 +202,7 @@ before):
   179, the orbit count of TLC's 357-state dump under swapping clients.
 - The emit gate runs SANY on the module emitted from every `.cml` in
   examples/spec and test/spec that `cmc --spec` accepts, with each
-  `[TAG]` defined in turn (74 modules), so an emitter syntax bug shows
+  `[TAG]` defined in turn (77 modules), so an emitter syntax bug shows
   on any model, not only on a row TLC runs.
 
 ## 2.2.0 (2026-11-22)
