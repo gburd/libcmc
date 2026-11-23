@@ -1,0 +1,85 @@
+# examples/spec/logrep.cml: leader-based log replication, the core of
+# Raft's AppendEntries and of primary-backup logs, written with records,
+# bounded sequences and def operators.
+#
+# Server 0 is the leader and servers 1 .. F follow it.  Clients append
+# values to the leader's log.  The leader sends entry i to a follower as
+# a record [idx |-> i, val |-> v] on a FIFO channel that may lose
+# messages.  A follower appends the entry at the head of its channel
+# only when it extends its log by exactly one position (the consistency
+# check of AppendEntries), and reports how far its log matches.  The
+# leader commits entry i once a quorum (itself and Q - 1 followers)
+# holds it.
+#
+# The safety property, durable, is that every committed entry is held,
+# with the leader's value, by a quorum.  The planted bug drops the
+# follower's index check: after a lost message the follower appends a
+# later entry in the wrong position, reports a match it does not have,
+# and the leader commits an entry that a quorum does not hold.
+#
+#   cmc --spec examples/spec/logrep.cml
+#   cmc --spec examples/spec/logrep.cml --define BUG
+#
+# examples/spec/logrep.tla is a hand-written TLA+ twin; TLC and cmc
+# agree on its distinct states, depth and shortest counterexample
+# (make check-spec-calibration).
+
+module logrep
+
+const F = 2                     # followers 1 .. F; server 0 leads
+const L = 2                     # the longest log
+const C = 2                     # messages a channel holds
+const Q = 2                     # a quorum of the F + 1 servers
+
+var log : [0 .. F -> Seq(0 .. 1, L)]
+var chan : [1 .. F -> Seq([idx : 1 .. L, val : 0 .. 1], C)]
+var match : [1 .. F -> 0 .. L]
+var commit : 0 .. L
+
+# p is a prefix of q
+def Prefix(p, q) = Len(p) <= Len(q) and SubSeq(q, 1, Len(p)) == p
+# the servers whose log holds the leader's first i entries
+def Holds(i) = count s in 0 .. F : Prefix(SubSeq(log[0], 1, i), log[s])
+# how many servers the leader counts as holding entry i
+def Acked(i) = 1 + (count f in 1 .. F : match[f] >= i)
+
+init log == [s in 0 .. F -> <<>>] and chan == [f in 1 .. F -> <<>>]
+init match == [f in 1 .. F -> 0] and commit == 0
+
+# a client appends v to the leader's log
+action client(v in 0 .. 1):
+  when Len(log[0]) < L
+  log' = [log except ![0] = Append(@, v)]
+
+# the leader sends its entry i to follower f
+action send(f in 1 .. F, i in 1 .. L):
+  when i <= Len(log[0]) and Len(chan[f]) < C
+  chan' = [chan except ![f] = Append(@, [idx |-> i, val |-> log[0][i]])]
+
+# follower f takes the entry at the head of its channel when it is the
+# next one its log needs
+action recv(f in 1 .. F):
+  when Len(chan[f]) > 0 and Head(chan[f]).idx == Len(log[f]) + 1
+  log' = [log except ![f] = Append(@, Head(chan[f]).val)]
+  chan' = [chan except ![f] = Tail(@)]
+  match' = [match except ![f] = Len(log[f]) + 1]
+
+# the channel loses (or the follower discards) the message at its head
+action drop(f in 1 .. F):
+  when Len(chan[f]) > 0
+  chan' = [chan except ![f] = Tail(@)]
+
+# the leader commits entry i once a quorum holds it
+action advance(i in 1 .. L):
+  when commit < i and i <= Len(log[0]) and Acked(i) >= Q
+  commit' = i
+
+# the planted bug: the follower appends any entry, without the index check
+action recv_bug(f in 1 .. F) [BUG]:
+  when Len(chan[f]) > 0 and Len(log[f]) < L and Head(chan[f]).idx != Len(log[f]) + 1
+  log' = [log except ![f] = Append(@, Head(chan[f]).val)]
+  chan' = [chan except ![f] = Tail(@)]
+  match' = [match except ![f] = Len(log[f]) + 1]
+
+invariant durable: Holds(commit) >= Q
+invariant leader_ahead: all f in 1 .. F : match[f] <= Len(log[0])

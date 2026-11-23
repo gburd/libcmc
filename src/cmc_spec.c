@@ -21,12 +21,16 @@
  *     when ...
  *     pc' = [pc except [i] = 1]
  *   invariant safe: EXPR              # checked in every reachable state
+ *   var r : [a : 0 .. 3, b : 0 .. 1]  # a record variable
+ *   var log : Seq([idx : 1 .. 2, val : 0 .. 1], 4)   # at most 4 elements
+ *   def Next(i) = (i + 1) mod N       # a named operator, no recursion
  *
- * Values are bounded integers, booleans, finite sets of integers, and
- * finite maps from integers to integers (functions/records).  A world is
- * the tuple of variable values, canonicalised so equal states hash
- * equal; the search is breadth-first, so a violation is reported with
- * the shortest action sequence, in TLC's wording.
+ * Values are bounded integers, booleans, finite sets of integers,
+ * functions from integers to values, records and bounded sequences
+ * (tuples are sequences).  A world is the tuple of variable values,
+ * each in one canonical encoding, so equal states have equal bytes; the
+ * search is breadth-first, so a violation is reported with the shortest
+ * action sequence, in TLC's wording.
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -48,37 +52,94 @@
 #define SP_MAPMAX 12			/* entries in a map value */
 #define SP_NAME 32
 #define SP_EXPR 512
+#define SP_MAXDEF 32			/* def operators */
+#define SP_MAXFLD 32			/* distinct record field names */
+#define SP_MAXTY 64			/* nodes in the variables' type trees */
+#define SP_STATEW 1024			/* words in a state's encoding */
 
-/* ---- the value model ------------------------------------------------ */
-enum { T_INT, T_BOOL, T_SET, T_FUN };
+/* ---- the value model ------------------------------------------------
+ * Every value has one canonical encoding as a run of words, so two
+ * values are equal exactly when their encodings are, and a state (the
+ * concatenation of its variables' encodings) can be hashed and compared
+ * as bytes.  A scalar is two words, [tag, value].  A compound value is
+ * [tag, len, n, ...], len counting every word including these three:
+ *   T_SET  n integers, sorted and unique
+ *   T_FUN  n pairs (key, child), keys integers in increasing order
+ *   T_REC  n pairs (field id, child), field ids increasing
+ *   T_SEQ  n children, in order
+ * where a child is itself an encoding.  Each encoding is self-delimiting
+ * (its tag gives its length), so a concatenation reads back one way.
+ *
+ * A Value is a view: a scalar carries its tag and value; a compound
+ * value points at its encoding, which lives in a state or in the
+ * evaluation arena (ar_*), never in the Value itself. */
+enum { T_INT, T_BOOL, T_SET, T_FUN, T_REC, T_SEQ };
 typedef struct {
 	int tag;
 	long i;						/* T_INT / T_BOOL (0/1) */
-	int n;						/* T_SET: count; T_FUN: entry count */
-	long e[SP_SETMAX];			/* T_SET: sorted, unique elements */
-	long k[SP_MAPMAX], v[SP_MAPMAX];	/* T_FUN: keys (sorted) -> values */
+	const long *w;				/* compound: the encoding (w[0] == tag) */
 } Value;
 
 static Value vint(long x){ Value v={0}; v.tag=T_INT; v.i=x; return v; }
 static Value vbool(int b){ Value v={0}; v.tag=T_BOOL; v.i=b?1:0; return v; }
-
-/* canonical order so equal sets/maps compare and hash equal */
-static int lcmp(const void *a, const void *b){ long x=*(const long*)a,y=*(const long*)b; return x<y?-1:x>y?1:0; }
-static void set_canon(Value *s){
-	/* sort, then drop duplicates */
-	qsort(s->e, (size_t)s->n, sizeof s->e[0], lcmp);
-	int w=0; for(int r=0;r<s->n;r++){ if(w==0||s->e[r]!=s->e[w-1]) s->e[w++]=s->e[r]; } s->n=w;
+static int scalar_tag(long t){ return t==T_INT || t==T_BOOL; }
+/* the length in words of the encoding at w */
+static size_t enc_len(const long *w){ return scalar_tag(w[0]) ? 2 : (size_t)w[1]; }
+/* the length in words of v's encoding */
+static size_t val_len(const Value *v){ return scalar_tag(v->tag) ? 2 : (size_t)v->w[1]; }
+/* the Value that views the encoding at w */
+static Value enc_view(const long *w){
+	Value v={0}; v.tag=(int)w[0];
+	if(scalar_tag(w[0])) v.i=w[1]; else v.w=w;
+	return v;
 }
-/* equality of two values of one type (same_type() checks that first) */
-static int val_eq(const Value *a, const Value *b){
-	if(a->tag==T_INT||a->tag==T_BOOL) return a->i==b->i;
-	if(a->tag==T_SET){ if(a->n!=b->n) return 0; for(int i=0;i<a->n;i++) if(a->e[i]!=b->e[i]) return 0; return 1; }
-	/* T_FUN */ if(a->n!=b->n) return 0; for(int i=0;i<a->n;i++) if(a->k[i]!=b->k[i]||a->v[i]!=b->v[i]) return 0; return 1;
+/* write v's encoding at dst (val_len(v) words) */
+static void enc_put(long *dst, const Value *v){
+	if(scalar_tag(v->tag)){ dst[0]=v->tag; dst[1]=v->i; }
+	else memcpy(dst,v->w,val_len(v)*sizeof *dst);
+}
+/* the element count of a compound value, and a set's j-th element */
+static int val_n(const Value *v){ return (int)v->w[2]; }
+static long set_e(const Value *v, int j){ return v->w[3+j]; }
+
+/* the evaluation arena: compound values built while evaluating an
+ * expression.  It only grows during one evaluation; a caller that has
+ * copied out what it needs (into a state, or a scalar) releases back to
+ * the mark it took, so a value built below that mark stays valid. */
+#define AR_WORDS (1<<20)
+static long AR[AR_WORDS];
+static size_t ar_n;
+static size_t ar_mark(void){ return ar_n; }
+static void ar_release(size_t m){ ar_n=m; }
+
+/* canonical order so equal sets compare equal */
+static int lcmp(const void *a, const void *b){ long x=*(const long*)a,y=*(const long*)b; return x<y?-1:x>y?1:0; }
+static int set_canon(long *e, int n){
+	/* sort, then drop duplicates */
+	qsort(e, (size_t)n, sizeof e[0], lcmp);
+	int w=0; for(int r=0;r<n;r++){ if(w==0||e[r]!=e[w-1]) e[w++]=e[r]; }
+	return w;
 }
 
 /* ---- the model ------------------------------------------------------ */
 typedef struct { char name[SP_NAME]; long val; } Const;
-typedef struct { char name[SP_NAME]; char dom[SP_EXPR]; int is_fun; char fdom[SP_EXPR]; } Var;
+/* A variable's declared type, as a tree of Ty nodes:
+ *   TY_DOM  an integer in the set dom (`0 .. N`, `{0, 2}`)
+ *   TY_FUN  [dom -> sub]: a function on exactly the integer set dom
+ *   TY_REC  [f : T, ...]: a record with exactly the fields fid[]
+ *   TY_SEQ  Seq(sub, max): a sequence of at most max elements */
+enum { TY_DOM, TY_FUN, TY_REC, TY_SEQ };
+typedef struct {
+	int kind;
+	char dom[SP_EXPR];			/* TY_DOM: the set; TY_FUN: the key set */
+	int sub;				/* TY_FUN: the range; TY_SEQ: the element */
+	long max;				/* TY_SEQ: the length bound */
+	int nf; int fid[SP_MAXFLD]; int fty[SP_MAXFLD];	/* TY_REC, by field id */
+} Ty;
+typedef struct { char name[SP_NAME]; int ty; } Var;
+/* def NAME(p, ...) = body: a named operator.  Its body may use only the
+ * defs declared before it, so no def can reach itself. */
+typedef struct { char name[SP_NAME]; int np; char pname[SP_MAXPARAM][SP_NAME]; char body[SP_EXPR]; } Def;
 typedef struct {
 	char name[SP_NAME];
 	int nparam; char pname[SP_MAXPARAM][SP_NAME]; char pdom[SP_MAXPARAM][SP_EXPR];
@@ -104,29 +165,58 @@ static struct {
 	int deadlock_off;					/* `deadlock = off`: no deadlock check */
 	SpInv con[SP_MAXINV]; int ncon;		/* state constraints (TLC's CONSTRAINT) */
 	SpInv acon[SP_MAXINV]; int nacon;	/* action constraints (ACTION_CONSTRAINT) */
+	Ty ty[SP_MAXTY]; int nty;			/* the variables' types */
+	Def def[SP_MAXDEF]; int ndefs;		/* def operators, in order */
+	char fld[SP_MAXFLD][SP_NAME]; int nfld;	/* record field names, by id */
 } S;
 
-#include "cmc_spec.h"
-
-/* ---- evaluation context: constants + variable values + bound params - */
-typedef struct {
+/* ---- evaluation context: constants + variable values + bound names - */
+#define SP_MAXBIND 8			/* names bound at once: parameters, quantifiers */
+typedef struct Env {
 	const Value *var;			/* current value of each variable, by index */
 	const Value *nxt;			/* an action constraint: the successor's values, read as x' */
-	char pname[SP_MAXPARAM][SP_NAME]; long pval[SP_MAXPARAM]; int np;	/* bound params */
+	char pname[SP_MAXBIND][SP_NAME]; long pval[SP_MAXBIND]; int np;	/* bound names */
+	/* a def's parameter is bound by name, as TLA+ substitutes it: the
+	 * argument's text, evaluated in the caller's environment at each use */
+	const char *thunk[SP_MAXBIND]; const struct Env *tenv[SP_MAXBIND];
 	const CmcObs *obs;			/* refinement: observable accessor, or NULL */
 	const int *assigned;			/* init: which vars are set so far, or NULL (all) */
+	const Value *at;			/* inside an except value: what @ names */
+	int ndefvis;				/* the defs this expression may call: def[0 .. ndefvis) */
 } Env;
+
+/* a fresh environment over the variable values var (NULL: none), in
+ * which every def may be called */
+static Env env_new(const Value *var){
+	static const Value none[SP_MAXVAR];	/* every variable 0, where none is set */
+	Env e; memset(&e,0,sizeof e); e.var=var?var:none; e.ndefvis=S.ndefs;
+	return e;
+}
 
 static long cst_lookup(const char *name, int *found){
 	for(int i=0;i<S.ncst;i++) if(!strcmp(S.cst[i].name,name)){ *found=1; return S.cst[i].val; }
 	*found=0; return 0;
 }
 static int var_index(const char *name){ for(int i=0;i<S.nvar;i++) if(!strcmp(S.var[i].name,name)) return i; return -1; }
+static int def_index(const char *name){ for(int i=0;i<S.ndefs;i++) if(!strcmp(S.def[i].name,name)) return i; return -1; }
+
+/* the id of record field name, registering it if new; -1 when the
+ * table is full.  Ids order a record's fields canonically. */
+static int fld_find(const char *name){ for(int i=0;i<S.nfld;i++) if(!strcmp(S.fld[i],name)) return i; return -1; }
+static int fld_id(const char *name){
+	for(int i=0;i<S.nfld;i++) if(!strcmp(S.fld[i],name)) return i;
+	if(S.nfld>=SP_MAXFLD) return -1;
+	snprintf(S.fld[S.nfld],SP_NAME,"%s",name);
+	return S.nfld++;
+}
 
 /* =====================================================================
  * expression evaluator over Value.  Grammar (low -> high precedence):
- *   or  ->  and  ->  not  ->  cmp  ->  add  ->  mul  ->  atom
- * plus quantifiers  (all|some|count) V in SET : EXPR  and set/fun forms.
+ *   or  ->  and  ->  not  ->  cmp  ->  add (+ - \o)  ->  mul  ->  postfix
+ *   ->  atom
+ * plus quantifiers  (all|some|count) V in SET : EXPR, the function,
+ * record, sequence and except forms, the sequence operators, and calls
+ * of def operators.  A postfix is f[k] or r.field, after any atom.
  * Returns a Value; sets *ok=0 on an evaluation/parse error.
  * ===================================================================== */
 /* dead > 0 while the parser reads an operand that and/or short-circuits
@@ -150,23 +240,108 @@ static void fail(Pst *s, const char *m){ if(s->ok){ s->ok=0; snprintf(s->err,siz
  * is not evaluated, returns 0 so the caller parses on */
 static int efail(Pst *s, const char *m){ if(s->dead) return 0; fail(s,m); return 1; }
 
-static const char *tag_name(int t){ return t==T_INT?"an integer":t==T_BOOL?"a boolean":t==T_SET?"a set":"a function"; }
+static const char *tag_name(int t){
+	static const char *nm[]={"an integer","a boolean","a set","a function","a record","a sequence"};
+	return nm[t];
+}
 
 /* An operand of the wrong type is a model error, as TLC reports it.
  * Read as its integer field instead, `not votes` held in every state and
  * `x < {1}` compared x with 0.  need() returns 1 when v has type tag, and
- * otherwise fails s, naming where the value was used; same_type() does
- * the same for the two sides of == and != (TLC refuses TRUE = 1). */
-static int need(Pst *s, const Value *v, int tag, const char *where){
-	if(v->tag==tag || s->dead) return 1;
+ * otherwise fails s, naming where the value was used.  In an operand
+ * that is not evaluated it never fails, and makes v a placeholder. */
+static const long EMPTY[6][3]={{0},{0},{T_SET,3,0},{T_FUN,3,0},{T_REC,3,0},{T_SEQ,3,0}};
+static int need(Pst *s, Value *v, int tag, const char *where){
+	if(v->tag==tag) return 1;
+	if(s->dead){
+		/* an operand that is not evaluated: a placeholder of the type
+		 * the caller reads, so no caller touches a missing encoding */
+		Value d={0}; d.tag=tag; if(!scalar_tag(tag)) d.w=EMPTY[tag];
+		*v=d; return 1;
+	}
 	if(s->ok){ s->ok=0; snprintf(s->err,sizeof s->err,"expected %s in %s, not %s",tag_name(tag),where,tag_name(v->tag)); }
 	return 0;
 }
-static int same_type(Pst *s, const Value *a, const Value *b, const char *op){
-	if(a->tag==b->tag || s->dead) return 1;
-	if(s->ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s compares %s with %s",op,tag_name(a->tag),tag_name(b->tag)); }
+
+/* Equality of two encodings: 1 equal, 0 not, or -1 when they hold
+ * values of different types at one position (TLC refuses TRUE = 1, and
+ * a record compared with a function).  Two functions on different keys,
+ * records of different fields and sequences of different lengths are
+ * unequal, as in TLC, without comparing their entries.  *ta and *tb get
+ * the two tags that differ. */
+static int enc_eq(const long *a, const long *b, int *ta, int *tb){
+	if(a[0]!=b[0]){ *ta=(int)a[0]; *tb=(int)b[0]; return -1; }
+	if(scalar_tag(a[0])) return a[1]==b[1];
+	if(a[0]==T_SET){ if(a[1]!=b[1]) return 0; return !memcmp(a,b,(size_t)a[1]*sizeof *a); }
+	long n=a[2]; if(n!=b[2]) return 0;
+	const long *pa=a+3, *pb=b+3;
+	int keyed=a[0]!=T_SEQ, eq=1;
+	if(keyed){ /* the key sets first: unequal keys decide, as in TLC */
+		const long *qa=pa, *qb=pb;
+		for(long j=0;j<n;j++){ if(qa[0]!=qb[0]) return 0; qa+=1+enc_len(qa+1); qb+=1+enc_len(qb+1); }
+	}
+	for(long j=0;j<n;j++){
+		if(keyed){ pa++; pb++; }
+		int r=enc_eq(pa,pb,ta,tb); if(r<0) return -1; if(!r) eq=0;
+		pa+=enc_len(pa); pb+=enc_len(pb);
+	}
+	return eq;
+}
+static int val_eq_raw(const Value *a, const Value *b, int *ta, int *tb){
+	long ea[2], eb[2];
+	const long *pa=a->w, *pb=b->w;
+	if(scalar_tag(a->tag)){ ea[0]=a->tag; ea[1]=a->i; pa=ea; }
+	if(scalar_tag(b->tag)){ eb[0]=b->tag; eb[1]=b->i; pb=eb; }
+	return enc_eq(pa,pb,ta,tb);
+}
+/* a == b for the evaluator: the verdict, or a model error naming the two
+ * types when they differ at some position */
+static int sp_val_eq(Pst *s, const Value *a, const Value *b, const char *op){
+	if(s->dead) return 0;
+	int ta, tb, r=val_eq_raw(a,b,&ta,&tb);
+	if(r>=0) return r;
+	if(s->ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s compares %s with %s",op,tag_name(ta),tag_name(tb)); }
 	return 0;
 }
+
+/* ---- building values in the arena ----------------------------------- */
+/* reserve n words of the arena, or fail s */
+static long *ar_alloc(Pst *s, size_t n){
+	if(ar_n+n>AR_WORDS){ fail(s,"values too large for the evaluation arena"); return NULL; }
+	long *p=AR+ar_n; ar_n+=n; return p;
+}
+/* the set of the n integers e[] (sorted and deduplicated here) */
+static Value mk_set(Pst *s, long *e, int n){
+	Value z={0}; z.tag=T_SET;
+	n=set_canon(e,n);
+	long *w=ar_alloc(s,(size_t)n+3); if(!w) return z;
+	w[0]=T_SET; w[1]=n+3; w[2]=n; memcpy(w+3,e,(size_t)n*sizeof *e);
+	z.w=w; return z;
+}
+/* a function (T_FUN), record (T_REC) or sequence (T_SEQ) of the n
+ * children kid[], with keys key[] (integers or field ids, increasing;
+ * NULL for a sequence) */
+static Value mk_comp(Pst *s, int tag, int n, const long *key, const Value *kid){
+	Value z={0}; z.tag=tag;
+	size_t len=3; for(int j=0;j<n;j++) len+=(key?1:0)+val_len(&kid[j]);
+	long *w=ar_alloc(s,len); if(!w) return z;
+	w[0]=tag; w[1]=(long)len; w[2]=n;
+	long *p=w+3;
+	for(int j=0;j<n;j++){ if(key) *p++=key[j]; enc_put(p,&kid[j]); p+=val_len(&kid[j]); }
+	z.w=w; return z;
+}
+/* the children of compound v into key[] (if not NULL) and kid[] (each a
+ * view into v's encoding); returns the count */
+static int comp_kids(const Value *v, long *key, Value *kid){
+	int n=val_n(v); const long *p=v->w+3;
+	for(int j=0;j<n;j++){
+		if(v->tag!=T_SEQ){ if(key) key[j]=*p; p++; }
+		kid[j]=enc_view(p); p+=enc_len(p);
+	}
+	return n;
+}
+/* the empty value of tag (a set, function or sequence) */
+static Value mk_empty(Pst *s, int tag){ return tag==T_SET ? mk_set(s,NULL,0) : mk_comp(s,tag,0,NULL,NULL); }
 
 /* read an identifier */
 static int sp_ident(Pst *s, char *out, int cap){
@@ -174,171 +349,446 @@ static int sp_ident(Pst *s, char *out, int cap){
 	while((isalnum((unsigned char)*s->p)||*s->p=='_') && n<cap-1) out[n++]=*s->p++;
 	out[n]=0; return n;
 }
+/* consume the character c (after blanks), or fail with msg */
+static int sp_expect(Pst *s, char c, const char *msg){
+	sp_skip(s); if(*s->p!=c){ fail(s,msg); return 0; }
+	s->p++; return 1;
+}
 
 /* a SET value literal or range: {a,b,c} or LO .. HI */
 static Value sp_setspec(Pst *s);
 static int env_bind(Pst *s, Env *ne, const char *name, long val);
+static Value sp_add(Pst *s);
+static Value sp_range(Pst *s);
+static Value sp_post(Pst *s);
 
-/* atom: integer, TRUE/FALSE, const, variable, param, x', fun app f[k],
- * fun literal [i in SET -> EXPR], [f except [k]=v], ( EXPR ), set literal */
+/* evaluate the operand of a sub-parse that starts at body with the
+ * environment ne, copying its error back to s; *endp gets where it
+ * stopped */
+static Value sp_sub(Pst *s, const char *body, Env *ne, int dead, const char **endp){
+	Pst sub=*s; sub.p=body; sub.env=ne; sub.dead+=dead;
+	Value v=sp_or(&sub);
+	if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); }
+	*endp=sub.p; return v;
+}
+
+/* [i in SET -> EXPR], after "[i in": the function on SET */
+static Value sp_funlit(Pst *s, const char *id){
+	Value z={0};
+	Value dom=sp_setspec(s); if(!s->ok) return z;
+	sp_skip(s); if(!(s->p[0]=='-'&&s->p[1]=='>')){ fail(s,"expected -> in function literal"); return z; } s->p+=2;
+	const char *body=s->p, *endp=body;
+	int n=s->dead ? 0 : val_n(&dom);
+	long key[SP_MAPMAX]; Value kid[SP_MAPMAX];
+	if(n>SP_MAPMAX){ fail(s,"function too large"); return z; }
+	if(n==0){
+		/* no element to bind: parse the body once, unevaluated */
+		Env ne=*s->env; if(!env_bind(s,&ne,id,0)) return z;
+		(void)sp_sub(s,body,&ne,1,&endp); if(!s->ok) return z;
+	}
+	for(int e=0;e<n;e++){
+		Env ne=*s->env; if(!env_bind(s,&ne,id,set_e(&dom,e))) return z;
+		key[e]=set_e(&dom,e); kid[e]=sp_sub(s,body,&ne,0,&endp); if(!s->ok) return z;
+	}
+	s->p=endp;
+	if(!sp_expect(s,']',"expected ]")) return z;
+	if(s->dead) return z;
+	return mk_comp(s,T_FUN,n,key,kid);
+}
+
+/* [a |-> E, b |-> E], after "[a": a record, its fields in id order */
+static Value sp_reclit(Pst *s, const char *first){
+	Value z={0}; long key[SP_MAXFLD]; Value kid[SP_MAXFLD]; int n=0;
+	char id[SP_NAME]; snprintf(id,sizeof id,"%s",first);
+	for(;;){
+		sp_skip(s); if(strncmp(s->p,"|->",3)){ fail(s,"expected |-> in record literal"); return z; } s->p+=3;
+		int f=fld_id(id); if(f<0){ fail(s,"too many record field names"); return z; }
+		for(int j=0;j<n;j++) if(key[j]==f){ fail(s,"a record field is given twice"); return z; }
+		if(n>=SP_MAXFLD){ fail(s,"record too large"); return z; }
+		Value v=sp_or(s); if(!s->ok) return z;
+		/* insert in field-id order */
+		int j=n; while(j>0 && key[j-1]>f){ key[j]=key[j-1]; kid[j]=kid[j-1]; j--; }
+		key[j]=f; kid[j]=v; n++;
+		sp_skip(s); if(*s->p!=',') break;
+		s->p++; if(!sp_ident(s,id,sizeof id)){ fail(s,"expected a field name in record literal"); return z; }
+	}
+	if(!sp_expect(s,']',"expected ] to close record")) return z;
+	if(s->dead) return z;
+	return mk_comp(s,T_REC,n,key,kid);
+}
+
+/* <<E, ...>>, after "<<": a sequence (a tuple is one) */
+static Value sp_seqlit(Pst *s){
+	Value z={0}; Value kid[SP_MAPMAX]; int n=0;
+	sp_skip(s);
+	if(strncmp(s->p,">>",2)){
+		for(;;){
+			Value v=sp_or(s); if(!s->ok) return z;
+			if(n>=SP_MAPMAX){ if(efail(s,"sequence too large")) return z; } else kid[n++]=v;
+			sp_skip(s); if(*s->p!=',') break;
+			s->p++;
+		}
+	}
+	sp_skip(s); if(strncmp(s->p,">>",2)){ fail(s,"expected >> to close a sequence"); return z; } s->p+=2;
+	if(s->dead) return z;
+	return mk_comp(s,T_SEQ,n,NULL,kid);
+}
+
+/* ---- except: [B except P = V, ...] ----------------------------------
+ * Each clause replaces the part of B that the selector path P names
+ * (TLA+'s [B EXCEPT !P = V]): P is an optional `!`, then one or more
+ * selectors, [k] for a function key or sequence position, .f for a
+ * record field.  In V, `@` names the part being replaced.  A path
+ * outside B (a key not in a function's domain, a position past a
+ * sequence's end, a field the record lacks) is a model error: TLC
+ * leaves the value unchanged there and warns, which would read a typo
+ * as a step that changes nothing. */
+#define SP_PATH 4
+typedef struct { int field; long k; } Sel;	/* field: k is a field id, else a key or position */
+
+/* the index of selector sel among compound v's n children (keys key[]),
+ * or -1 */
+static int sel_find(const Value *v, const Sel *sel, const long *key, int n){
+	if(v->tag==T_SEQ) return !sel->field && sel->k>=1 && sel->k<=n ? (int)sel->k-1 : -1;
+	if((v->tag==T_REC)!=(sel->field!=0)) return -1;
+	for(int j=0;j<n;j++) if(key[j]==sel->k) return j;
+	return -1;
+}
+/* the part of v at path[0 .. np), into *out; 0, or -1 with s failed */
+static int path_get(Pst *s, Value v, const Sel *path, int np, Value *out){
+	for(int d=0;d<np;d++){
+		if(scalar_tag(v.tag) || v.tag==T_SET){ efail(s,"except on a value that is not a function, record or sequence"); return -1; }
+		long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX];
+		int n=comp_kids(&v,key,kid), j=sel_find(&v,&path[d],key,n);
+		if(j<0){ efail(s,"except outside the domain of its value"); return -1; }
+		v=kid[j];
+	}
+	*out=v; return 0;
+}
+/* v with the part at path[0 .. np) replaced by nv, a new value in the
+ * arena.  NB: path_get() has checked that the path lies inside v. */
+static Value path_set(Pst *s, const Value *v, const Sel *path, int np, const Value *nv){
+	if(np==0) return *nv;
+	long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX];
+	int n=comp_kids(v,key,kid), j=sel_find(v,&path[0],key,n);
+	kid[j]=path_set(s,&kid[j],path+1,np-1,nv);
+	return mk_comp(s,v->tag,n,v->tag==T_SEQ?NULL:key,kid);
+}
+/* one selector path, up to its `=` */
+static int sp_path(Pst *s, Sel *path){
+	int np=0;
+	sp_skip(s); if(*s->p=='!') s->p++;
+	for(;;){
+		sp_skip(s);
+		if(*s->p!='[' && *s->p!='.') break;
+		if(np>=SP_PATH){ fail(s,"an except path is too deep"); return -1; }
+		if(*s->p=='['){
+			s->p++; Value k=sp_or(s); if(!s->ok || !need(s,&k,T_INT,"a function key")) return -1;
+			if(!sp_expect(s,']',"expected ]")) return -1;
+			path[np].field=0; path[np].k=k.i;
+		} else {
+			s->p++; char f[SP_NAME]; if(!sp_ident(s,f,sizeof f)){ fail(s,"expected a field name after ."); return -1; }
+			int id=fld_find(f); path[np].field=1; path[np].k=id;
+			if(id<0 && efail(s,"except outside the domain of its value")) return -1;
+		}
+		np++;
+	}
+	if(np==0){ fail(s,"expected [ or . in except"); return -1; }
+	return np;
+}
+/* the except clauses after "[B except", applied to base */
+static Value sp_except(Pst *s, Value f){
+	Value z={0};
+	for(;;){
+		Sel path[SP_PATH]; int np=sp_path(s,path); if(np<0) return z;
+		if(!sp_expect(s,'=',"expected = in except")) return z;
+		Value old={0}; int live=!s->dead && path_get(s,f,path,np,&old)==0;
+		if(!s->ok) return z;
+		static const Value at_dead={T_INT,0,NULL};
+		Env ne=*s->env; ne.at=live?&old:&at_dead;
+		const char *endp; Value vv=sp_sub(s,s->p,&ne,live?0:1,&endp); if(!s->ok) return z;
+		s->p=endp;
+		if(live){ f=path_set(s,&f,path,np,&vv); if(!s->ok) return z; }
+		sp_skip(s); if(*s->p==','){ s->p++; continue; } break;
+	}
+	if(!sp_expect(s,']',"expected ] to close except")) return z;
+	return f;
+}
+
+/* ---- sequence operators, as in TLA+'s Sequences module --------------
+ * Positions count from 1.  Head and Tail of the empty sequence, an
+ * index past the end, and SubSeq bounds outside 1 .. Len are model
+ * errors, as TLC reports them.  A sequence's length bound belongs to
+ * the variable that holds it: a value longer than its variable's Seq(T,
+ * N) is refused when it is stored (var_in_type()), never cut. */
+static Value seq_slice(Pst *s, const Value *q, int from, int to){
+	Value kid[SP_MAPMAX]; int n=comp_kids(q,NULL,kid);
+	(void)n;
+	return mk_comp(s,T_SEQ,to-from,NULL,kid+from);
+}
+static int sp_args(Pst *s, Value *a, int n, const char *fn){
+	if(!sp_expect(s,'(',"expected ( after a sequence operator")) return 0;
+	for(int i=0;i<n;i++){
+		a[i]=sp_or(s); if(!s->ok) return 0;
+		if(i+1<n && !sp_expect(s,',',"expected , between arguments")) return 0;
+	}
+	if(!sp_expect(s,')',"expected ) after the arguments")) return 0;
+	(void)fn; return 1;
+}
+/* NAME(args) for a sequence operator NAME; *hit says whether id is one */
+static Value sp_seqop(Pst *s, const char *id, int *hit){
+	static const char *ops[]={"Len","Head","Tail","Append","SubSeq"};
+	static const int nargs[]={1,1,1,2,3};
+	Value z={0}; int op=-1;
+	for(int i=0;i<5;i++) if(!strcmp(id,ops[i])) op=i;
+	*hit=op>=0; if(op<0) return z;
+	Value a[3]; if(!sp_args(s,a,nargs[op],id)) return z;
+	if(!need(s,&a[0],T_SEQ,id)) return z;
+	if(s->dead) return op==0 ? vint(0) : op==1 ? z : a[0];
+	int n=val_n(&a[0]);
+	switch(op){
+	case 0: return vint(n);
+	case 1: { if(n==0){ fail(s,"Head of the empty sequence"); return z; }
+		Value kid[SP_MAPMAX]; comp_kids(&a[0],NULL,kid); return kid[0]; }
+	case 2: if(n==0){ fail(s,"Tail of the empty sequence"); return z; }
+		return seq_slice(s,&a[0],1,n);
+	case 3: { if(n>=SP_MAPMAX){ fail(s,"sequence too large"); return z; }
+		Value kid[SP_MAPMAX]; comp_kids(&a[0],NULL,kid); kid[n]=a[1];
+		return mk_comp(s,T_SEQ,n+1,NULL,kid); }
+	default:
+		if(!need(s,&a[1],T_INT,"SubSeq") || !need(s,&a[2],T_INT,"SubSeq")) return z;
+		if(a[1].i>a[2].i) return mk_empty(s,T_SEQ);
+		if(a[1].i<1 || a[2].i>n){ fail(s,"SubSeq outside the sequence"); return z; }
+		return seq_slice(s,&a[0],(int)a[1].i-1,(int)a[2].i);
+	}
+}
+/* s \o t: the concatenation of two sequences */
+static Value seq_cat(Pst *s, const Value *a, const Value *b){
+	Value z={0}; Value kid[2*SP_MAPMAX];
+	int na=comp_kids(a,NULL,kid), nb=comp_kids(b,NULL,kid+na);
+	if(na+nb>SP_MAPMAX){ fail(s,"sequence too large"); return z; }
+	return mk_comp(s,T_SEQ,na+nb,NULL,kid);
+}
+
+/* ---- def calls -------------------------------------------------------
+ * NAME or NAME(args) for def d.  As in TLA+, the body is the operator's
+ * definition with each parameter replaced by its argument: here each
+ * parameter is bound to the argument's text, evaluated in the caller's
+ * environment where the body uses it, so `def safe(a) = d == 0 or a`
+ * evaluates a only when d != 0.  The body sees the constants, the
+ * variables, its parameters and the defs before it (env.ndefvis), and
+ * nothing bound at the call site. */
+static Value sp_call(Pst *s, int d){
+	Value z={0}; const Def *D=&S.def[d];
+	Env ne=env_new(s->env->var); ne.obs=s->env->obs; ne.assigned=s->env->assigned; ne.ndefvis=d;
+	if(D->np){
+		if(!sp_expect(s,'(',"expected ( after an operator with parameters")) return z;
+		for(int i=0;i<D->np;i++){
+			sp_skip(s);
+			snprintf(ne.pname[i],SP_NAME,"%s",D->pname[i]); ne.thunk[i]=s->p; ne.tenv[i]=s->env;
+			/* parse the argument for its extent only */
+			Pst sub=*s; sub.dead++; (void)sp_or(&sub);
+			if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return z; }
+			s->p=sub.p;
+			if(i+1<D->np && !sp_expect(s,',',"expected , between arguments")) return z;
+		}
+		if(!sp_expect(s,')',"expected ) after the arguments")) return z;
+		ne.np=D->np;
+	}
+	/* defs_check() has parsed the body whole at load */
+	const char *endp; return sp_sub(s,D->body,&ne,0,&endp);
+}
+
+/* the name id, bound by a quantifier, a literal, an action or a def:
+ * its value, and 1; or 0 when id is not bound */
+static int sp_bound(Pst *s, const char *id, Value *out){
+	const Env *e=s->env;
+	for(int i=0;i<e->np;i++){
+		if(strcmp(id,e->pname[i])) continue;
+		if(!e->thunk[i]){ *out=vint(e->pval[i]); return 1; }
+		const char *endp; *out=sp_sub(s,e->thunk[i],(Env*)e->tenv[i],0,&endp);
+		return 1;
+	}
+	return 0;
+}
+
+/* a refinement observable (nodes, replies, node[i]..., r.src, r.val);
+ * *hit says whether id is one */
+static Value sp_obs(Pst *s, const char *id, int *hit){
+	const CmcObs *o=s->env->obs; Value z={0}; long e[SP_SETMAX]; int n=0;
+	*hit=1;
+	if(!strcmp(id,"nodes")){ for(int i=0;i<o->nnodes && n<SP_SETMAX;i++) e[n++]=i; return mk_set(s,e,n); }
+	if(!strcmp(id,"replies")){ for(int r=0;r<o->nrepl && n<SP_SETMAX;r++) e[n++]=r; return mk_set(s,e,n); }
+	if(!strcmp(id,"node")){
+		if(!sp_expect(s,'[',"expected [ after node")) return z;
+		Value iv=sp_or(s); if(!s->ok || !need(s,&iv,T_INT,"node[]")) return z;
+		if(!sp_expect(s,']',"expected ]")) return z;
+		int i=(int)iv.i; long k=-1;
+		sp_skip(s);
+		if(*s->p=='['){ s->p++; Value kv=sp_or(s); if(!s->ok || !need(s,&kv,T_INT,"node[][]")) return z; if(!sp_expect(s,']',"expected ]")) return z; k=kv.i; }
+		else if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn); int fi=-1; for(int j=0;j<S.nfield;j++) if(!strcmp(S.fname[j],fn)) fi=j; if(fi<0){ fail(s,"unknown field"); return z; } k=S.foff[fi]; }
+		else { fail(s,"node[i] needs [k] or .field"); return z; }
+		if(s->dead) return vint(0);	/* i may be a placeholder */
+		return vint(o->node_byte(o->ctx,i,(int)k));
+	}
+	if(!strcmp(id,"r") && *s->p=='.'){
+		/* r.src / r.val when ranging over replies (param r bound to index) */
+		s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn);
+		long ri=0; for(int i=0;i<s->env->np;i++) if(!strcmp("r",s->env->pname[i])) ri=s->env->pval[i];
+		if(s->dead) return vint(0);
+		if(!strcmp(fn,"src")) return vint(o->repl_src(o->ctx,(int)ri));
+		if(!strcmp(fn,"val")) return vint(o->repl_val(o->ctx,(int)ri));
+		fail(s,"reply has .src and .val"); return z;
+	}
+	*hit=0; return z;
+}
+
+/* "[" forms, after the "[": a function literal [i in S -> E], a record
+ * literal [a |-> E, ...], or an update [B except ...] */
+static Value sp_bracket(Pst *s){
+	Value z={0};
+	sp_skip(s);
+	const char *save=s->p;
+	char id[SP_NAME];
+	if(sp_ident(s,id,sizeof id)){
+		if(sp_word(s,"in")) return sp_funlit(s,id);
+		sp_skip(s); if(!strncmp(s->p,"|->",3)) return sp_reclit(s,id);
+	}
+	s->p=save;
+	Value base=sp_post(s); if(!s->ok) return z;
+	if(!sp_word(s,"except")){ fail(s,"expected 'in', '|->' or 'except' in [..]"); return z; }
+	return sp_except(s,base);
+}
+
+/* {a, b, ...}, after the "{": a set of integers */
+static Value sp_setlit(Pst *s){
+	Value z={0}; long e[SP_SETMAX]; int n=0;
+	sp_skip(s);
+	if(*s->p!='}'){
+		for(;;){ Value ev=sp_or(s); if(!s->ok || !need(s,&ev,T_INT,"a set")) return z; if(n>=SP_SETMAX){ if(efail(s,"set too large")) return z; } else e[n++]=ev.i; sp_skip(s); if(*s->p==','){ s->p++; continue; } break; }
+	}
+	if(!sp_expect(s,'}',"expected }")) return z;
+	return mk_set(s,e,n);
+}
+
+/* atom: integer, TRUE/FALSE, @, a bound name, const, variable, def
+ * call, sequence operator, ( EXPR ), and the [..], {..} and <<..>>
+ * literals */
 static Value sp_atom(Pst *s){
 	sp_skip(s);
 	Value z={0};
-	if(*s->p=='('){ s->p++; Value v=sp_or(s); sp_skip(s); if(*s->p!=')'){ fail(s,"expected )"); return z; } s->p++; return v; }
-	if(*s->p=='['){
-		/* function literal [i in SET -> EXPR] or update [f except [k]=v,...] */
-		s->p++; sp_skip(s);
-		const char *save=s->p;
-		char id[SP_NAME]; sp_ident(s,id,sizeof id);
-		if(sp_word(s,"in")){
-			/* [i in SET -> EXPR] : build the map */
-			Value dom=sp_setspec(s); if(!s->ok) return z;
-			sp_skip(s); if(!(s->p[0]=='-'&&s->p[1]=='>')){ fail(s,"expected -> in function literal"); return z; } s->p+=2;
-			const char *body=s->p;
-			Value f={0}; f.tag=T_FUN; f.n=0;
-			if(dom.n==0 || s->dead){
-				/* no element to bind: parse the body once, unevaluated */
-				Pst sub=*s; sub.p=body; sub.dead++;
-				Env ne=*s->env; if(!env_bind(s,&ne,id,0)) return z; sub.env=&ne;
-				(void)sp_or(&sub);
-				if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return z; }
-				s->p=sub.p; dom.n=0;
-			}
-			for(int e=0;e<dom.n;e++){
-				if(f.n>=SP_MAPMAX){ fail(s,"function too large"); return z; }
-				/* bind id=dom.e[e], evaluate body */
-				Pst sub=*s; sub.p=body;
-				/* temporary param binding */
-				Env ne=*s->env; if(!env_bind(s,&ne,id,dom.e[e])) return z; sub.env=&ne;
-				Value bv=sp_or(&sub); need(&sub,&bv,T_INT,"a function value");
-				if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return z; }
-				f.k[f.n]=dom.e[e]; f.v[f.n]=bv.i; f.n++;
-				s->p=sub.p;
-			}
-			sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++;
-			return f;
-		}
-		/* [f except [k]=v, ...] : id is the function name */
-		s->p=save; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn);
-		if(!sp_word(s,"except")){ fail(s,"expected 'in' or 'except' in [..]"); return z; }
-		int fi=var_index(fn);
-		Value f;
-		if(fi>=0) f=s->env->var[fi]; else { fail(s,"except on a non-variable"); return z; }
-		if(f.tag!=T_FUN){ if(efail(s,"except on a variable that is not a function")) return z; f=z; f.tag=T_FUN; }
-		for(;;){
-			sp_skip(s); if(*s->p!='['){ fail(s,"expected [ in except"); return z; } s->p++;
-			Value kk=sp_or(s); if(!s->ok || !need(s,&kk,T_INT,"a function key")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++;
-			sp_skip(s); if(*s->p!='='){ fail(s,"expected = in except"); return z; } s->p++;
-			Value vv=sp_or(s); if(!s->ok || !need(s,&vv,T_INT,"a function value")) return z;
-			int hit=0; for(int i=0;i<f.n;i++) if(f.k[i]==kk.i){ f.v[i]=vv.i; hit=1; break; }
-			if(!hit && f.n>=SP_MAPMAX){ if(efail(s,"function too large")) return z; hit=1; }
-			if(!hit){ f.k[f.n]=kk.i; f.v[f.n]=vv.i; f.n++; }
-			sp_skip(s); if(*s->p==','){ s->p++; continue; } break;
-		}
-		sp_skip(s); if(*s->p!=']'){ fail(s,"expected ] to close except"); return z; } s->p++;
-		return f;
-	}
-	if(*s->p=='{'){
-		/* set literal {a, b, ...} (possibly empty) */
-		s->p++; Value set={0}; set.tag=T_SET; set.n=0; sp_skip(s);
-		if(*s->p!='}'){
-			for(;;){ Value ev=sp_or(s); if(!s->ok || !need(s,&ev,T_INT,"a set")) return z; if(set.n>=SP_SETMAX){ if(efail(s,"set too large")) return z; } else set.e[set.n++]=ev.i; sp_skip(s); if(*s->p==','){ s->p++; continue; } break; }
-		}
-		sp_skip(s); if(*s->p!='}'){ fail(s,"expected }"); return z; } s->p++;
-		set_canon(&set); return set;
+	if(*s->p=='('){ s->p++; Value v=sp_or(s); if(!s->ok || !sp_expect(s,')',"expected )")) return z; return v; }
+	if(*s->p=='['){ s->p++; return sp_bracket(s); }
+	if(*s->p=='{'){ s->p++; return sp_setlit(s); }
+	if(s->p[0]=='<' && s->p[1]=='<'){ s->p+=2; return sp_seqlit(s); }
+	if(*s->p=='@'){
+		s->p++;
+		if(!s->env->at){ fail(s,"@ outside an except value"); return z; }
+		return *s->env->at;
 	}
 	if(isdigit((unsigned char)*s->p)){
 		errno=0; long x=strtol(s->p,(char**)&s->p,10);
 		if(errno==ERANGE){ fail(s,"integer literal overflows a long"); return z; }
 		return vint(x); }
-	/* identifier-led: keywords, const, var, param, fun application */
-	const char *save=s->p; char id[SP_NAME]; int n=sp_ident(s,id,sizeof id);
+	/* identifier-led: keywords, const, var, param, def, operator */
+	char id[SP_NAME]; int n=sp_ident(s,id,sizeof id);
 	if(n==0){ fail(s,"expected an expression"); return z; }
 	if(!strcmp(id,"TRUE")) return vbool(1);
 	if(!strcmp(id,"FALSE")) return vbool(0);
-	/* refinement observables (only when an obs accessor is present) */
-	if(s->env->obs){
-		const CmcObs *o=s->env->obs;
-		if(!strcmp(id,"nodes")){ Value set={0}; set.tag=T_SET; for(int i=0;i<o->nnodes && set.n<SP_SETMAX;i++) set.e[set.n++]=i; set_canon(&set); return set; }
-		if(!strcmp(id,"replies")){ Value set={0}; set.tag=T_SET; for(int r=0;r<o->nrepl && set.n<SP_SETMAX;r++) set.e[set.n++]=r; set_canon(&set); return set; }
-		if(!strcmp(id,"node")){
-			sp_skip(s); if(*s->p!='['){ fail(s,"expected [ after node"); return z; } s->p++;
-			Value iv=sp_or(s); if(!s->ok || !need(s,&iv,T_INT,"node[]")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++;
-			int i=(int)iv.i; long k=-1;
-			sp_skip(s);
-			if(*s->p=='['){ s->p++; Value kv=sp_or(s); if(!s->ok || !need(s,&kv,T_INT,"node[][]")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ]"); return z; } s->p++; k=kv.i; }
-			else if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn); int fi=-1; for(int j=0;j<S.nfield;j++) if(!strcmp(S.fname[j],fn)) fi=j; if(fi<0){ fail(s,"unknown field"); return z; } k=S.foff[fi]; }
-			else { fail(s,"node[i] needs [k] or .field"); return z; }
-			if(s->dead) return vint(0);	/* i may be a placeholder */
-			return vint(o->node_byte(o->ctx,i,(int)k));
-		}
-		if(!strcmp(id,"r")){
-			/* r.src / r.val when ranging over replies (param r bound to index) */
-			if(*s->p=='.'){ s->p++; char fn[SP_NAME]; sp_ident(s,fn,sizeof fn);
-				long ri=0; for(int i=0;i<s->env->np;i++) if(!strcmp("r",s->env->pname[i])) ri=s->env->pval[i];
-				if(s->dead) return vint(0);
-				if(!strcmp(fn,"src")) return vint(o->repl_src(o->ctx,(int)ri));
-				if(!strcmp(fn,"val")) return vint(o->repl_val(o->ctx,(int)ri));
-				fail(s,"reply has .src and .val"); return z; }
-		}
-	}
-	/* bound parameter? */
-	for(int i=0;i<s->env->np;i++) if(!strcmp(id,s->env->pname[i])) return vint(s->env->pval[i]);
-	/* constant? */
+	int hit;
+	if(s->env->obs){ Value v=sp_obs(s,id,&hit); if(hit) return v; }
+	{ Value v; if(sp_bound(s,id,&v)) return v; }
 	{ int f; long c=cst_lookup(id,&f); if(f) return vint(c); }
-	/* variable, possibly primed, possibly applied f[k].  A primed
-	 * variable has no next-state value here: guards, right-hand sides and
-	 * invariants are all evaluated against the current state, so reading
-	 * x' as x would silently change the spec's meaning (and the emitted
-	 * TLA+ keeps the prime).  Refuse it, except in an action constraint,
-	 * which is evaluated over a step and reads x' from the successor. */
-	int vi=var_index(id), primed=0;
+	/* A primed variable has no next-state value here: guards, right-hand
+	 * sides and invariants are all evaluated against the current state,
+	 * so reading x' as x would silently change the spec's meaning (and
+	 * the emitted TLA+ keeps the prime).  Refuse it, except in an action
+	 * constraint, which is evaluated over a step and reads x' from the
+	 * successor. */
+	int vi=var_index(id);
 	if(*s->p=='\''){
 		if(!s->env->nxt || vi<0){ fail(s,"a primed variable can only be assigned (x' = E), not read"); return z; }
-		s->p++; primed=1;
+		s->p++;
+		return s->env->nxt[vi];
 	}
 	if(vi>=0){
 		if(s->env->assigned && !s->env->assigned[vi]){ fail(s,"init reads a variable before assigning it"); return z; }
-		Value base = primed ? s->env->nxt[vi] : s->env->var[vi];
-		sp_skip(s);
-		if(*s->p=='['){ s->p++; Value kk=sp_or(s); if(!s->ok || !need(s,&kk,T_INT,"a function key")) return z; sp_skip(s); if(*s->p!=']'){ fail(s,"expected ] in application"); return z; } s->p++;
-			if(base.tag!=T_FUN){ efail(s,"applied a non-function"); return z; }
-			for(int i=0;i<base.n;i++) if(base.k[i]==kk.i) return vint(base.v[i]);
-			efail(s,"function applied outside its domain"); return z; }
-		return base;
+		return s->env->var[vi];
 	}
-	(void)save; fail(s,"unknown identifier"); return z;
+	int d=def_index(id);
+	if(d>=0){
+		if(d>=s->env->ndefvis){ fail(s,"a def may only use the defs declared before it (no recursion)"); return z; }
+		return sp_call(s,d);
+	}
+	{ Value v=sp_seqop(s,id,&hit); if(hit) return v; }
+	fail(s,"unknown identifier"); return z;
 }
 
-/* a set spec used in domains and quantifiers: {..} literal or LO .. HI */
-static Value sp_add(Pst *s);
+/* postfix: atom, then any number of f[k] (a function at key k, or a
+ * sequence at position k) and r.field */
+static Value sp_post(Pst *s){
+	Value v=sp_atom(s);
+	for(;;){
+		if(!s->ok) return v;
+		/* no blank before a selector: `x .. y` is a range, not x.y */
+		if(*s->p=='.' && (isalpha((unsigned char)s->p[1]) || s->p[1]=='_')){
+			s->p++; char f[SP_NAME]; sp_ident(s,f,sizeof f);
+			if(!need(s,&v,T_REC,"a field access")) return v;
+			if(s->dead){ v=vint(0); continue; }
+			long key[SP_MAXFLD]; Value kid[SP_MAXFLD]; int n=comp_kids(&v,key,kid), id=fld_find(f), j=-1;
+			for(int i=0;i<n;i++) if(key[i]==id) j=i;
+			if(j<0){ fail(s,"a record has no such field"); return v; }
+			v=kid[j]; continue;
+		}
+		sp_skip(s);
+		if(*s->p!='[') return v;
+		s->p++;
+		Value kk=sp_or(s); if(!s->ok || !need(s,&kk,T_INT,"a function key")) return v;
+		if(!sp_expect(s,']',"expected ] in application")) return v;
+		if(s->dead){ v=vint(0); continue; }
+		if(v.tag!=T_FUN && v.tag!=T_SEQ){ efail(s,"applied a non-function"); return v; }
+		long key[SP_MAPMAX]; Value kid[SP_MAPMAX]; int n=comp_kids(&v,key,kid), j=-1;
+		if(v.tag==T_SEQ){ if(kk.i>=1 && kk.i<=n) j=(int)kk.i-1; }
+		else for(int i=0;i<n;i++) if(key[i]==kk.i) j=i;
+		if(j<0){ fail(s,v.tag==T_SEQ?"a sequence index outside 1 .. Len":"function applied outside its domain"); return v; }
+		v=kid[j];
+	}
+}
 
-/* env with one more bound name, or an error when SP_MAXPARAM names are
+/* env with one more bound name, or an error when SP_MAXBIND names are
  * already bound (silently skipping the binding would let the body read
  * an outer value of the same name) */
 static int env_bind(Pst *s, Env *ne, const char *name, long val){
-	if(ne->np>=SP_MAXPARAM){ fail(s,"too many nested bound names"); return 0; }
+	if(ne->np>=SP_MAXBIND){ fail(s,"too many nested bound names"); return 0; }
 	/* TLA+ forbids redeclaring a name in scope (SANY rejects it); here an
 	 * inner binding would be shadowed by the outer one, not the reverse */
 	int f; (void)cst_lookup(name,&f);
 	for(int i=0;i<ne->np;i++) if(!strcmp(ne->pname[i],name)) f=1;
-	if(f || var_index(name)>=0){ fail(s,"a bound name redeclares a name already in scope"); return 0; }
-	snprintf(ne->pname[ne->np],SP_NAME,"%s",name); ne->pval[ne->np]=val; ne->np++;
+	if(f || var_index(name)>=0 || def_index(name)>=0){ fail(s,"a bound name redeclares a name already in scope"); return 0; }
+	snprintf(ne->pname[ne->np],SP_NAME,"%s",name); ne->pval[ne->np]=val; ne->thunk[ne->np]=NULL; ne->np++;
 	return 1;
 }
 
+/* a range LO .. HI (inclusive, bounds arithmetic expressions), or the
+ * term LO alone: `..` binds below + and -, as in TLA+ */
+static Value sp_range(Pst *s){
+	Value lo=sp_add(s); if(!s->ok) return lo; sp_skip(s);
+	if(!(s->p[0]=='.'&&s->p[1]=='.')) return lo;
+	s->p+=2; Value hi=sp_add(s); if(!s->ok) return hi;
+	if(!need(s,&lo,T_INT,"..") || !need(s,&hi,T_INT,"..")) return lo;
+	if(s->dead) return mk_empty(s,T_SET);
+	long e[SP_SETMAX]; int n=0;
+	for(long x=lo.i;x<=hi.i;x++){ if(n>=SP_SETMAX){ fail(s,"range too large"); return lo; } e[n++]=x; }
+	return mk_set(s,e,n);
+}
+/* a set used in domains and quantifiers: {..}, LO .. HI, or any
+ * set-valued term (a def, a variable of set type) */
 static Value sp_setspec(Pst *s){
 	sp_skip(s);
 	if(*s->p=='{') return sp_atom(s);
-	/* LO .. HI (inclusive); bounds are arithmetic expressions */
-	Value lo=sp_add(s); if(!s->ok) return lo; sp_skip(s);
-	if(s->p[0]=='.'&&s->p[1]=='.'){ s->p+=2; Value hi=sp_add(s); if(!s->ok) return hi;
-		if(!need(s,&lo,T_INT,"..") || !need(s,&hi,T_INT,"..")) return lo;
-		Value set={0}; set.tag=T_SET; if(s->dead) return set;
-		for(long x=lo.i;x<=hi.i;x++){ if(set.n>=SP_SETMAX){ fail(s,"range too large"); return set; } set.e[set.n++]=x; } set_canon(&set); return set; }
-	/* a bare set-valued expression (a variable of set type) */
-	if(s->ok && lo.tag!=T_SET){ if(efail(s,"expected a set (LO .. HI or {..}), not a scalar")) return lo; lo=(Value){0}; lo.tag=T_SET; }
-	return lo;
+	Value v=sp_range(s); if(!s->ok) return v;
+	if(v.tag!=T_SET){ if(efail(s,"expected a set (LO .. HI or {..}), not a scalar")) return v; need(s,&v,T_SET,"a set"); }
+	return v;
 }
 
 /* arithmetic is checked: an overflow is a model error, never a wrapped
@@ -347,11 +797,11 @@ static Value sp_setspec(Pst *s){
  * from TLA+'s \div and %, so the emitted module would mean something
  * else. */
 static Value sp_mul(Pst *s){
-	Value a=sp_atom(s);
+	Value a=sp_post(s);
 	for(;;){ sp_skip(s);
-		if(*s->p=='*'){ s->p++; Value b=sp_atom(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
-		else if(*s->p=='/'){ s->p++; Value b=sp_atom(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0 && efail(s,"divide by zero")) return a; if((a.i<0||b.i<0) && efail(s,"/ of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i/b.i:0); }
-		else if(sp_word(s,"mod")){ Value b=sp_atom(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0 && efail(s,"mod by zero")) return a; if((a.i<0||b.i<0) && efail(s,"mod of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i%b.i:0); }
+		if(*s->p=='*'){ s->p++; Value b=sp_post(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
+		else if(*s->p=='/'){ s->p++; Value b=sp_post(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0 && efail(s,"divide by zero")) return a; if((a.i<0||b.i<0) && efail(s,"/ of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i/b.i:0); }
+		else if(sp_word(s,"mod")){ Value b=sp_post(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0 && efail(s,"mod by zero")) return a; if((a.i<0||b.i<0) && efail(s,"mod of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i%b.i:0); }
 		else break; }
 	return a;
 }
@@ -360,6 +810,7 @@ static Value sp_add(Pst *s){
 	for(;;){ sp_skip(s);
 		if(*s->p=='+'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(__builtin_add_overflow(a.i,b.i,&r) && efail(s,"integer overflow in +")) return a; a=vint(r); }
 		else if(*s->p=='-'&&s->p[1]!='>'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(__builtin_sub_overflow(a.i,b.i,&r) && efail(s,"integer overflow in -")) return a; a=vint(r); }
+		else if(s->p[0]=='\\' && s->p[1]=='o' && !isalnum((unsigned char)s->p[2])){ s->p+=2; Value b=sp_mul(s); if(!need(s,&a,T_SEQ,"\\o") || !need(s,&b,T_SEQ,"\\o")) return a; if(!s->dead) a=seq_cat(s,&a,&b); }
 		else break; }
 	return a;
 }
@@ -374,32 +825,34 @@ static Value sp_quant(Pst *s){
 		char var[SP_NAME]; sp_ident(s,var,sizeof var);
 		if(!sp_word(s,"in")){ fail(s,"expected 'in' in quantifier"); return vbool(0); }
 		Value set=sp_setspec(s); if(!s->ok) return vbool(0);
-		sp_skip(s); if(*s->p!=':'){ fail(s,"expected ':' in quantifier"); return vbool(0); } s->p++;
+		if(!sp_expect(s,':',"expected ':' in quantifier")) return vbool(0);
 		const char *body=s->p; long cnt=0; int res=isall?1:0; const char *endp=body;
-		if(s->dead) set.n=0;	/* parse the body once, below */
-		for(int e=0;e<set.n;e++){
-			Pst sub=*s; sub.p=body; Env ne=*s->env; if(!env_bind(s,&ne,var,set.e[e])) return vbool(0); sub.env=&ne;
-			Value bv=sp_or(&sub); need(&sub,&bv,T_BOOL,q); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return vbool(0); }
-			endp=sub.p;
+		int n=s->dead ? 0 : val_n(&set);	/* dead: parse the body once, below */
+		for(int e=0;e<n;e++){
+			Env ne=*s->env; if(!env_bind(s,&ne,var,set_e(&set,e))) return vbool(0);
+			Value bv=sp_sub(s,body,&ne,0,&endp); if(!s->ok) return vbool(0);
+			if(!need(s,&bv,T_BOOL,q)) return vbool(0);
 			if(isall && !bv.i) res=0;
 			if(issome && bv.i) res=1;
 			if(iscount && bv.i) cnt++;
 		}
-		if(set.n==0){ /* still parse the body once, unevaluated, so a broken body is caught */
-			Pst sub=*s; sub.p=body; sub.dead++; Env ne=*s->env; if(!env_bind(s,&ne,var,0)) return vbool(0); sub.env=&ne;
-			Value bv=sp_or(&sub); need(&sub,&bv,T_BOOL,q); if(!sub.ok){ s->ok=0; snprintf(s->err,sizeof s->err,"%s",sub.err); return vbool(0); } endp=sub.p;
+		if(n==0){ /* still parse the body once, unevaluated, so a broken body is caught */
+			Env ne=*s->env; if(!env_bind(s,&ne,var,0)) return vbool(0);
+			Value bv=sp_sub(s,body,&ne,1,&endp); if(!s->ok) return vbool(0);
+			(void)bv;
 		}
 		s->p=endp;
 		return iscount?vint(cnt):vbool(res);
 	}
 	/* a comparison or arithmetic term, possibly `A in SET` */
-	Value a=sp_add(s); sp_skip(s);
-	if(sp_word(s,"in")){ if(!need(s,&a,T_INT,"in")) return vbool(0); Value set=sp_setspec(s); if(!s->ok) return vbool(0); int in=0; for(int i=0;i<set.n;i++) if(set.e[i]==a.i) in=1; return vbool(in); }
+	Value a=sp_range(s); sp_skip(s);
+	if(sp_word(s,"in")){ if(!need(s,&a,T_INT,"in")) return vbool(0); Value set=sp_setspec(s); if(!s->ok) return vbool(0); int in=0; for(int i=0;!s->dead && i<val_n(&set);i++) if(set_e(&set,i)==a.i) in=1; return vbool(in); }
 	const char *op=s->p;
-	if(!strncmp(op,"==",2)){ s->p+=2; Value b=sp_add(s); if(!same_type(s,&a,&b,"==")) return vbool(0); return vbool(val_eq(&a,&b)); }
-	if(!strncmp(op,"!=",2)){ s->p+=2; Value b=sp_add(s); if(!same_type(s,&a,&b,"!=")) return vbool(0); return vbool(!val_eq(&a,&b)); }
-	/* an order: <= and >= before < and >, which they begin with */
-	int len=!strncmp(op,"<=",2)||!strncmp(op,">=",2)?2:*op=='<'||*op=='>'?1:0;
+	if(!strncmp(op,"==",2)){ s->p+=2; Value b=sp_range(s); if(!s->ok) return vbool(0); return vbool(sp_val_eq(s,&a,&b,"==")); }
+	if(!strncmp(op,"!=",2)){ s->p+=2; Value b=sp_range(s); if(!s->ok) return vbool(0); return vbool(!sp_val_eq(s,&a,&b,"!=")); }
+	/* an order: <= and >= before < and >, which they begin with; << and
+	 * >> delimit a sequence */
+	int len=!strncmp(op,"<=",2)||!strncmp(op,">=",2)?2:(*op=='<'&&op[1]!='<')||(*op=='>'&&op[1]!='>')?1:0;
 	if(len){
 		char o[3]={op[0],len==2?op[1]:0,0};
 		s->p+=len; Value b=sp_add(s);
@@ -473,7 +926,7 @@ static char *sp_trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=
 /* evaluate a constant-only integer expression at parse time (for bounds
  * like N-1): reuse sp_eval with an env that has no variables */
 static long sp_const_eval(const char *expr, int *ok){
-	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	Env env=env_new(NULL);
 	Value v; char e[128];
 	if(!sp_eval(expr,&env,&v,e,sizeof e) || v.tag!=T_INT){ *ok=0; return 0; }
 	*ok=1; return v.i;
@@ -492,15 +945,129 @@ static int fits(char *dst, size_t cap, const char *src, const char *path, int ln
 }
 #define CPY(dst,src,what) do{ if(!fits((dst),sizeof(dst),(src),path,ln,(what))) goto bad; }while(0)
 
+/* the first occurrence of tok in t outside brackets, or NULL */
+static char *top_find(char *t, const char *tok){
+	int d=0; size_t n=strlen(tok);
+	for(char *p=t;*p;p++){
+		if(d==0 && !strncmp(p,tok,n)) return p;
+		if(*p=='('||*p=='['||*p=='{') d++;
+		else if(*p==')'||*p==']'||*p=='}') d--;
+	}
+	return NULL;
+}
+/* A variable's type, parsed from t (which it may write into) into a new
+ * Ty node: [K -> T], [a : T, ...], Seq(T, N), or a set of integers.
+ * Returns the node's index, or -1 after reporting why. */
+static int ty_parse(char *t, const char *path, int ln){
+	t=sp_trim(t);
+	if(S.nty>=SP_MAXTY){ fprintf(stderr,"cmc: %s:%d: the variables' types are too large\n",path,ln); return -1; }
+	int ti=S.nty++; Ty *T=&S.ty[ti]; memset(T,0,sizeof *T);
+	size_t n=strlen(t);
+	if(!strncmp(t,"Seq(",4)){
+		if(t[n-1]!=')'){ fprintf(stderr,"cmc: %s:%d: Seq type needs )\n",path,ln); return -1; }
+		t[n-1]=0; char *c=strrchr(t+4,',');
+		if(!c){ fprintf(stderr,"cmc: %s:%d: Seq type needs a maximum length: Seq(T, N)\n",path,ln); return -1; }
+		*c=0; int ok; long mx=sp_const_eval(c+1,&ok);
+		if(!ok || mx<0 || mx>SP_MAPMAX){ fprintf(stderr,"cmc: %s:%d: a Seq length bound must be a constant from 0 to %d\n",path,ln,SP_MAPMAX); return -1; }
+		T->kind=TY_SEQ; T->max=mx;
+		int sub=ty_parse(t+4,path,ln); if(sub<0) return -1;
+		S.ty[ti].sub=sub; return ti;
+	}
+	if(t[0]!='['){ T->kind=TY_DOM; return fits(T->dom,sizeof T->dom,t,path,ln,"var domain")?ti:-1; }
+	char *rb=strrchr(t,']');
+	char *arrow=top_find(t+1,"->");
+	if(arrow){
+		if(!rb){ fprintf(stderr,"cmc: %s:%d: function var needs ]\n",path,ln); return -1; }
+		*arrow=0; *rb=0; T->kind=TY_FUN;
+		char *d=sp_trim(t+1);
+		if(!fits(T->dom,sizeof T->dom,d,path,ln,"function domain")) return -1;
+		char *r=sp_trim(arrow+2);
+		if(!r[0]){ fprintf(stderr,"cmc: %s:%d: function var needs a range\n",path,ln); return -1; }
+		if(strlen(r)>=SP_EXPR){ fprintf(stderr,"cmc: %s:%d: function range is too long (limit %d bytes)\n",path,ln,SP_EXPR-1); return -1; }
+		int sub=ty_parse(r,path,ln); if(sub<0) return -1;
+		S.ty[ti].sub=sub; return ti;
+	}
+	if(!top_find(t+1,":")){ fprintf(stderr,"cmc: %s:%d: function var needs ->\n",path,ln); return -1; }
+	if(!rb){ fprintf(stderr,"cmc: %s:%d: record var needs ]\n",path,ln); return -1; }
+	/* [a : T, b : T]: one field per top-level comma */
+	*rb=0; T->kind=TY_REC;
+	char *p=t+1;
+	while(p){
+		char *c=top_find(p,","); if(c) *c=0;
+		char *col=top_find(p,":");
+		if(!col){ fprintf(stderr,"cmc: %s:%d: a record field needs name : type\n",path,ln); return -1; }
+		*col=0; char *fn=sp_trim(p);
+		int id=fld_id(fn); if(id<0){ fprintf(stderr,"cmc: %s:%d: too many record field names\n",path,ln); return -1; }
+		Ty *R=&S.ty[ti];
+		for(int j=0;j<R->nf;j++) if(R->fid[j]==id){ fprintf(stderr,"cmc: %s:%d: record field %s is declared twice\n",path,ln,fn); return -1; }
+		if(R->nf>=SP_MAXFLD){ fprintf(stderr,"cmc: %s:%d: too many record fields\n",path,ln); return -1; }
+		int sub=ty_parse(col+1,path,ln); if(sub<0) return -1;
+		/* keep the fields in id order, the order a record value has */
+		R=&S.ty[ti]; int j=R->nf;
+		while(j>0 && R->fid[j-1]>id){ R->fid[j]=R->fid[j-1]; R->fty[j]=R->fty[j-1]; j--; }
+		R->fid[j]=id; R->fty[j]=sub; R->nf++;
+		p=c?c+1:NULL;
+	}
+	return ti;
+}
+
+/* def NAME(p, ...) = EXPR (or ==, as TLA+ writes it), the text after
+ * "def ", into a new Def; 0, or -1 after reporting why */
+static int def_parse(char *t, const char *path, int ln){
+	if(S.ndefs>=SP_MAXDEF){ fprintf(stderr,"cmc: %s:%d: too many defs\n",path,ln); return -1; }
+	char *eq=strchr(t,'=');
+	if(!eq){ fprintf(stderr,"cmc: %s:%d: def needs = EXPR\n",path,ln); return -1; }
+	*eq=0; char *body=eq+1; if(*body=='=') body++;
+	Def *D=&S.def[S.ndefs]; memset(D,0,sizeof *D);
+	char *head=sp_trim(t), *lp=strchr(head,'(');
+	if(lp){
+		char *rp=strrchr(lp,')');
+		if(!rp || *sp_trim(rp+1)){ fprintf(stderr,"cmc: %s:%d: def parameters need )\n",path,ln); return -1; }
+		*lp=0; *rp=0;
+		char *save=NULL;
+		for(char *p=strtok_r(lp+1,",",&save); p; p=strtok_r(NULL,",",&save)){
+			if(D->np>=SP_MAXPARAM){ fprintf(stderr,"cmc: %s:%d: too many def parameters\n",path,ln); return -1; }
+			if(!fits(D->pname[D->np],SP_NAME,sp_trim(p),path,ln,"def parameter")) return -1;
+			D->np++;
+		}
+		if(D->np==0){ fprintf(stderr,"cmc: %s:%d: a def with () needs a parameter\n",path,ln); return -1; }
+	}
+	if(!fits(D->name,SP_NAME,sp_trim(head),path,ln,"def name")) return -1;
+	if(!fits(D->body,SP_EXPR,sp_trim(body),path,ln,"def body")) return -1;
+	int f; (void)cst_lookup(D->name,&f);
+	if(!D->name[0] || f || var_index(D->name)>=0 || def_index(D->name)>=0){ fprintf(stderr,"cmc: %s:%d: def %s redeclares a name or names nothing\n",path,ln,D->name); return -1; }
+	S.ndefs++;
+	return 0;
+}
+/* Parse each def's body once, unevaluated, with its parameters bound:
+ * a name it cannot resolve (a later def, so itself too) and a syntax
+ * error are load errors, never a surprise in the middle of a search */
+static int defs_check(const char *path){
+	for(int d=0;d<S.ndefs;d++){
+		const Def *D=&S.def[d];
+		Env env=env_new(NULL); env.ndefvis=d;
+		Pst s={0}; s.p=D->body; s.env=&env; s.ok=1; s.dead=1;
+		for(int i=0;i<D->np && s.ok;i++) env_bind(&s,&env,D->pname[i],0);
+		size_t m=ar_mark();
+		(void)sp_or(&s); sp_skip(&s);
+		if(s.ok && *s.p) fail(&s,"trailing text");
+		ar_release(m);
+		if(!s.ok){ fprintf(stderr,"cmc: %s: def %s: %s\n",path,D->name,s.err); return -1; }
+	}
+	return 0;
+}
+
 static int sp_load(const char *path){
 	memset(&S.modname,0,sizeof S.modname);
 	S.ncst=S.nvar=S.nact=S.ninv=0; S.init[0]=0; S.has_sym=0; S.nprop=0; S.fair_weak=0;
 	S.deadlock_off=0; S.ncon=S.nacon=0;
+	S.nty=S.ndefs=S.nfld=0;
 	g_symok=0;	/* no symmetry carries over from a previously loaded spec */
 	if(sp_load_into(path)) return -1;
 	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
 	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
 	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
+	if(defs_check(path)) return -1;
 	if(S.ninv==0 && S.nprop==0){ fprintf(stderr,"cmc: %s: no invariant or property\n",path); return -1; }
 	/* a --define that gates nothing is a typo: checking without the
 	 * planted bug it meant to turn on would read as a pass */
@@ -548,13 +1115,10 @@ static int sp_load_into(const char *path){
 			if(S.nvar>=SP_MAXVAR){ fprintf(stderr,"cmc: too many vars\n"); goto bad; }
 			Var *V=&S.var[S.nvar];
 			CPY(V->name,nm,"var name");
-			if(dom[0]=='['){ /* [DOM -> RANGE] : a function variable */
-				V->is_fun=1; char *arrow=strstr(dom,"->"); if(!arrow){ fprintf(stderr,"cmc: %s:%d: function var needs ->\n",path,ln); goto bad; }
-				*arrow=0; char *d=sp_trim(dom+1); char *r=sp_trim(arrow+2); char *rb=strrchr(r,']'); if(!rb){ fprintf(stderr,"cmc: %s:%d: function var needs ]\n",path,ln); goto bad; } *rb=0; r=sp_trim(r);
-				CPY(V->fdom,d,"function domain"); CPY(V->dom,r,"function range");
-			} else { V->is_fun=0; CPY(V->dom,dom,"var domain"); V->fdom[0]=0; }
+			V->ty=ty_parse(dom,path,ln); if(V->ty<0) goto bad;
 			S.nvar++; in_action=0; continue;
 		}
+		if(!strncmp(s,"def ",4)){ if(def_parse(s+4,path,ln)) goto bad; in_action=0; continue; }
 		if(!strncmp(s,"fairness ",9)){ if(!strcmp(sp_trim(s+9),"weak")) S.fair_weak=1; else { fprintf(stderr,"cmc: %s:%d: only 'fairness weak' is supported\n",path,ln); goto bad; } in_action=0; continue; }
 		if(!strncmp(s,"property",8)){
 			char *rest=sp_trim(s+8); char *col=strchr(rest,':'); if(!col){ fprintf(stderr,"cmc: %s:%d: property needs name:\n",path,ln); goto bad; }
@@ -648,20 +1212,32 @@ static int act_active(const Action *a){
 /* =====================================================================
  * explicit-state BFS over the tuple of variable values
  * ===================================================================== */
-typedef struct { Value v[SP_MAXVAR]; } State;
+/* A state is the concatenation of its variables' encodings (see the
+ * value model), canonical by construction, so two states are the same
+ * exactly when their words are.  nw counts the words in use; the rest
+ * of w[] is never read. */
+typedef struct { int nw; long w[SP_STATEW]; } State;
 
-/* serialize a state to bytes for hashing/dedup (canonical already).  A
- * state's variables have passed in_domains(), so each is an integer or,
- * for a function variable, a function. */
-static size_t state_bytes(const State *st, unsigned char *buf, size_t cap){
+/* the views of st's variables, into vv[] */
+static void st_views(const State *st, Value *vv){
+	const long *p=st->w;
+	for(int i=0;i<S.nvar;i++){ vv[i]=enc_view(p); p+=enc_len(p); }
+}
+/* the state of the variable values vv[]; 0, or -1 when it does not fit */
+static int st_pack(State *st, const Value *vv, char *err, size_t errcap){
 	size_t o=0;
-	for(int i=0;i<S.nvar;i++){ const Value *v=&st->v[i];
-		#define PUT(x) do{ long _x=(x); if(o+sizeof _x<=cap){ memcpy(buf+o,&_x,sizeof _x);} o+=sizeof _x; }while(0)
-		PUT(v->tag); PUT(v->i); PUT(v->n);
-		if(v->tag==T_FUN) for(int j=0;j<v->n;j++){ PUT(v->k[j]); PUT(v->v[j]); }
-		#undef PUT
+	for(int i=0;i<S.nvar;i++){
+		size_t n=val_len(&vv[i]);
+		if(o+n>SP_STATEW){ snprintf(err,errcap,"a state needs more than %d words",SP_STATEW); return -1; }
+		enc_put(st->w+o,&vv[i]); o+=n;
 	}
-	return o;
+	st->nw=(int)o; return 0;
+}
+/* the bytes of a state, for hashing and comparison */
+static size_t state_bytes(const State *st, unsigned char *buf, size_t cap){
+	size_t n=(size_t)st->nw*sizeof st->w[0];
+	memcpy(buf,st->w,n<cap?n:cap);
+	return n;
 }
 static uint64_t fnv(const unsigned char *b, size_t n){ uint64_t h=1469598103934665603ULL; for(size_t i=0;i<n;i++){ h^=b[i]; h*=1099511628211ULL; } return h; }
 
@@ -673,38 +1249,69 @@ static uint64_t fnv(const unsigned char *b, size_t n){ uint64_t h=14695981039346
  * is symmetric under permuting S (the user's declared obligation, as in
  * TLC); the gate checks it empirically -- same verdict with symmetry on
  * and off, strictly fewer states.  A permutation remaps every integer
- * that is a member of S, wherever it appears (int values, set elements,
- * and both the keys and values of functions). */
+ * that is a member of S, wherever it appears: integer values, set
+ * elements, the keys and values of functions, record field values and
+ * sequence elements (never a record's field names or a sequence's
+ * positions, which are not values of the model). */
 static Value g_symset;
+static long g_symel[8]; static int g_symn;
 /* Evaluate the symmetry set once; returns 0, or -1 with the reason in
  * err when it cannot be used (one it cannot read, or of more than 8
  * values, whose 9! permutations a state would be canonicalised over).
  * A set of fewer than two values reduces nothing and is accepted. */
 static int sym_init(char *err, size_t errcap){
 	g_symok=0; if(!S.has_sym) return 0;
-	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	Env env=env_new(NULL);
 	char e[128];
 	if(!sp_eval_set(S.symmetry,&env,&g_symset,e,sizeof e)){ snprintf(err,errcap,"symmetry %.80s: %s",S.symmetry,e); return -1; }
-	if(g_symset.n>8){ snprintf(err,errcap,"symmetry %.80s: at most 8 values, not %d",S.symmetry,g_symset.n); return -1; }
-	g_symok=g_symset.n>=2;
+	if(val_n(&g_symset)>8){ snprintf(err,errcap,"symmetry %.80s: at most 8 values, not %d",S.symmetry,val_n(&g_symset)); return -1; }
+	g_symn=val_n(&g_symset); for(int i=0;i<g_symn;i++) g_symel[i]=set_e(&g_symset,i);
+	g_symok=g_symn>=2;
 	return 0;
 }
 /* remap x under a permutation perm[] of the symmetry set (perm[i] is the
- * image of g_symset.e[i]); non-members pass through */
+ * image of g_symel[i]); non-members pass through */
 static long sym_map(long x, const int *perm){
-	for(int i=0;i<g_symset.n;i++) if(g_symset.e[i]==x) return g_symset.e[perm[i]];
+	for(int i=0;i<g_symn;i++) if(g_symel[i]==x) return g_symel[perm[i]];
 	return x;
 }
-static void sym_apply(const State *in, State *out, const int *perm){
-	*out=*in;
-	for(int vi=0;vi<S.nvar;vi++){ Value *v=&out->v[vi];	/* an integer or a function */
-		if(v->tag==T_INT) v->i=sym_map(v->i,perm);
-		else{ /* remap keys and values; re-sort by key */
-			for(int j=0;j<v->n;j++){ v->k[j]=sym_map(v->k[j],perm); v->v[j]=sym_map(v->v[j],perm); }
-			/* insertion sort by key to keep canonical */
-			for(int a=1;a<v->n;a++){ long kk=v->k[a],vv=v->v[a]; int b=a-1; while(b>=0&&v->k[b]>kk){ v->k[b+1]=v->k[b]; v->v[b+1]=v->v[b]; b--; } v->k[b+1]=kk; v->v[b+1]=vv; }
-		}
+/* the encoding at in under the permutation perm, written at out (the
+ * same length); a function's entries are re-sorted by their new keys */
+static void enc_sym(const long *in, long *out, const int *perm){
+	size_t len=enc_len(in);
+	if(in[0]==T_BOOL){ memcpy(out,in,2*sizeof *in); return; }
+	if(in[0]==T_INT){ out[0]=T_INT; out[1]=sym_map(in[1],perm); return; }
+	out[0]=in[0]; out[1]=in[1]; out[2]=in[2];
+	int n=(int)in[2];
+	if(in[0]==T_SET){
+		for(int j=0;j<n;j++) out[3+j]=sym_map(in[3+j],perm);
+		(void)set_canon(out+3,n); return;
 	}
+	if(in[0]!=T_FUN){
+		/* a record keeps its field ids, a sequence its positions */
+		const long *p=in+3; long *q=out+3;
+		for(int j=0;j<n;j++){
+			if(in[0]==T_REC){ *q++=*p++; }
+			enc_sym(p,q,perm); q+=enc_len(p); p+=enc_len(p);
+		}
+		return;
+	}
+	/* a function: remap each entry, then emit them in key order */
+	const long *ent[SP_MAPMAX]; long nk[SP_MAPMAX];
+	const long *p=in+3;
+	for(int j=0;j<n;j++){ ent[j]=p; nk[j]=sym_map(p[0],perm); p+=1+enc_len(p+1); }
+	long *q=out+3;
+	for(int done=0;done<n;done++){
+		int m=-1;
+		for(int j=0;j<n;j++) if(ent[j] && (m<0 || nk[j]<nk[m])) m=j;
+		*q++=nk[m]; enc_sym(ent[m]+1,q,perm); q+=enc_len(ent[m]+1); ent[m]=NULL;
+	}
+	(void)len;
+}
+static void sym_apply(const State *in, State *out, const int *perm){
+	out->nw=in->nw;
+	const long *p=in->w; long *q=out->w;
+	for(int vi=0;vi<S.nvar;vi++){ enc_sym(p,q,perm); q+=enc_len(p); p+=enc_len(p); }
 }
 /* The canonical serialisation of a state: its bytes, or under symmetry
  * the lexicographically least serialisation over every permutation of
@@ -720,8 +1327,8 @@ static void sym_perms(int *perm, int k, int n, const State *st, unsigned char *b
 }
 static size_t state_canon(const State *st, unsigned char *out, size_t cap){
 	if(!g_symok) return state_bytes(st,out,cap);
-	int perm[8]; for(int i=0;i<g_symset.n;i++) perm[i]=i; size_t n=0; int first=1;
-	sym_perms(perm,0,g_symset.n,st,out,&n,cap,&first); return n;
+	int perm[8]; for(int i=0;i<g_symn;i++) perm[i]=i; size_t n=0; int first=1;
+	sym_perms(perm,0,g_symn,st,out,&n,cap,&first); return n;
 }
 /* the fingerprint of a state's canonical serialisation: an index only,
  * since two states are the same exactly when those bytes are */
@@ -741,9 +1348,10 @@ static int state_eq(const State *a, const State *b){
 
 /* set the initial state from the `init` predicate (a conjunction of
  * `var == EXPR`).  Returns 0 ok. */
-static int in_domains(const State *st, char *err, size_t errcap);
+static int in_domains(const Value *vv, char *err, size_t errcap);
 static int sp_init_state(State *st, char *err, size_t errcap){
-	for(int i=0;i<S.nvar;i++) st->v[i]=vint(0);
+	Value vv[SP_MAXVAR]; for(int i=0;i<S.nvar;i++) vv[i]=vint(0);
+	size_t m=ar_mark(); int rc=-1;
 	/* split init on " and " at top level (init conjuncts are var == expr) */
 	int set[SP_MAXVAR]={0};
 	char work[SP_EXPR]; snprintf(work,sizeof work,"%s",S.init);
@@ -752,22 +1360,25 @@ static int sp_init_state(State *st, char *err, size_t errcap){
 		char *nx=strstr(p," and "); if(nx)*nx=0;
 		char *conj=sp_trim(p);
 		char *eq=strstr(conj,"==");
-		if(!eq){ snprintf(err,errcap,"init conjunct is not var == expr: %s",conj); return -1; }
+		if(!eq){ snprintf(err,errcap,"init conjunct is not var == expr: %s",conj); goto out; }
 		*eq=0; char *lhs=sp_trim(conj); char *rhs=sp_trim(eq+2);
-		int vi=var_index(lhs); if(vi<0){ snprintf(err,errcap,"init assigns unknown var %s",lhs); return -1; }
-		if(set[vi]){ snprintf(err,errcap,"init assigns %s twice",lhs); return -1; }
-		Env env; memset(&env,0,sizeof env); env.var=st->v; env.np=0; env.assigned=set;
-		Value v; if(!sp_eval(rhs,&env,&v,err,errcap)) return -1;
-		st->v[vi]=v; set[vi]=1;
+		int vi=var_index(lhs); if(vi<0){ snprintf(err,errcap,"init assigns unknown var %s",lhs); goto out; }
+		if(set[vi]){ snprintf(err,errcap,"init assigns %s twice",lhs); goto out; }
+		Env env=env_new(vv); env.assigned=set;
+		Value v; if(!sp_eval(rhs,&env,&v,err,errcap)) goto out;
+		vv[vi]=v; set[vi]=1;
 		if(!nx) break;
 		p=nx+5;
 	}
-	for(int i=0;i<S.nvar;i++) if(!set[i]){ snprintf(err,errcap,"init does not set %s",S.var[i].name); return -1; }
-	return in_domains(st,err,errcap);
+	for(int i=0;i<S.nvar;i++) if(!set[i]){ snprintf(err,errcap,"init does not set %s",S.var[i].name); goto out; }
+	if(in_domains(vv,err,errcap) || st_pack(st,vv,err,errcap)) goto out;
+	rc=0;
+out:	ar_release(m);
+	return rc;
 }
 
 static int set_has(const Value *set, long x){
-	for(int j=0;j<set->n;j++) if(set->e[j]==x) return 1;
+	for(int j=0;j<val_n(set);j++) if(set_e(set,j)==x) return 1;
 	return 0;
 }
 
@@ -776,89 +1387,124 @@ static int set_has(const Value *set, long x){
  * SP_SETMAX; any other form is evaluated as a set.  Returns 1 member,
  * 0 not, -1 on an error (message in err). */
 static int dom_has(const char *dom, long x, char *err, size_t errcap){
-	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
+	Env env=env_new(NULL);
 	const char *dd=strstr(dom,"..");
+	size_t m=ar_mark(); int rc=-1;
 	if(dd && !strchr(dom,'{')){
 		char lo[SP_EXPR]; snprintf(lo,sizeof lo,"%.*s",(int)(dd-dom),dom);
-		Value l,h; if(!sp_eval(lo,&env,&l,err,errcap) || !sp_eval(dd+2,&env,&h,err,errcap)) return -1;
-		if(l.tag!=T_INT || h.tag!=T_INT){ snprintf(err,errcap,"the bounds of %s are not integers",dom); return -1; }
-		return x>=l.i && x<=h.i;
+		Value l,h; if(!sp_eval(lo,&env,&l,err,errcap) || !sp_eval(dd+2,&env,&h,err,errcap)) goto out;
+		if(l.tag!=T_INT || h.tag!=T_INT){ snprintf(err,errcap,"the bounds of %s are not integers",dom); goto out; }
+		rc=x>=l.i && x<=h.i; goto out;
 	}
-	Value set; if(!sp_eval_set(dom,&env,&set,err,errcap)) return -1;	/* a set, or an error */
-	return set_has(&set,x);
+	Value set; if(!sp_eval_set(dom,&env,&set,err,errcap)) goto out;	/* a set, or an error */
+	rc=set_has(&set,x);
+out:	ar_release(m);
+	return rc;
 }
 
-/* does state st lie in every variable's declared domain?  A scalar var
- * `x : D` must be an integer in D; a function var `f : [K -> R]` must be
- * a function with key set exactly K and every value in R.  The checker
- * enumerates states, not declarations, so a value outside its domain is
- * a different model than the one written (and than the emitted TLA+'s
- * type annotations allow): a model error, never a silently explored
- * state.  Returns 0 if in, -1 (message in err) if not or on an
- * evaluation error. */
-static int var_in_domain(int vi, const Value *v, char *err, size_t errcap){
-	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
-	const Var *V=&S.var[vi];
-	if(!V->is_fun){
-		if(v->tag!=T_INT){ snprintf(err,errcap,"%s is %s, not an integer",V->name,tag_name(v->tag)); return -1; }
-		int in=dom_has(V->dom,v->i,err,errcap); if(in<0) return -1;
-		if(!in){ snprintf(err,errcap,"%s = %ld is outside its domain %s",V->name,v->i,V->dom); return -1; }
+/* Does v have type ty?  A TY_DOM value is an integer in its set; a
+ * TY_FUN value a function whose keys are exactly its key set, each
+ * value of the range type; a TY_REC value a record of exactly its
+ * fields; a TY_SEQ value a sequence of at most its bound, each element
+ * of the element type.  name names the part, as `f[2].a`, in err.  The
+ * checker enumerates states, not declarations, so a value outside its
+ * type is a different model than the one written (and than the emitted
+ * TLA+'s type annotations allow): a model error, never a silently
+ * explored state, and a sequence past its bound is never cut.  Returns
+ * 0 if in, -1 (message in err) if not or on an evaluation error. */
+static int val_in_type(int ty, const Value *v, char *name, char *err, size_t errcap){
+	const Ty *T=&S.ty[ty];
+	static const int want[]={T_INT,T_FUN,T_REC,T_SEQ};
+	if(v->tag!=want[T->kind] && T->kind==TY_FUN){ snprintf(err,errcap,"%s is not a function on %s",name,T->dom); return -1; }
+	if(v->tag!=want[T->kind]){ snprintf(err,errcap,"%s is %s, not %s",name,tag_name(v->tag),tag_name(want[T->kind])); return -1; }
+	if(T->kind==TY_DOM){
+		int in=dom_has(T->dom,v->i,err,errcap); if(in<0) return -1;
+		/* a part of a variable lies in a range, a whole one in a domain */
+		const char *what=strpbrk(name,"[.") ? "range" : "domain";
+		if(!in){ snprintf(err,errcap,"%s = %ld is outside its %s %s",name,v->i,what,T->dom); return -1; }
 		return 0;
 	}
-	Value keys; if(!sp_eval_set(V->fdom,&env,&keys,err,errcap)) return -1;
-	if(v->tag!=T_FUN || keys.tag!=T_SET || v->n!=keys.n){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
-	for(int j=0;j<v->n;j++){
-		if(v->k[j]!=keys.e[j]){ snprintf(err,errcap,"%s is not a function on %s",V->name,V->fdom); return -1; }
-		int in=dom_has(V->dom,v->v[j],err,errcap); if(in<0) return -1;
-		if(!in){ snprintf(err,errcap,"%s[%ld] = %ld is outside its range %s",V->name,v->k[j],v->v[j],V->dom); return -1; }
+	long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX];
+	int n=comp_kids(v,key,kid);
+	size_t nl=strlen(name);
+	if(T->kind==TY_FUN){
+		Env env=env_new(NULL); size_t m=ar_mark(); Value keys; int ok=1;
+		if(!sp_eval_set(T->dom,&env,&keys,err,errcap)) return -1;
+		if(n!=val_n(&keys)) ok=0;
+		for(int j=0;ok && j<n;j++) if(key[j]!=set_e(&keys,j)) ok=0;
+		ar_release(m);
+		if(!ok){ snprintf(err,errcap,"%s is not a function on %s",name,T->dom); return -1; }
+	}
+	else if(T->kind==TY_REC){
+		int ok=n==T->nf;
+		for(int j=0;ok && j<n;j++) if(key[j]!=T->fid[j]) ok=0;
+		if(!ok){ snprintf(err,errcap,"%s does not have exactly the fields of its record type",name); return -1; }
+	}
+	else if(n>T->max){ snprintf(err,errcap,"%s has length %d, past its bound %ld",name,n,T->max); return -1; }
+	for(int j=0;j<n;j++){
+		/* name the part: f[k], r.a, s[i] */
+		if(T->kind==TY_REC) snprintf(name+nl,128-nl,".%s",S.fld[key[j]]);
+		else snprintf(name+nl,128-nl,"[%ld]",T->kind==TY_SEQ?(long)j+1:key[j]);
+		int sub=T->kind==TY_REC ? T->fty[j] : T->sub;
+		if(val_in_type(sub,&kid[j],name,err,errcap)) return -1;
+		name[nl]=0;
 	}
 	return 0;
 }
-static int in_domains(const State *st, char *err, size_t errcap){
-	for(int vi=0;vi<S.nvar;vi++) if(var_in_domain(vi,&st->v[vi],err,errcap)) return -1;
+static int var_in_domain(int vi, const Value *v, char *err, size_t errcap){
+	char name[128]; snprintf(name,sizeof name,"%s",S.var[vi].name);
+	return val_in_type(S.var[vi].ty,v,name,err,errcap);
+}
+static int in_domains(const Value *vv, char *err, size_t errcap){
+	for(int vi=0;vi<S.nvar;vi++) if(var_in_domain(vi,&vv[vi],err,errcap)) return -1;
 	return 0;
 }
 
 /* apply action a with bound params (in env) to st, producing *out;
- * returns 1 if the guard held and the step was taken, 0 if disabled. */
+ * returns 1 if the guard held and the step was taken, 0 if disabled,
+ * -1 on an error.  Every successor lies in its variables' types. */
 static int sp_step(const Action *a, Env *env, const State *st, State *out, char *err, size_t errcap){
-	env->var=st->v;
-	if(a->guard[0]){ int g; if(!sp_eval_bool(a->guard,env,&g,"a guard",err,errcap)) return -1; if(!g) return 0; }
-	*out=*st;
+	Value cur[SP_MAXVAR], nxt[SP_MAXVAR]; st_views(st,cur);
+	size_t m=ar_mark(); int rc=-1;
+	env->var=cur;
+	if(a->guard[0]){ int g; if(!sp_eval_bool(a->guard,env,&g,"a guard",err,errcap)) goto out; if(!g){ rc=0; goto out; } }
+	memcpy(nxt,cur,sizeof cur);
 	/* evaluate all RHS against the CURRENT state (simultaneous assignment) */
 	for(int i=0;i<a->nasgn;i++){
-		int vi=var_index(a->lhs[i]); if(vi<0){ snprintf(err,errcap,"assign to unknown var %s",a->lhs[i]); return -1; }
-		Value v; env->var=st->v; if(!sp_eval(a->rhs[i],env,&v,err,errcap)) return -1;
-		out->v[vi]=v;
+		int vi=var_index(a->lhs[i]); if(vi<0){ snprintf(err,errcap,"assign to unknown var %s",a->lhs[i]); goto out; }
+		Value v; if(!sp_eval(a->rhs[i],env,&v,err,errcap)) goto out;
+		nxt[vi]=v;
 	}
-	return 1;
+	if(in_domains(nxt,err,errcap) || st_pack(out,nxt,err,errcap)) goto out;
+	rc=1;
+out:	ar_release(m);
+	return rc;
 }
 
 /* recursively bind an action's parameters over their finite domains and
  * invoke the body for each combination */
-typedef struct { const Action *a; const State *st; int depth_i; int found;
-	State *succ; int *nsucc; int cap; char *err; size_t errcap; int rc; } BindCtx;
 static void bind_params(const Action *a, Env *env, int pi, const State *st,
 	State *succ, int *nsucc, int cap, char *err, size_t errcap, int *rc){
 	if(*rc<0) return;
 	if(pi==a->nparam){
-		State out; int r=sp_step(a,env,st,&out,err,errcap);
+		static State out;	/* not on the stack: a state is SP_STATEW words */
+		int r=sp_step(a,env,st,&out,err,errcap);
 		if(r<0){ *rc=-1; return; }
-		if(r==1){
-			if(in_domains(&out,err,errcap)){ *rc=-1; return; }
-			if(*nsucc<cap) succ[(*nsucc)++]=out; else { snprintf(err,errcap,"too many successors"); *rc=-1; }
-		}
+		if(r==1){ if(*nsucc<cap) succ[(*nsucc)++]=out; else { snprintf(err,errcap,"too many successors"); *rc=-1; } }
 		return;
 	}
-	Env e2=*env; Pst s={0}; /* evaluate the param domain in the current env */
-	Value dom; char derr[128]; Env denv=*env; denv.var=st->v;
-	if(!sp_eval_set(a->pdom[pi],&denv,&dom,derr,sizeof derr)){ snprintf(err,errcap,"param domain: %s",derr); *rc=-1; return; }
-	(void)s;
-	for(int k=0;k<dom.n;k++){
-		Env e3=e2; if(e3.np>=SP_MAXPARAM){ snprintf(err,errcap,"action %s: too many parameters",a->name); *rc=-1; return; }
+	/* evaluate the param domain in the current state */
+	Value cur[SP_MAXVAR]; st_views(st,cur);
+	Value dom; char derr[128]; Env denv=*env; denv.var=cur;
+	size_t m=ar_mark();
+	if(!sp_eval_set(a->pdom[pi],&denv,&dom,derr,sizeof derr)){ ar_release(m); snprintf(err,errcap,"param domain: %s",derr); *rc=-1; return; }
+	long el[SP_SETMAX]; int n=val_n(&dom); for(int k=0;k<n;k++) el[k]=set_e(&dom,k);
+	ar_release(m);
+	for(int k=0;k<n;k++){
+		Env e3=*env; if(e3.np>=SP_MAXPARAM){ snprintf(err,errcap,"action %s: too many parameters",a->name); *rc=-1; return; }
 		{ int f; (void)cst_lookup(a->pname[pi],&f); for(int i=0;i<e3.np;i++) if(!strcmp(e3.pname[i],a->pname[pi])) f=1;
-		  if(f || var_index(a->pname[pi])>=0){ snprintf(err,errcap,"action %s: parameter %s redeclares a name already in scope",a->name,a->pname[pi]); *rc=-1; return; } }
-		snprintf(e3.pname[e3.np],SP_NAME,"%s",a->pname[pi]); e3.pval[e3.np]=dom.e[k]; e3.np++;
+		  if(f || var_index(a->pname[pi])>=0 || def_index(a->pname[pi])>=0){ snprintf(err,errcap,"action %s: parameter %s redeclares a name already in scope",a->name,a->pname[pi]); *rc=-1; return; } }
+		snprintf(e3.pname[e3.np],SP_NAME,"%s",a->pname[pi]); e3.pval[e3.np]=el[k]; e3.thunk[e3.np]=NULL; e3.np++;
 		bind_params(a,&e3,pi+1,st,succ,nsucc,cap,err,errcap,rc);
 		if(*rc<0) return;
 	}
@@ -867,9 +1513,11 @@ static void bind_params(const Action *a, Env *env, int pi, const State *st,
 /* check every invariant in state st; return the index of the first that
  * fails, -1 if all hold, -2 on an evaluation error (msg in err) */
 static int sp_check(const State *st, char *err, size_t errcap){
-	Env env; memset(&env,0,sizeof env); env.var=st->v; env.np=0;
-	for(int i=0;i<S.ninv;i++){ int h; if(!sp_eval_bool(S.inv[i].expr,&env,&h,"an invariant",err,errcap)){ return -2; } if(!h) return i; }
-	return -1;
+	Value vv[SP_MAXVAR]; st_views(st,vv);
+	Env env=env_new(vv); size_t m=ar_mark(); int rc=-1;
+	for(int i=0;i<S.ninv && rc==-1;i++){ int h; if(!sp_eval_bool(S.inv[i].expr,&env,&h,"an invariant",err,errcap)) rc=-2; else if(!h) rc=i; }
+	ar_release(m);
+	return rc;
 }
 
 /* BFS state store (open-addressed hash of fingerprints) + a queue of
@@ -901,21 +1549,78 @@ static int seen_insert(const State *st){
 	return 1;
 }
 
-typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
+/* a queued state, holding only the words its state uses */
+typedef struct QN { struct QN *prev; char step[64]; int depth; int nw; long w[]; } QN;
+static QN *qn_new(const State *st){
+	QN *n=calloc(1,sizeof *n+(size_t)st->nw*sizeof st->w[0]);
+	if(!n){ fprintf(stderr,"cmc: out of memory\n"); exit(1); }
+	n->nw=st->nw; memcpy(n->w,st->w,(size_t)st->nw*sizeof st->w[0]);
+	return n;
+}
+static void qn_state(const QN *n, State *st){ st->nw=n->nw; memcpy(st->w,n->w,(size_t)n->nw*sizeof st->w[0]); }
+
+/* the indices 0 .. n-1 of a record's fields fid[] in the order of their
+ * names, into ord[]: Apalache writes a record's fields sorted by name */
+static void fld_order(const long *fid, int n, int *ord){
+	for(int j=0;j<n;j++){
+		int k=j;
+		while(k>0 && strcmp(S.fld[fid[ord[k-1]]],S.fld[fid[j]])>0){ ord[k]=ord[k-1]; k--; }
+		ord[k]=j;
+	}
+}
+
+/* the views of the variables of the queued state n, into vv[] */
+static void qn_views(const QN *n, Value *vv){
+	const long *p=n->w;
+	for(int i=0;i<S.nvar;i++){ vv[i]=enc_view(p); p+=enc_len(p); }
+}
 
 /* One value of a state in a trace file.  In ITF (Apalache's ADR-015)
- * an integer is {"#bigint": "N"}, as Apalache writes every integer, and
- * a function is {"#map": [[k, v], ...]}; in plain JSON an integer is a
- * number and a function an object keyed by its arguments.  A state's
- * variables have passed in_domains(), so each is one of the two. */
+ * an integer is {"#bigint": "N"}, as Apalache writes every integer, a
+ * function is {"#map": [[k, v], ...]}, a record an object of its fields
+ * and a sequence an array.  In plain JSON an integer is a number, a
+ * function an object keyed by its arguments, a record an object of its
+ * fields and a sequence an array.  A state's variables have passed
+ * in_domains(), so each is an integer or one of these, nested. */
 static void trace_value(FILE *o, const Value *v, int itf){
 	if(v->tag==T_INT){ fprintf(o,itf?"{\"#bigint\":\"%ld\"}":"%ld",v->i); return; }
-	fprintf(o,itf?"{\"#map\":[":"{");
-	for(int j=0;j<v->n;j++){
-		if(itf) fprintf(o,"%s[{\"#bigint\":\"%ld\"},{\"#bigint\":\"%ld\"}]",j?",":"",v->k[j],v->v[j]);
-		else fprintf(o,"%s\"%ld\":%ld",j?",":"",v->k[j],v->v[j]);
+	long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX]; int n=comp_kids(v,key,kid);
+	if(v->tag==T_SEQ) fputc('[',o);
+	else fputs(v->tag==T_FUN && itf ? "{\"#map\":[" : "{",o);
+	int ord[SP_MAXFLD+SP_MAPMAX];
+	if(v->tag==T_REC) fld_order(key,n,ord);
+	else for(int j=0;j<n;j++) ord[j]=j;
+	for(int i=0;i<n;i++){
+		int j=ord[i];
+		if(i) fputc(',',o);
+		if(v->tag==T_REC) fprintf(o,"\"%s\":",S.fld[key[j]]);
+		else if(v->tag==T_FUN && itf) fprintf(o,"[{\"#bigint\":\"%ld\"},",key[j]);
+		else if(v->tag==T_FUN) fprintf(o,"\"%ld\":",key[j]);
+		trace_value(o,&kid[j],itf);
+		if(v->tag==T_FUN && itf) fputc(']',o);
 	}
-	fprintf(o,itf?"]}":"}");
+	if(v->tag==T_SEQ) fputc(']',o);
+	else fputs(v->tag==T_FUN && itf ? "]}" : "}",o);
+}
+
+/* The type of Ty node ti as Apalache writes it in an ITF file's
+ * varTypes: Int, (Int -> T), Seq(T), and a record as { a: T, b: T },
+ * its fields sorted by name, into buf.  Returns buf. */
+static const char *ty_itf(int ti, char *buf, size_t cap){
+	const Ty *T=&S.ty[ti]; char sub[1024];
+	if(T->kind==TY_DOM) snprintf(buf,cap,"Int");
+	else if(T->kind==TY_FUN) snprintf(buf,cap,"(Int -> %s)",ty_itf(T->sub,sub,sizeof sub));
+	else if(T->kind==TY_SEQ) snprintf(buf,cap,"Seq(%s)",ty_itf(T->sub,sub,sizeof sub));
+	else {
+		long fid[SP_MAXFLD]; int ord[SP_MAXFLD];
+		for(int j=0;j<T->nf;j++) fid[j]=T->fid[j];
+		fld_order(fid,T->nf,ord);
+		size_t n=(size_t)snprintf(buf,cap,"{ ");
+		for(int j=0;j<T->nf && n<cap;j++)
+			n+=(size_t)snprintf(buf+n,cap-n,"%s%s: %s",j?", ":"",S.fld[fid[ord[j]]],ty_itf(T->fty[ord[j]],sub,sizeof sub));
+		if(n<cap) snprintf(buf+n,cap-n," }");
+	}
+	return buf;
 }
 
 /* Write the counterexample that ends at `end` to `file`, one state per
@@ -926,6 +1631,7 @@ static void trace_value(FILE *o, const Value *v, int itf){
  * also names the action that led to it, which Apalache leaves out.
  * Returns 0, or -1 if the file could not be written. */
 static int spec_write_trace(const char *file, const char *fmt, const QN *end){
+	char tb[1024];
 	int itf=!strcmp(fmt,"itf"), n=0;
 	for(const QN *x=end; x; x=x->prev) n++;
 	const QN **path=malloc((size_t)n*sizeof *path);
@@ -935,7 +1641,7 @@ static int spec_write_trace(const char *file, const char *fmt, const QN *end){
 	if(itf){
 		fprintf(o,"{\"#meta\":{\"format\":\"ITF\",\"format-description\":\"https://apalache-mc.org/docs/adr/015adr-trace.html\","
 			"\"description\":\"Created by cmc --spec from %s\",\"varTypes\":{",S.modname);
-		for(int vi=0;vi<S.nvar;vi++) fprintf(o,"%s\"%s\":\"%s\"",vi?",":"",S.var[vi].name,S.var[vi].is_fun?"(Int -> Int)":"Int");
+		for(int vi=0;vi<S.nvar;vi++) fprintf(o,"%s\"%s\":\"%s\"",vi?",":"",S.var[vi].name,ty_itf(S.var[vi].ty,tb,sizeof tb));
 		fprintf(o,"}},\n\"params\":[");
 		for(int c=0;c<S.ncst;c++) fprintf(o,"%s\"%s\"",c?",":"",S.cst[c].name);
 		fprintf(o,"],\n\"vars\":[");
@@ -945,6 +1651,7 @@ static int spec_write_trace(const char *file, const char *fmt, const QN *end){
 	else fprintf(o,"[\n");
 	for(i=0;i<n;i++){
 		const QN *x=path[i];
+		Value vv[SP_MAXVAR]; qn_views(x,vv);
 		if(itf){
 			fprintf(o,"{\"#meta\":{\"index\":%d",i);
 			if(i) fprintf(o,",\"action\":\"%s\"",x->step);
@@ -955,7 +1662,7 @@ static int spec_write_trace(const char *file, const char *fmt, const QN *end){
 		else fprintf(o,"{\"index\":0,\"action\":null,\"vars\":{");
 		for(int vi=0;vi<S.nvar;vi++){
 			fprintf(o,"%s\"%s\":",vi||itf?",":"",S.var[vi].name);
-			trace_value(o,&x->st.v[vi],itf);
+			trace_value(o,&vv[vi],itf);
 		}
 		fprintf(o,"%s%s\n",itf?"}":"}}",i+1<n?",":"");
 	}
@@ -970,16 +1677,35 @@ static int spec_write_trace(const char *file, const char *fmt, const QN *end){
  * constraint over the pair, with x' read from `to`.  Sets *in; returns
  * 0, or -1 on an evaluation error (message in err). */
 static int sp_in_model(const State *from, const State *to, int *in, char *err, size_t errcap){
-	Env env; memset(&env,0,sizeof env);
+	Value cur[SP_MAXVAR], nxt[SP_MAXVAR]; st_views(to,nxt);
+	Env env=env_new(nxt); size_t m=ar_mark(); int rc=0;
 	*in=1;
-	env.var=to->v;
-	for(int i=0;i<S.ncon && *in;i++)
-		if(!sp_eval_bool(S.con[i].expr,&env,in,"a constraint",err,errcap)) return -1;
-	if(!from) return 0;
-	env.var=from->v; env.nxt=to->v;
-	for(int i=0;i<S.nacon && *in;i++)
-		if(!sp_eval_bool(S.acon[i].expr,&env,in,"an action constraint",err,errcap)) return -1;
-	return 0;
+	for(int i=0;i<S.ncon && *in && !rc;i++)
+		if(!sp_eval_bool(S.con[i].expr,&env,in,"a constraint",err,errcap)) rc=-1;
+	if(from){
+		st_views(from,cur); env.var=cur; env.nxt=nxt;
+		for(int i=0;i<S.nacon && *in && !rc;i++)
+			if(!sp_eval_bool(S.acon[i].expr,&env,in,"an action constraint",err,errcap)) rc=-1;
+	}
+	ar_release(m);
+	return rc;
+}
+
+/* print v on stdout: an integer, TRUE or FALSE, {..}, a function as
+ * [k:v,...], a record as [a |-> v, ...], a sequence as <<..>> */
+static void val_print(const Value *v){
+	if(v->tag==T_INT){ printf("%ld",v->i); return; }
+	if(v->tag==T_BOOL){ printf("%s",v->i?"TRUE":"FALSE"); return; }
+	if(v->tag==T_SET){ printf("{"); for(int j=0;j<val_n(v);j++) printf("%s%ld",j?", ":"",set_e(v,j)); printf("}"); return; }
+	long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX]; int n=comp_kids(v,key,kid);
+	printf(v->tag==T_SEQ?"<<":"[");
+	for(int j=0;j<n;j++){
+		if(v->tag==T_FUN) printf("%s%ld:",j?",":"",key[j]);
+		else if(v->tag==T_REC) printf("%s%s |-> ",j?", ":"",S.fld[key[j]]);
+		else if(j) printf(", ");
+		val_print(&kid[j]);
+	}
+	printf(v->tag==T_SEQ?">>":"]");
 }
 
 /* Where cmc_spec_main() was asked to write a counterexample, if
@@ -999,9 +1725,8 @@ static int print_trace(const QN *cur){
 	for(int i=cn-2;i>=0;i--) printf("    %d. %s\n", cn-1-i, steps[i]);
 	free(steps);
 	printf("  state:");
-	for(int vi=0;vi<S.nvar;vi++){ const Value *v=&cur->st.v[vi]; printf(" %s=",S.var[vi].name);
-		if(v->tag==T_FUN){ printf("["); for(int j=0;j<v->n;j++) printf("%s%ld:%ld",j?",":"",v->k[j],v->v[j]); printf("]"); }
-		else printf("%ld",v->i); }
+	Value vv[SP_MAXVAR]; qn_views(cur,vv);
+	for(int vi=0;vi<S.nvar;vi++){ printf(" %s=",S.var[vi].name); val_print(&vv[vi]); }
 	printf("\n");
 	if(!g_trace_out) return 0;
 	if(spec_write_trace(g_trace_out,g_trace_fmt,cur)){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
@@ -1013,7 +1738,8 @@ static int print_trace(const QN *cur){
  * a violation.  Returns 0 if they hold, else the exit status (1 or 3). */
 static int check_new(const QN *x){
 	char err[256];
-	int bad=sp_check(&x->st,err,sizeof err);
+	static State st; qn_state(x,&st);
+	int bad=sp_check(&st,err,sizeof err);
 	if(bad==-2){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); return 3; }
 	if(bad<0) return 0;
 	printf("Error: Invariant %s is violated.\n", S.inv[bad].name);
@@ -1052,7 +1778,8 @@ static int check_new(const QN *x){
 #define LV_MAX 200000
 #define LV_SUCC 4096
 static struct {
-	State *st; int n, cap;			/* states by index; 0 is init */
+	long *pool; size_t pused, pcap;		/* the states' words, back to back */
+	size_t *off; int *nw; int n, cap;	/* state i: nw[i] words at pool+off[i]; 0 is init */
 	int *head;				/* first out-edge of each state, -1 none */
 	int *to, *act, *next; int ne, ecap;	/* out-edges, as linked lists */
 	int *rhead, *rsrc;			/* in-edges, CSR: rsrc[rhead[v] .. rhead[v+1]) */
@@ -1061,27 +1788,36 @@ static struct {
 } lv;
 
 static void lv_free(void){
-	free(lv.st); free(lv.head); free(lv.to); free(lv.act); free(lv.next);
+	free(lv.pool); free(lv.off); free(lv.nw); free(lv.head); free(lv.to); free(lv.act); free(lv.next);
 	free(lv.rhead); free(lv.rsrc); free(lv.en); free(lv.slot);
 	memset(&lv,0,sizeof lv);
 }
 
 /* the index of state s, adding it if new (*added says which).  Lookup
  * compares states exactly, so a hash collision cannot merge two. */
+static void lv_get(int i, State *st){ st->nw=lv.nw[i]; memcpy(st->w,lv.pool+lv.off[i],(size_t)lv.nw[i]*sizeof st->w[0]); }
 static int lv_find_or_add(const State *s, int *added, char *err, size_t errcap){
 	size_t m=lv.mcap-1, i=(size_t)state_fp(s)&m;
 	while(lv.slot[i]!=-1){
-		if(state_eq(&lv.st[lv.slot[i]],s)){ *added=0; return lv.slot[i]; }
+		int j=lv.slot[i];
+		if(lv.nw[j]==s->nw && !memcmp(lv.pool+lv.off[j],s->w,(size_t)s->nw*sizeof s->w[0])){ *added=0; return j; }
 		i=(i+1)&m;
 	}
 	if(lv.n>=LV_MAX){ snprintf(err,errcap,"more than %d states",LV_MAX); return -1; }
 	if(lv.n==lv.cap){
 		int nc=lv.cap?lv.cap*2:1024; if(nc>LV_MAX) nc=LV_MAX;
-		State *ns=realloc(lv.st,sizeof(State)*(size_t)nc); if(!ns) goto oom; lv.st=ns;
+		size_t *no=realloc(lv.off,sizeof(size_t)*(size_t)nc); if(!no) goto oom; lv.off=no;
+		int *nn=realloc(lv.nw,sizeof(int)*(size_t)nc); if(!nn) goto oom; lv.nw=nn;
 		int *nh=realloc(lv.head,sizeof(int)*(size_t)nc); if(!nh) goto oom; lv.head=nh;
 		lv.cap=nc;
 	}
-	lv.st[lv.n]=*s; lv.head[lv.n]=-1; lv.slot[i]=lv.n; *added=1;
+	if(lv.pused+(size_t)s->nw>lv.pcap){
+		size_t nc=lv.pcap?lv.pcap*2:(size_t)1<<16; while(lv.pused+(size_t)s->nw>nc) nc*=2;
+		long *np=realloc(lv.pool,nc*sizeof *np); if(!np) goto oom; lv.pool=np; lv.pcap=nc;
+	}
+	memcpy(lv.pool+lv.pused,s->w,(size_t)s->nw*sizeof s->w[0]);
+	lv.off[lv.n]=lv.pused; lv.nw[lv.n]=s->nw; lv.pused+=(size_t)s->nw;
+	lv.head[lv.n]=-1; lv.slot[i]=lv.n; *added=1;
 	return lv.n++;
 oom:	snprintf(err,errcap,"out of memory"); return -1;
 }
@@ -1111,10 +1847,10 @@ static int lv_build(const State *init, char *err, size_t errcap){
 	int added, rc=0;
 	if(lv_find_or_add(init,&added,err,errcap)<0) rc=-1;
 	for(int si=0; si<lv.n && rc==0; si++){
-		State cur=lv.st[si];	/* lv.st may move as states are added */
+		static State cur; lv_get(si,&cur);
 		for(int a=0; a<S.nact && rc==0; a++){
 			if(!act_active(&S.act[a])) continue;
-			int ns=0, brc=0; Env env; memset(&env,0,sizeof env); env.np=0;
+			int ns=0, brc=0; Env env=env_new(NULL);
 			bind_params(&S.act[a],&env,0,&cur,succ,&ns,LV_SUCC,err,errcap,&brc);
 			if(brc<0){ rc=-1; break; }
 			for(int k=0;k<ns;k++){
@@ -1209,8 +1945,12 @@ out:	free(comp); free(queue); free(dis); free(tak); free(fair);
 /* evaluate expr at state u into *holds; -1 on an evaluation error,
  * which fails the check rather than reading as FALSE */
 static int lv_holds(const char *expr, int u, int *holds, char *err, size_t errcap){
-	Env env; memset(&env,0,sizeof env); env.var=lv.st[u].v; env.np=0;
-	return sp_eval_bool(expr,&env,holds,"a property",err,errcap) ? 0 : -1;
+	static State st; lv_get(u,&st);
+	Value vv[SP_MAXVAR]; st_views(&st,vv);
+	Env env=env_new(vv); size_t m=ar_mark();
+	int ok=sp_eval_bool(expr,&env,holds,"a property",err,errcap);
+	ar_release(m);
+	return ok ? 0 : -1;
 }
 
 /* check all liveness properties; returns index+1 of a violated property
@@ -1269,9 +2009,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	size_t qcap = 1024, qh = 0, qt = 0;
 	QN **q = malloc(qcap * sizeof *q);
 	if (!q) { fprintf(stderr, "cmc: out of memory\n"); return 1; }
-	QN *root = calloc(1, sizeof *root);
-	if(!root){ fprintf(stderr, "cmc: out of memory\n"); free(q); return 1; }
-	root->st=init; root->prev=NULL; root->step[0]=0; root->depth=0;
+	QN *root = qn_new(&init);
 	size_t distinct=0, generated=1; int maxdepth=0;
 	int SUCCAP = 4096; State *succ = malloc((size_t)SUCCAP * sizeof *succ);
 	if (!succ) { fprintf(stderr, "cmc: out of memory\n"); free(q); free(root); return 1; }
@@ -1290,24 +2028,23 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	else free(root);
 	while(qh<qt && !ret){
 		QN *cur=q[qh];
+		static State cst; qn_state(cur,&cst);
 		if(cur->depth>maxdepth) maxdepth=cur->depth;
 		/* A state with no successor at all deadlocks.  A step that changes
 		 * nothing is a successor, and so is one outside the model. */
 		int nsucc=0;
 		for(int ai=0; ai<S.nact && !ret; ai++){
 			if(!act_active(&S.act[ai])) continue;
-			int ns=0; int rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
-			bind_params(&S.act[ai],&env,0,&cur->st,succ,&ns,SUCCAP,err,sizeof err,&rc);
+			int ns=0; int rc=0; Env env=env_new(NULL);
+			bind_params(&S.act[ai],&env,0,&cst,succ,&ns,SUCCAP,err,sizeof err,&rc);
 			if(rc<0){ fprintf(stderr,"cmc: action %s: %s\n",S.act[ai].name,err); ret=3; break; }
 			nsucc+=ns;
 			for(int k=0;k<ns && !ret;k++){
 				generated++;
-				if(sp_in_model(&cur->st,&succ[k],&in,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); ret=3; break; }
+				if(sp_in_model(&cst,&succ[k],&in,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); ret=3; break; }
 				if(in && !seen_insert(&succ[k])) continue;
 				if(seen_n>=SP_MAXSTATES){ printf("INCOMPLETE: more than %d states\n",SP_MAXSTATES); ret=2; break; }
-				QN *nn=calloc(1,sizeof *nn);
-				if(!nn){ fprintf(stderr,"cmc: out of memory\n"); ret=1; break; }
-				nn->st=succ[k]; nn->prev=cur; snprintf(nn->step,sizeof nn->step,"%s",S.act[ai].name); nn->depth=cur->depth+1;
+				QN *nn=qn_new(&succ[k]); nn->prev=cur; snprintf(nn->step,sizeof nn->step,"%s",S.act[ai].name); nn->depth=cur->depth+1;
 				ret=check_new(nn);
 				if(!in || ret){ free(nn); continue; }
 				if(qt>=qcap){ qcap*=2; QN **nq=realloc(q,qcap*sizeof *q); if(!nq){ fprintf(stderr,"cmc: out of memory\n"); free(nn); ret=1; break; } q=nq; }
@@ -1361,6 +2098,15 @@ int cmc_refine_load_spec(const char *path, char **defs, int ndefs){
 	return 0;
 }
 
+/* the variable a binding binds: 1 a function of integers (bound entry
+ * by entry), 0 an integer, -1 a type a binding cannot build */
+static int bind_shape(const Var *V){
+	const Ty *T=&S.ty[V->ty];
+	if(T->kind==TY_DOM) return 0;
+	if(T->kind==TY_FUN && S.ty[T->sub].kind==TY_DOM) return 1;
+	return -1;
+}
+
 /* The binding file: [fields] name = byte offset, then [map] VAR = "EXPR"
  * or VAR[IDX] = "EXPR" per abstract variable, after optional spec= and
  * binary= header lines.  Every line is read or refused: a second binding
@@ -1403,8 +2149,9 @@ int cmc_refine_load_bind(const char *path, char *err, size_t errcap){
 			int vi=var_index(B_map[B_nmap].var);
 			if(vi<0) BAD("line %d: the spec has no variable %s",ln,B_map[B_nmap].var);
 			for(int m=0;m<B_nmap;m++) if(!strcmp(B_map[m].var,B_map[B_nmap].var)) BAD("line %d: %s is bound twice",ln,B_map[B_nmap].var);
-			if(S.var[vi].is_fun && !B_map[B_nmap].idx[0]) BAD("line %d: %s is a function; bind it as %s[i] = \"...\"",ln,B_map[B_nmap].var,B_map[B_nmap].var);
-			if(!S.var[vi].is_fun && B_map[B_nmap].idx[0]) BAD("line %d: %s is not a function; bind it as %s = \"...\"",ln,B_map[B_nmap].var,B_map[B_nmap].var);
+			if(bind_shape(&S.var[vi])<0) BAD("line %d: %s is a record or sequence, or a function of them, which a binding cannot build",ln,B_map[B_nmap].var);
+			if(bind_shape(&S.var[vi])==1 && !B_map[B_nmap].idx[0]) BAD("line %d: %s is a function; bind it as %s[i] = \"...\"",ln,B_map[B_nmap].var,B_map[B_nmap].var);
+			if(bind_shape(&S.var[vi])==0 && B_map[B_nmap].idx[0]) BAD("line %d: %s is not a function; bind it as %s = \"...\"",ln,B_map[B_nmap].var,B_map[B_nmap].var);
 			B_nmap++;
 		}
 	}
@@ -1415,40 +2162,36 @@ int cmc_refine_load_bind(const char *path, char *err, size_t errcap){
 	return 0;
 }
 
-/* evaluate the domain of a function variable (its key set) from its
- * declared range-domain string, using constants only */
-static int var_domain(const Var *V, Value *dom, char *err, size_t errcap){
-	Env env; memset(&env,0,sizeof env); Value none[SP_MAXVAR]; env.var=none; env.np=0;
-	return sp_eval_set(V->fdom,&env,dom,err,errcap)?0:-1;
-}
-
 /* build the abstract state from the implementation's observables via the
  * binding (the common core of C1 and C2).  Returns 0, or -1 with a
  * message in err on an evaluation error. */
 static int build_abstract(const CmcObs *obs, State *out, char *err, size_t errcap){
-	State st; for(int i=0;i<S.nvar;i++) st.v[i]=vint(0);
+	Value vv[SP_MAXVAR]; for(int i=0;i<S.nvar;i++) vv[i]=vint(0);
+	size_t mark=ar_mark(); int rc=-1;
 	for(int m=0;m<B_nmap;m++){
 		int vi=var_index(B_map[m].var);	/* checked by cmc_refine_load_bind() */
 		Var *V=&S.var[vi];
-		if(V->is_fun){
-			Value dom; if(var_domain(V,&dom,err,errcap)){ return -1; }
-			Value fn={0}; fn.tag=T_FUN;
-			for(int e=0;e<dom.n && fn.n<SP_MAPMAX;e++){
-				Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=1;
-				snprintf(env.pname[0],SP_NAME,"%s",B_map[m].idx); env.pval[0]=dom.e[e];
-				Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -1;
+		if(bind_shape(V)==1){
+			Env denv=env_new(NULL); Value dom;
+			if(!sp_eval_set(S.ty[V->ty].dom,&denv,&dom,err,errcap)) goto out;
+			long key[SP_MAPMAX]; Value kid[SP_MAPMAX]; int n=0;
+			for(int e=0;e<val_n(&dom) && n<SP_MAPMAX;e++){
+				Env env=env_new(vv); env.obs=obs; env.np=1;
+				snprintf(env.pname[0],SP_NAME,"%s",B_map[m].idx); env.pval[0]=set_e(&dom,e);
+				Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) goto out;
 				/* an observed predicate maps to 0 or 1, the spec's encoding
 				 * of a flag; a set or function cannot be one entry */
-				if(r.tag!=T_INT && r.tag!=T_BOOL){ snprintf(err,errcap,"binding %s[%s]: expected an integer, not %s",B_map[m].var,B_map[m].idx,tag_name(r.tag)); return -1; }
-				fn.k[fn.n]=dom.e[e]; fn.v[fn.n]=r.i; fn.n++;
+				if(r.tag!=T_INT && r.tag!=T_BOOL){ snprintf(err,errcap,"binding %s[%s]: expected an integer, not %s",B_map[m].var,B_map[m].idx,tag_name(r.tag)); goto out; }
+				key[n]=set_e(&dom,e); kid[n]=vint(r.i); n++;
 			}
-			st.v[vi]=fn;
+			Pst ps={0}; ps.ok=1;
+			vv[vi]=mk_comp(&ps,T_FUN,n,key,kid);
+			if(!ps.ok){ snprintf(err,errcap,"%s",ps.err); goto out; }
 		} else {
-			Env env; memset(&env,0,sizeof env); env.var=st.v; env.obs=obs; env.np=0;
-			Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) return -1;
-			if(r.tag!=T_INT && r.tag!=T_BOOL){ snprintf(err,errcap,"binding %s: expected an integer, not %s",B_map[m].var,tag_name(r.tag)); return -1; }
-			r.tag=T_INT;	/* a flag, as in a function entry */
-			st.v[vi]=r;
+			Env env=env_new(vv); env.obs=obs;
+			Value r; if(!sp_eval(B_map[m].expr,&env,&r,err,errcap)) goto out;
+			if(r.tag!=T_INT && r.tag!=T_BOOL){ snprintf(err,errcap,"binding %s: expected an integer, not %s",B_map[m].var,tag_name(r.tag)); goto out; }
+			vv[vi]=vint(r.i);	/* a flag, as in a function entry */
 		}
 	}
 	/* A bound variable outside its declared domain is no state of the
@@ -1458,9 +2201,11 @@ static int build_abstract(const CmcObs *obs, State *out, char *err, size_t errca
 	 * state-level caller reads only an invariant index or -2. */
 	for(int m=0;m<B_nmap;m++){
 		int vi=var_index(B_map[m].var); char derr[200];
-		if(var_in_domain(vi,&st.v[vi],derr,sizeof derr)){ snprintf(err,errcap,"the observed state is outside the spec: %s",derr); return -1; }
+		if(var_in_domain(vi,&vv[vi],derr,sizeof derr)){ snprintf(err,errcap,"the observed state is outside the spec: %s",derr); goto out; }
 	}
-	*out=st; return 0;
+	rc=st_pack(out,vv,err,errcap);
+out:	ar_release(mark);
+	return rc;
 }
 
 int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap){
@@ -1514,7 +2259,7 @@ static int abstract_step_exists(const State *from, const State *to, char *err, s
 	int found=0;
 	for(int ai=0; ai<S.nact && !found; ai++){
 		if(!act_active(&S.act[ai])) continue;
-		int ns=0, rc=0; Env env; memset(&env,0,sizeof env); env.np=0;
+		int ns=0, rc=0; Env env=env_new(NULL);
 		bind_params(&S.act[ai],&env,0,from,succ,&ns,C2_SUCC,err,errcap,&rc);
 		if(rc<0){ free(succ); return -2; }
 		for(int k=0;k<ns;k++) if(state_eq(&succ[k],to)){ found=1; break; }
@@ -1596,6 +2341,7 @@ static void tla_expr_n(const char *e, long n, FILE *o){
 		if(tla_word(&p,"in",o,"\\in")) continue;
 		if(tla_word(&p,"mod",o,"%")) continue;
 		if(tla_word(&p,"except",o,"EXCEPT")) continue;
+		if(!strncmp(p,"|->",3)){ fputs("|->",o); p+=3; continue; }
 		if(!strncmp(p,"->",2)){ fputs("|->",o); p+=2; continue; }
 		if(*p=='/' && p[1]!='\\'){ fputs("\\div ",o); p++; continue; }
 		if(!strncmp(p,"==",2)){ fputc('=',o); p+=2; continue; }
@@ -1607,24 +2353,42 @@ static void tla_expr(const char *e, FILE *o){ tla_expr_n(e,-1,o); }
 
 /* some .cml forms need structural, not token, rewriting:
  *   [i in S -> E]         -> [i \in S |-> E]   (handled: in-> \in, -> |->)
- *   [f except [k]=v]      -> [f EXCEPT ![k]=v] (except-> EXCEPT; ! added below)
- * We post-process: insert '!' before a '[' that follows "EXCEPT ".        */
+ *   [f except [k]=v, .a=w] -> [f EXCEPT ![k]=v, !.a=w]
+ * The second pass gives each except clause its `!`: after EXCEPT and
+ * after each comma at that except's own bracket depth, unless the
+ * clause already starts with one.  <<..>> counts as a bracket, so the
+ * comma of a sequence literal inside a clause is not a clause break. */
 static void tla_expr_fixup(const char *e, FILE *o){
 	/* first pass into a buffer */
 	char buf[4096]; FILE *m=fmemopen(buf,sizeof buf,"w"); if(!m){ tla_expr(e,o); return; }
 	tla_expr(e,m); fclose(m);
-	/* insert ! after EXCEPT before each top [k] */
+	int depth=0, ex[16], nex=0;
 	const char *p=buf;
 	while(*p){
-		if(!strncmp(p,"EXCEPT ",7)){ fputs("EXCEPT ",o); p+=7;
-			/* the following [k] groups each get a ! */
-			while(*p=='['){ fputs("![",o); p++; int d=1; while(*p&&d){ if(*p=='[')d++; if(*p==']')d--; if(d==0){ fputc(']',o); p++; break; } fputc(*p++,o);} 
-				while(*p&&isspace((unsigned char)*p)) fputc(*p++,o);
-				if(*p=='='){ fputc(*p++,o); /* copy value until , or ] */ while(*p&&*p!=','&&*p!=']'){ fputc(*p++,o);} if(*p==','){ fputc(*p++,o); while(*p&&isspace((unsigned char)*p))fputc(*p++,o);} }
-			}
-			continue; }
+		int clause=0;
+		if(!strncmp(p,"EXCEPT ",7)){ fputs("EXCEPT",o); p+=6; if(nex<16) ex[nex++]=depth; clause=1; }
+		else if(*p==',' && nex && ex[nex-1]==depth){ fputc(*p++,o); clause=1; }
+		if(clause){
+			while(*p && isspace((unsigned char)*p)) fputc(*p++,o);
+			if(*p!='!') fputc('!',o);
+			continue;
+		}
+		if(!strncmp(p,"<<",2) || !strncmp(p,">>",2)){ depth+=*p=='<'?1:-1; fputc(*p++,o); fputc(*p++,o); continue; }
+		if(*p=='['||*p=='('||*p=='{') depth++;
+		if(*p==']'||*p==')'||*p=='}'){ depth--; if(nex && ex[nex-1]>depth) nex--; }
 		fputc(*p++,o);
 	}
+}
+
+/* the Apalache type of Ty node ti: Int, Int -> T, { a: T, ... }, Seq(T) */
+static void ty_tla(int ti, FILE *o){
+	const Ty *T=&S.ty[ti];
+	if(T->kind==TY_DOM){ fputs("Int",o); return; }
+	if(T->kind==TY_FUN){ fputs("Int -> ",o); int b=S.ty[T->sub].kind==TY_FUN; if(b) fputc('(',o); ty_tla(T->sub,o); if(b) fputc(')',o); return; }
+	if(T->kind==TY_SEQ){ fputs("Seq(",o); ty_tla(T->sub,o); fputc(')',o); return; }
+	fputs("{ ",o);
+	for(int j=0;j<T->nf;j++){ fprintf(o,"%s%s: ",j?", ":"",S.fld[T->fid[j]]); ty_tla(T->fty[j],o); }
+	fputs(" }",o);
 }
 
 int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
@@ -1643,18 +2407,24 @@ int cmc_emit_tla(const char *path, char **defs, int ndefs, int deadlock_off){
 		fprintf(o,"\\* Its CONSTRAINT and ACTION_CONSTRAINT operators bound TLC's search\n");
 		fprintf(o,"\\* (cmc --emit-cfg names them); Apalache does not apply them.\n");
 	}
-	fprintf(o,"EXTENDS Naturals, FiniteSets\n\n");
+	fprintf(o,"EXTENDS Naturals, FiniteSets, Sequences\n\n");
 	/* constants, each with an Apalache @type (all our constants are Int) */
 	if(S.ncst){ fprintf(o,"CONSTANTS\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  \\* @type: Int;\n  %s%s\n",S.cst[i].name,i+1<S.ncst?",":""); }
 	/* variables, each with an Apalache @type: a scalar var is Int, a
 	 * function var [lo..hi -> lo..hi] is Int -> Int */
-	fprintf(o,"VARIABLES\n"); for(int i=0;i<S.nvar;i++) fprintf(o,"  \\* @type: %s;\n  %s%s\n",S.var[i].is_fun?"Int -> Int":"Int",S.var[i].name,i+1<S.nvar?",":"");
+	fprintf(o,"VARIABLES\n"); for(int i=0;i<S.nvar;i++){ fprintf(o,"  \\* @type: "); ty_tla(S.var[i].ty,o); fprintf(o,";\n  %s%s\n",S.var[i].name,i+1<S.nvar?",":""); }
 	/* vars tuple, annotated so Apalache reads <<...>> as a tuple not a Seq */
-	fprintf(o,"\\* @type: <<"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s%s",i?", ":"",S.var[i].is_fun?"Int -> Int":"Int"); fprintf(o,">>;\n");
+	fprintf(o,"\\* @type: <<"); for(int i=0;i<S.nvar;i++){ fprintf(o,"%s",i?", ":""); ty_tla(S.var[i].ty,o); } fprintf(o,">>;\n");
 	fprintf(o,"vars == <<"); for(int i=0;i<S.nvar;i++) fprintf(o,"%s%s",i?", ":"",S.var[i].name); fprintf(o,">>\n\n");
 	/* CInit binds the constants to their .cml values, so Apalache needs no
 	 * .cfg (TLC still reads the .cfg) */
 	if(S.ncst){ fprintf(o,"CInit ==\n"); for(int i=0;i<S.ncst;i++) fprintf(o,"  %s %s = %ld\n",i?"/\\":"/\\",S.cst[i].name,S.cst[i].val); fprintf(o,"\n"); }
+	/* each def as an operator, in declaration order (a def uses only the
+	 * ones before it, as TLA+ requires) */
+	for(int d=0;d<S.ndefs;d++){ const Def *D=&S.def[d];
+		fprintf(o,"%s",D->name);
+		for(int i=0;i<D->np;i++) fprintf(o,"%s%s",i?", ":"(",D->pname[i]);
+		fprintf(o,"%s ==\n  ",D->np?")":""); tla_expr_fixup(D->body,o); fprintf(o,"\n\n"); }
 	/* Init */
 	fprintf(o,"Init ==\n  "); tla_expr_fixup(S.init,o); fprintf(o,"\n\n");
 	/* each action as a formula: \E params \in dom : guard /\ assignments /\ UNCHANGED rest */

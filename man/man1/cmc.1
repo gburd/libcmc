@@ -154,6 +154,17 @@ and
 .Cm or
 evaluate left to right and short-circuit, so a guard can protect a
 division or a function application.
+Variables are integers in a set, functions on integer keys
+.Pq Li [K -> T] ,
+records
+.Pq Li [a : T, b : T]
+and sequences of at most N elements
+.Pq Li Seq(T, N) ;
+a value outside its variable's type, a sequence past its bound
+included, is a model error (exit 3), never cut.
+.Li def NAME(p, ...) = EXPR
+declares a named operator, expanded where it is used; a def may use
+only the defs before it, so recursion is refused.
 A reachable state in which no action is enabled is a deadlock: it is
 reported with the shortest trace, in TLC's words
 .Pq Dq Error: Deadlock reached. ,
@@ -246,6 +257,10 @@ Translate the abstract specification
 .Pq a Pa .cml No module
 to TLA+ on standard output, so it can be checked with TLC or Apalache
 and proved with TLAPS.
+Records, sequences and defs become their TLA+ forms, and each variable
+carries an Apalache
+.Li @type
+annotation.
 Name the output after the module
 .Pq Pa NAME.tla
 so TLC accepts it.

@@ -61,6 +61,19 @@ expect "raft: election safety holds"          0 "38 distinct states found" --spe
 expect "raft: depth matches TLC (4)"          0 "complete state graph search is 4" --spec "$HERE/examples/spec/raft.cml"
 expect "raft: the revote bug elects two leaders" 1 "election_safety is violated" --spec "$HERE/examples/spec/raft.cml" --define BUG
 
+# Log replication (Raft's AppendEntries core) over records, bounded
+# sequences and defs.  Counts, depth and the 5-action trace match
+# single-worker TLC on the emitted module and on the hand-written
+# logrep.tla; the bug drops the follower's index check.
+expect "logrep: durable holds"                0 "4439 distinct states found" --spec "$HERE/examples/spec/logrep.cml"
+expect "logrep: depth matches TLC (16)"       0 "complete state graph search is 16" --spec "$HERE/examples/spec/logrep.cml"
+expect "logrep: no index check loses a commit" 1 "durable is violated" --spec "$HERE/examples/spec/logrep.cml" --define BUG
+expect "logrep: shortest trace is 5 actions"  1 "is (5 actions)" --spec "$HERE/examples/spec/logrep.cml" --define BUG
+expect "logrep: the trace shows sequences in functions" 1 "log=\[0:<<0, 1>>,1:<<1>>,2:<<>>\]" --spec "$HERE/examples/spec/logrep.cml" --define BUG
+# a record field, a sequence element or a length that differs makes a
+# different state (TLC: the same 144 states, depth 7)
+expect "states differing in one field or element are distinct" 0 "144 distinct states found" --spec "$HERE/test/spec/distinct.cml"
+
 # Humming Consensus (Machi; generic agreement over write-once epoch
 # register stores): Agreement, at most one value chosen per epoch.
 # Counts and depth match single-worker TLC; the overwrite bug breaks
@@ -243,6 +256,20 @@ expect "emit-tla: no constants and no actions" 0 "^  FALSE$" --emit-tla "$OUT/ba
 # every operator inside a count body is translated (emit_gate runs TLC on it)
 expect "countops: the operators in a count body"   0 "5 distinct states found" --spec "$HERE/test/spec/countops.cml"
 expect "emit-tla: not, in, some and all in a count body" 0 "~ (j .in {})" --emit-tla "$HERE/test/spec/countops.cml"
+# records, sequences and defs reach TLA+ in their own forms (emit_gate
+# runs TLC on logrep, distinct and symrec)
+lr() { expect "emit-tla: $1" 0 "$2" --emit-tla "$HERE/examples/spec/logrep.cml"; }
+lr "a function of sequences is typed"     "@type: Int -> Seq(Int);"
+lr "a sequence of records is typed"       "@type: Int -> Seq({ idx: Int, val: Int });"
+lr "the module extends Sequences"         "EXTENDS Naturals, FiniteSets, Sequences"
+lr "a def with parameters"                "^Prefix(p, q) ==\$"
+lr "an except path gets its !"            "EXCEPT !\[f\] = Append(@, \[idx |-> i, val |-> log\[0\]\[i\]\])\]"
+expect "emit-tla: a def without parameters" 0 "^Server ==\$" --emit-tla "$HERE/examples/spec/raft.cml"
+expect "emit-tla: a function of records is typed" 0 "@type: Int -> { used: Int, votes: Int };" --emit-tla "$HERE/examples/spec/raft.cml"
+expect "emit-tla: two paths in one except" 0 "EXCEPT !\[s\].used = 1, !\[c\].votes = @ + 1\]" --emit-tla "$HERE/examples/spec/raft.cml"
+printf 'module nest\nvar f : [0 .. 1 -> [0 .. 1 -> 0 .. 1]]\ninit f == [i in 0 .. 1 -> [j in 0 .. 1 -> 0]]\ninvariant ok: f[1][0] == 0\n' > "$OUT/nest.cml"
+expect "nest: a function of functions" 0 "1 distinct states found" --spec "$OUT/nest.cml" --no-deadlock
+expect "emit-tla: a nested function is typed" 0 "@type: Int -> (Int -> Int);" --emit-tla "$OUT/nest.cml"
 expect "emit-tla: a well-formed module header" 0 "MODULE paxos" --emit-tla "$HERE/examples/spec/paxos.cml"
 expect "emit-tla: translates operators to TLA+" 0 "Cardinality" --emit-tla "$HERE/examples/spec/paxos.cml"
 
@@ -274,7 +301,7 @@ typed "an order on a set"                 "expected an integer" "x < {1}"
 typed "a set of sets"                     "expected an integer" "{{1}} == {{1}}"
 typed "a range bounded by a set"          "expected an integer" "x in 0 .. {1}"
 typed "membership of a function"          "expected an integer" "f in {0}"
-typed "a function of booleans"            "expected an integer" "[i in 0 .. 1 -> TRUE] == f"
+typed "a function of booleans"            "compares a boolean with an integer" "[i in 0 .. 1 -> TRUE] == f"
 typed "a function applied to a set"       "expected an integer" "f[{0}] == 0"
 typed "== between a function and a set"   "compares a function with a set" "f == {0}"
 typed "== between a boolean and an integer" "compares a boolean with an integer" "TRUE == 1"
@@ -292,7 +319,7 @@ typed "- by a boolean"          "expected an integer in -"   "1 - TRUE == 0"
 typed "an order on a boolean"   "expected an integer in >="  "TRUE >= 1"
 typed "a range from a boolean"  "expected an integer in .."  "x in TRUE .. 1"
 typed "a function key that is a set" "expected an integer in a function key" "[f except [{0}] = 1] == f"
-typed "a function value that is a set" "expected an integer in a function value" "[f except [0] = {1}] == f"
+typed "a function value that is a set" "compares a set with an integer" "[f except [0] = {1}] == f"
 typed "a literal over no set"   "expected a set"             "[i in x -> 0] == f"
 typed "a literal whose name shadows a var" "redeclares" "[x in 0 .. 1 -> 0] == f"
 typed "a broken operand of a range" "unknown identifier"     "x in y .. 1"
@@ -316,15 +343,15 @@ typed "a / with a broken divisor"   "unknown identifier"       "x / y == 0"
 typed "a mod with a broken divisor" "unknown identifier"       "x mod y == 0"
 typed "a function applied to a broken key" "unknown identifier" "f[y] == 0"
 typed "a literal body that fails"   "unknown identifier"       "[i in 0 .. 1 -> y] == f"
-typed "a literal body of a set"     "expected an integer in a function value" "[i in 0 .. 1 -> {i}] == f"
+typed "a literal body of a set"     "compares a set with an integer" "[i in 0 .. 1 -> {i}] == f"
 # each malformed form is refused with its reason
 typed "an unclosed (" "expected )" "(x == 0"
 typed "an unclosed [i in" "expected ]" "f == [i in 0 .. 1 -> 0"
 typed "a literal with no ->" "expected -> in function literal" "[i in 0 .. 1 : 0] == f"
-typed "[..] with neither in nor except" "expected 'in' or 'except'" "[f with [0] = 1] == f"
-typed "except on a constant" "except on a non-variable" "[g except [0] = 1] == f"
-typed "except on a scalar" "except on a variable that is not a function" "[x except [0] = 1] == f"
-typed "except with no [" "expected \\[ in except" "[f except 0 = 1] == f"
+typed "[..] with neither in nor except" "expected 'in', '|->' or 'except'" "[f with [0] = 1] == f"
+typed "except on a constant" "except on a value that is not a function" "[1 except [0] = 1] == f"
+typed "except on a scalar" "except on a value that is not a function" "[x except [0] = 1] == f"
+typed "except with no [" "expected \\[ or . in except" "[f except 0 = 1] == f"
 typed "except with no ]" "expected ]" "[f except [0 = 1] == f"
 typed "except with no =" "expected = in except" "[f except [0] 1] == f"
 typed "except with no closing ]" "expected ] to close except" "f == [f except [0] = 1"
@@ -332,7 +359,7 @@ typed "an unclosed {" "expected }" "{0} == {0, 1"
 typed "a set past its limit" "set too large" "{0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24} == {0}"
 typed "a range past its limit" "range too large" "x in 0 .. 24"
 typed "a literal past its limit" "function too large" "[i in 0 .. 12 -> 0] == f"
-typed "an except past its limit" "function too large" "[f except [2] = 0, [3] = 0, [4] = 0, [5] = 0, [6] = 0, [7] = 0, [8] = 0, [9] = 0, [10] = 0, [11] = 0, [12] = 0] == f"
+typed "an except outside the domain" "except outside the domain" "[f except [2] = 0, [3] = 0, [4] = 0, [5] = 0, [6] = 0, [7] = 0, [8] = 0, [9] = 0, [10] = 0, [11] = 0, [12] = 0] == f"
 typed "an unclosed application" "expected ] in application" "0 == f[0"
 typed "a scalar applied" "applied a non-function" "x[0] == 0"
 typed "an application outside the domain" "outside its domain" "f[2] == 0"
@@ -344,7 +371,7 @@ typed "a quantifier with no :" "expected ':' in quantifier" "all i in 0 .. 1 TRU
 typed "a quantifier over no set" "expected a set" "all i in x : TRUE"
 typed "a broken body over the empty set" "unknown identifier" "all i in {} : y"
 typed "a bound name that shadows a var" "redeclares" "some x in 0 .. 1 : TRUE"
-typed "nested bound names past the limit" "too many nested bound names" "all a in 0 .. 1 : all b in 0 .. 1 : all c in 0 .. 1 : all d in 0 .. 1 : all e in 0 .. 1 : TRUE"
+typed "nested bound names past the limit" "too many nested bound names" "all a in 0 .. 1 : all b in 0 .. 1 : all c in 0 .. 1 : all d in 0 .. 1 : all e in 0 .. 1 : all g in 0 .. 1 : all h in 0 .. 1 : all k in 0 .. 1 : all l in 0 .. 1 : TRUE"
 typed "divide by zero" "divide by zero" "x / 0 == 0"
 typed "a negative divisor" "/ of a negative number" "x / (0 - 1) == 0"
 typed "mod by zero" "mod by zero" "x mod 0 == 0"
@@ -362,9 +389,10 @@ typed "an identifier past the name limit" "unknown identifier" "$(printf '%062d'
 typed "a range with one dot" "expected a set (LO .. HI" "x in 0 . 1"
 typed "an unknown name with an underscore" "unknown identifier" "x_ == 0"
 # the values the evaluator computes, each pinned by the verdict it gives
-value() {	# value DESC WANT EXPR: invariant EXPR holds (0) or is violated (1)
+value() {	# value DESC WANT EXPR: invariant EXPR holds (0), is violated (1) or is an error (3)
 	printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\nvar g : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> i] and g == [i in 0 .. 1 -> 0]\ninvariant i: %s\n' "$3" > "$OUT/value.cml"
 	if [ "$2" = 0 ]; then expect "$1" 0 "No error has been found" --spec "$OUT/value.cml" --no-deadlock
+	elif [ "$2" = 3 ]; then expect "$1" 3 "evaluation error" --spec "$OUT/value.cml" --no-deadlock
 	else expect "$1" 1 "Invariant i is violated" --spec "$OUT/value.cml" --no-deadlock; fi
 }
 value "division truncates"          0 "7 / 2 == 3 and 7 mod 2 == 1 and 2 * 3 - 1 == 5"
@@ -372,7 +400,8 @@ value "sets compare by members"     0 "{1, 0, 1} == {0, 1} and {0} != {1} and {}
 value "a set and a longer set"      1 "{0} == {0, 1}"
 value "functions compare by entries" 0 "f != g and f == [i in 0 .. 1 -> i] and [g except [1] = 1] == f"
 value "a function and a shorter one" 1 "f == [i in 0 .. 0 -> 0]"
-value "an except that adds a key"   1 "[f except [5] = 0] == f"
+# TLC leaves the value unchanged (with a warning); cmc refuses it
+value "an except outside the domain is an error" 3 "[f except [5] = 0] == f"
 value "booleans compare"            0 "TRUE != FALSE and (x == 0) == TRUE"
 value "quantifiers and count"       0 "(some i in 0 .. 1 : f[i] == 1) and not (all i in 0 .. 1 : f[i] == 1) and (count i in 0 .. 1 : f[i] == 0) == 1"
 value "orders"                      0 "0 < 1 and 1 > 0 and 1 <= 1 and 1 >= 1 and not (1 < 1)"
@@ -402,6 +431,124 @@ value "and skips a two-key except" 0 "FALSE and [f except [0] = 1, [1] = 1] == f
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
 expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml" --no-deadlock
+
+# records, sequences and defs: each value pinned by the verdict it
+# gives, each misuse refused with its reason (TLC reports each as an
+# error too)
+echo "-- records, bounded sequences and def operators"
+# rs DESC WANT EXPR: invariant EXPR over a record r, a sequence q and a
+# function of records g holds (0), is violated (1) or is an error (3)
+rs() {
+	printf 'module m\ndef two = 2\ndef inc(a) = a + 1\ndef pick(c, a, b) = c and a or not c and b\nvar r : [a : 0 .. 3, b : 0 .. 1]\nvar q : Seq(0 .. 3, 3)\nvar g : [0 .. 1 -> [c : 0 .. 2, d : Seq(0 .. 1, 2)]]\ninit r == [b |-> 0, a |-> 1] and q == <<1, 2>> and g == [i in 0 .. 1 -> [c |-> i, d |-> <<i>>]]\ninvariant i: %s\n' "$3" > "$OUT/rs.cml"
+	case $2 in
+	0) expect "$1" 0 "No error has been found" --spec "$OUT/rs.cml" --no-deadlock ;;
+	1) expect "$1" 1 "Invariant i is violated" --spec "$OUT/rs.cml" --no-deadlock ;;
+	*) expect "$1" 3 "$2" --spec "$OUT/rs.cml" --no-deadlock ;;
+	esac
+}
+rs "a record compares by its fields"   0 "r == [a |-> 1, b |-> 0] and r != [a |-> 1, b |-> 1] and r.a == 1"
+rs "records of other fields differ"    1 "r == [a |-> 1]"
+rs "a record except, with @"           0 "[r except !.a = @ + 2, .b = 1] == [a |-> 3, b |-> 1]"
+rs "a nested except path"              0 "[g except ![1].d = Append(@, 0), [0].c = 2][1].d == <<1, 0>> and g[0].c == 0"
+rs "a function of records"             0 "g[1] == [c |-> 1, d |-> <<1>>] and g[0].d[1] == 0"
+rs "sequence operators"                0 "Len(q) == 2 and Head(q) == 1 and Tail(q) == <<2>> and Append(q, 3) == <<1, 2, 3>> and q[2] == 2"
+rs "SubSeq and concatenation"          0 "SubSeq(q, 2, 2) == <<2>> and SubSeq(q, 2, 1) == <<>> and q \\o <<3>> == <<1, 2, 3>> and <<>> \\o q == q"
+rs "sequences of other lengths differ" 1 "q == <<1, 2, 0>>"
+rs "a tuple is a sequence"             0 "<<1, TRUE>>[2] and Len(<<r, q>>) == 2 and <<r, q>>[1].a == 1"
+rs "a sequence except"                 0 "[q except ![2] = 3] == <<1, 3>>"
+rs "def operators"                     0 "inc(two) == 3 and pick(r.a == 1, TRUE, 1 / 0 == 0)"
+rs "a def argument is evaluated where it is used" 0 "pick(FALSE, 1 / 0 == 0, TRUE)"
+rs "a field of a non-record"           "expected a record in a field access" "q.a == 0"
+rs "a missing field"                   "a record has no such field" "r.c == 0"
+rs "a record literal with a field twice" "a record field is given twice" "[a |-> 1, a |-> 2] == r"
+rs "an except of a missing field"      "except outside the domain" "[r except !.c = 1] == r"
+rs "an except past a sequence's end"   "except outside the domain" "[q except ![3] = 1] == q"
+rs "an except through a scalar"        "except on a value that is not" "[r except !.a.b = 1] == r"
+rs "@ outside an except"               "@ outside an except value" "@ == 1"
+rs "== of a record and a function"     "compares a record with a function" "r == g"
+rs "== of records with fields of other types" "compares an integer with a boolean" "[a |-> 1] == [a |-> TRUE]"
+rs "Head of the empty sequence"        "Head of the empty sequence" "Head(<<>>) == 0"
+rs "Tail of the empty sequence"        "Tail of the empty sequence" "Tail(<<>>) == <<>>"
+rs "an index past the end"             "a sequence index outside 1 .. Len" "q[3] == 0"
+rs "an index of zero"                  "a sequence index outside 1 .. Len" "q[0] == 0"
+rs "SubSeq past the end"               "SubSeq outside the sequence" "SubSeq(q, 1, 3) == q"
+rs "Len of a set"                      "expected a sequence in Len" "Len({1}) == 0"
+rs "\\o of a record"                    "expected a sequence in .o" "q \\o r == q"
+rs "Append with one argument"          "expected , between arguments" "Append(q) == q"
+rs "a def with too few arguments"      "expected , between arguments" "pick(TRUE, 1) == 1"
+rs "a def with no arguments given"     "expected ( after an operator" "inc == 1"
+rs "a sequence literal with no >>"     "expected >> to close" "q == <<1, 2"
+rs "a sequence past the limit"         "sequence too large" "Len(<<0,0,0,0,0,0,0,0,0,0,0,0,0>>) == 13"
+rs "a record past its literal"         "expected |-> in record" "[a |-> 1, b] == r"
+# symmetry maps the ids inside records and sequences (and only there,
+# not field names or positions); without it the states are TLC's 357
+expect "symmetry reaches into records and sequences" 0 "278 distinct states found" --spec "$HERE/test/spec/symrec.cml"
+sed '/^symmetry/d' "$HERE/test/spec/symrec.cml" > "$OUT/symrec_off.cml"
+expect "the same model without symmetry: TLC's 357 states" 0 "357 distinct states found" --spec "$OUT/symrec_off.cml"
+# the encoding over random nested values: bytes equal exactly when the
+# values are, enc_eq agrees, and a permutation twice is the identity
+EF=$OUT/encfuzz
+# shellcheck disable=SC2086
+if ${CC:-cc} -std=c11 -D_POSIX_C_SOURCE=200809L ${CFLAGS:--O1} -w -I"$HERE/src" -I"$HERE/include" -o "$EF" "$HERE/test/spec/encfuzz.c"; then
+	expectp "the value encoding holds over random nested values" 0 "encfuzz: ok" "$EF"
+else echo "FAIL encfuzz.c does not build"; fail=1; fi
+rs "an except path past its depth"     "an except path is too deep" "[g except ![0].d[1].c.e = 1] == g"
+rs "an except path with no field name" "expected a field name after ." "[r except !. = 1] == r"
+rs "an except path with no selector"   "expected \\[ or . in except" "[r except ! = 1] == r"
+rs "an except with a skipped @ body"   0 "FALSE and [r except !.a = @ / 0] == r or TRUE"
+rs "a record literal with no field name" "expected a field name in record" "[a |-> 1, ] == r"
+rs "a record literal with no ]"        "expected \] to close record" "r == [a |-> 1, b |-> 0"
+rs "a sequence operator with no ("     "expected ( after a sequence" "Len == 0"
+rs "a sequence operator with no )"     "expected ) after the arguments" "0 == Len(q"
+rs "a def call with no )"              "expected ) after the arguments" "inc(1 == 2"
+rs "a def call with a broken argument" "expected )" "inc((1) == 2"
+rs "an Append past the sequence limit" "sequence too large" "Len(Append(<<0,0,0,0,0,0,0,0,0,0,0,0>>, 0)) == 13"
+rs "a concatenation past the limit"    "sequence too large" "Len(<<0,0,0,0,0,0>> \\o <<0,0,0,0,0,0,0>>) == 13"
+rs "SubSeq bounds of a set"            "expected an integer in SubSeq" "SubSeq(q, {1}, 1) == q"
+rs "a skipped sequence operator"       0 "FALSE and Head(<<>>) == Tail(<<>>) and SubSeq(q, 0, 9) == Append(q, 0) and Len(r) == 0 or TRUE"
+rs "a skipped field access and index"  0 "FALSE and q.a == g[5].c and r[0] == 0 and <<1>> == <<>> or TRUE"
+rs "a skipped record literal"          0 "FALSE and [a |-> 1 / 0] == r or TRUE"
+rs "a skipped sequence literal"        0 "FALSE and <<1 / 0, 2>> == q or TRUE"
+rs "a skipped concatenation"           0 "FALSE and (q \\o r) == q or TRUE"
+rs "an application of a record"        "applied a non-function" "r[1] == 0"
+rs "== of records of other fields"     1 "[a |-> 1] == [b |-> 1]"
+rs "a range is a set operand"          0 "(0 .. 2) == {0, 1, 2} and 1 in 0 .. 2"
+rs "a value past the evaluation arena"  "values too large for the evaluation arena" "[a1 in 0 .. 11 -> [a2 in 0 .. 11 -> [a3 in 0 .. 11 -> [a4 in 0 .. 11 -> <<r, r, r, r, r, r, r, r, r, r, r, r>>]]]] == g"
+rs "a seq of booleans compares"        0 "<<TRUE, FALSE>> != <<FALSE, FALSE>> and <<{1}>> == <<{1}>>"
+rs "a record of too many field names"  "too many record field names" "[f1 |-> 0, f2 |-> 0, f3 |-> 0, f4 |-> 0, f5 |-> 0, f6 |-> 0, f7 |-> 0, f8 |-> 0, f9 |-> 0, f10 |-> 0, f11 |-> 0, f12 |-> 0, f13 |-> 0, f14 |-> 0, f15 |-> 0, f16 |-> 0, f17 |-> 0, f18 |-> 0, f19 |-> 0, f20 |-> 0, f21 |-> 0, f22 |-> 0, f23 |-> 0, f24 |-> 0, f25 |-> 0, f26 |-> 0, f27 |-> 0, f28 |-> 0, f29 |-> 0, f30 |-> 0, f31 |-> 0] == r"
+# a stored value outside its declared type is a model error, never cut
+# or explored: a sequence past its bound, a record with a missing or
+# extra field, a field outside its range
+b2() { printf 'module m\n%b\n' "$2" > "$OUT/b2.cml"; expect "$1" 3 "$3" --spec "$OUT/b2.cml"; }
+b2 "an append past the bound is an error" "var q : Seq(0 .. 1, 2)\ninit q == <<>>\naction a:\n  q' = Append(q, 0)\ninvariant i: TRUE" "q has length 3, past its bound 2"
+b2 "a state past its word limit is an error" "var a : [0 .. 11 -> Seq(0 .. 1, 12)]\nvar b : [0 .. 11 -> Seq(0 .. 1, 12)]\nvar c : [0 .. 11 -> Seq(0 .. 1, 12)]\nvar d : [0 .. 11 -> Seq(0 .. 1, 12)]\nvar e : [0 .. 11 -> Seq(0 .. 1, 12)]\nvar g : [0 .. 11 -> Seq(0 .. 1, 12)]\ninit a == [i in 0 .. 11 -> <<0,0,0,0,0,0,0,0,0,0,0,0>>] and b == a and c == a and d == a and e == a and g == a\ninvariant i: TRUE" "a state needs more than 1024 words"
+b2 "a Seq type without )"             "var q : Seq(0 .. 1, 2\ninit q == <<>>\ninvariant i: TRUE" "Seq type needs )"
+b2 "a function var with no range"     "var f : [0 .. 1 -> ]\ninit f == 0\ninvariant i: TRUE" "function var needs a range"
+b2 "a def with () and no parameter"   "def d() = 1\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "a def with () needs a parameter"
+b2 "a def with too many parameters"   "def d(a, b, c, e, g) = 1\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "too many def parameters"
+b2 "a def with text after the body"   "def d = 1 )\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def d: trailing text"
+b2 "a def named like a const"         "const N = 1\ndef N = 2\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def N redeclares"
+b2 "a def with text after its )"      "def d(a) 1 = a\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def parameters need )"
+printf 'module m\ndef d == 1\nvar x : 0 .. 1\ninit x == d\ninvariant i: x == 2\n' > "$OUT/b2.cml"
+expect "a def written with ==, as TLA+ does" 1 "Invariant i is violated" --spec "$OUT/b2.cml"
+b2 "a sequence element outside its type" "var q : Seq(0 .. 1, 2)\ninit q == <<2>>\ninvariant i: TRUE" "q\\[1\\] = 2 is outside its range 0 .. 1"
+b2 "a record missing a field"        "var r : [a : 0 .. 1, b : 0 .. 1]\ninit r == [a |-> 0]\ninvariant i: TRUE" "r does not have exactly the fields"
+b2 "a record field outside its range" "var r : [a : 0 .. 1]\ninit r == [a |-> 2]\ninvariant i: TRUE" "r.a = 2 is outside its range 0 .. 1"
+b2 "a sequence where a record goes"  "var r : [a : 0 .. 1]\ninit r == <<0>>\ninvariant i: TRUE" "r is a sequence, not a record"
+b2 "a recursive def"                 "def loop(n) = loop(n)\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def loop: a def may only use the defs declared before it"
+b2 "a def using a later def"         "def a1 = b1\ndef b1 = 1\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def a1: a def may only use"
+b2 "a def with a broken body"        "def d = (1\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def d: expected )"
+b2 "a def that redeclares a var"     "var x : 0 .. 1\ndef x = 1\ninit x == 0\ninvariant i: TRUE" "def x redeclares"
+b2 "a def without ="                 "def d\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def needs = EXPR"
+b2 "a def without )"                 "def d(a = a\nvar x : 0 .. 1\ninit x == 0\ninvariant i: TRUE" "def parameters need )"
+b2 "a Seq type without a bound"      "var q : Seq(0 .. 1)\ninit q == <<>>\ninvariant i: TRUE" "needs a maximum length"
+b2 "a Seq bound past the limit"      "var q : Seq(0 .. 1, 13)\ninit q == <<>>\ninvariant i: TRUE" "a Seq length bound must be"
+b2 "a record type field without :"   "var r : [a : 0 .. 1, b]\ninit r == [a |-> 0]\ninvariant i: TRUE" "a record field needs name : type"
+b2 "a record type field twice"       "var r : [a : 0 .. 1, a : 0 .. 1]\ninit r == [a |-> 0]\ninvariant i: TRUE" "record field a is declared twice"
+b2 "a record var without ]"          "var r : [a : 0 .. 1\ninit r == [a |-> 0]\ninvariant i: TRUE" "record var needs \\]"
+b2 "a bound name that shadows a def" "def d = 1\nvar x : 0 .. 1\ninit x == 0\ninvariant i: all d in 0 .. 1 : TRUE" "redeclares"
+printf 'module m\ndef z = 0\nvar x : 0 .. 1\ninit x == z\ninvariant i: x == z\n' > "$OUT/b2.cml"
+expect "a def call inside init" 0 "1 distinct states found" --spec "$OUT/b2.cml" --no-deadlock
 
 # every line the loader cannot use is refused with its reason, never
 # skipped: a skipped `when` or invariant would check a different model
@@ -633,7 +780,7 @@ obs "an unknown field is an error"            3 "unknown field" "node[0].hi" 0
 obs "node with no [ is an error"              3 "expected \[ after node" "node 0" 0
 obs "node[i] with no index or field"          3 "needs \[k\] or .field" "node[0] + 1" 0
 obs "node[] of a set is an error"              3 "expected an integer in node\[\]" "node[{0}][0]" 0
-obs "node[0 with no ] is an error"              3 "expected \]" "node[0 [0]" 0
+obs "node[0 with no ] is an error"              3 "expected \]" "node[0 + 1" 0
 obs "node[0][] of a set is an error"            3 "expected an integer in node\[\]\[\]" "node[0][{0}]" 0
 obs "node[0][0 with no ] is an error"           3 "expected \]" "node[0][0 + 1" 0
 obs "a skipped node read is not made"           0 "accepted 2" "node[0][0] + (count i in {} : node[i][0] == 0)" 0 1

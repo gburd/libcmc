@@ -69,7 +69,15 @@ checked three ways that agree -- `cmc --spec`, TLC
   each promise, which the `.cml` only counts; under the VIEW that
   forgets the sender TLC finds the same 1,976 distinct states.
 - `raft.cml` -- Raft leader election; Election Safety (at most one
-  leader per term).  Reference: Ongaro's `raft.tla`.
+  leader per term), each server a record of its vote and its tally.
+  Reference: Ongaro's `raft.tla`.
+- `logrep.cml` -- leader-based log replication, the core of Raft's
+  AppendEntries: entries travel as records `[idx, val]` on lossy FIFO
+  channels (bounded sequences), a follower appends only the next entry
+  its log needs, and the leader commits once a quorum holds an entry.
+  Every committed entry stays held by a quorum; the BUG build drops the
+  follower's index check.  Written with records, sequences and defs;
+  the twin `logrep.tla` gives TLC the same 4,439 distinct states.
 - `hc.cml` -- Humming Consensus over write-once epoch register stores,
   extending `consensus`; Agreement per epoch.  Reference: Machi.
 - `caspaxos.cml` -- CASPaxos: Paxos rounds on a rewritable register,

@@ -24,7 +24,8 @@ num() { grep -oE "$2" "$1" | grep -oE '[0-9]+' | head -1; }
 # check DIR CML MODULE WANT [ARG...] (DIR absolute or under the repo): `cmc --emit-tla` and
 # `cmc --emit-cfg` give a module and a .cfg that TLC accepts and that
 # give the verdict WANT, as `cmc --spec` does; on a pass, TLC also finds
-# the same distinct states and depth.  The .cfg names every invariant,
+# the same distinct states and depth (ND, when set, is the distinct
+# count TLC must find instead of cmc's).  The .cfg names every invariant,
 # property and constraint, and CHECK_DEADLOCK FALSE when the model turns
 # the deadlock check off.
 check() {
@@ -45,7 +46,7 @@ check() {
 		echo "FAIL $mod [$want]: cmc --spec says $cv, TLC says $tv"; echo x>"$OUT/fail"; return
 	fi
 	if [ "$want" = PASS ]; then
-		cd_=$(num "$d/cmc.txt" 'generated, [0-9]+ distinct') td=$(num "$d/out.txt" 'generated, [0-9]+ distinct')
+		cd_=${ND:-$(num "$d/cmc.txt" 'generated, [0-9]+ distinct')} td=$(num "$d/out.txt" 'generated, [0-9]+ distinct')
 		cp_=$(num "$d/cmc.txt" 'search is [0-9]+') tp=$(num "$d/out.txt" 'search is [0-9]+')
 		if [ -z "$cd_" ] || [ "$cd_" != "$td" ] || [ "$cp_" != "$tp" ]; then
 			echo "FAIL $mod [$want]: cmc d=$cd_ depth=$cp_, TLC d=$td depth=$tp"; echo x>"$OUT/fail"; return
@@ -75,6 +76,12 @@ check examples/spec twophase twophase PASS
 check examples/spec twophase twophaseb VIOLATION --define BUG
 check examples/spec fastpaxos fastpaxos PASS
 check examples/spec fastpaxos fastpaxosb VIOLATION --define BUG
+check examples/spec logrep logrep PASS
+check examples/spec logrep logrepb VIOLATION --define BUG
+check test/spec distinct distinct PASS
+# under symmetry cmc --spec finds 278 states; the emitted module has no
+# SYMMETRY, so TLC must find the 357 states cmc finds without it
+ND=357 check test/spec symrec symrec PASS
 check test/spec countops countops PASS
 check test/spec guard guard PASS
 check test/spec guard guardb VIOLATION --define BUG

@@ -56,8 +56,21 @@ SMT-encodable -- not full TLA+.
   variables, actions and invariants; a shared base is written once.
 - `const NAME = EXPR` -- a finite integer parameter.
 - `var NAME : LO .. HI` -- a variable over a finite integer range.
-- `var NAME : [LO .. HI -> LO .. HI]` -- a function (finite map) variable,
-  used as a record or an array (`NAME[k]`).
+- `var NAME : [LO .. HI -> T]` -- a function (finite map) variable over
+  integer keys, used as an array (`NAME[k]`).  T is any variable type.
+- `var NAME : [a : T, b : T]` -- a record variable with exactly the
+  fields a and b (`NAME.a`).
+- `var NAME : Seq(T, N)` -- a sequence of at most N elements of type T
+  (N a constant up to 12).  The bound keeps the state space finite: a
+  value longer than N is a model error (exit 3), never cut short.
+  The types nest, as in `var log : [0 .. 2 -> Seq([idx : 1 .. 2, val :
+  0 .. 1], 2)]`.
+- `def NAME = EXPR` / `def NAME(p, ...) = EXPR` -- a named operator, as
+  TLA+'s `NAME(p, ...) == EXPR`.  A use is the body with each parameter
+  replaced by its argument, evaluated where the body uses it.  The body
+  sees the constants, the variables, its parameters and the defs
+  declared before it, so a def cannot reach itself: recursion is
+  refused at load time.
 - `init PREDICATE` -- a conjunction of `var == EXPR` fixing the initial
   state (repeat `init` to add conjuncts).
 - `action NAME:` / `action NAME(p in SET, ...):` -- a transition.  A
@@ -75,17 +88,31 @@ SMT-encodable -- not full TLA+.
 - `constraint NAME: EXPR` and `action_constraint NAME: EXPR` -- bound
   the search, as TLC's `CONSTRAINT` and `ACTION_CONSTRAINT` (see below).
 
-Expressions: integers with `+ - * / mod`; sets `{a, b}` and ranges
-`LO .. HI`; functions `[i in SET -> EXPR]`, application `f[k]`, update
-`[f except [k] = v]`; comparisons `== != < <= > >=`, `A in SET`; boolean
-`and or not`; quantifiers `all V in SET : E`, `some V in SET : E`; and
-`count V in SET : E` (cardinality).
+Expressions: integers with `+ - * / mod`; sets of integers `{a, b}` and
+ranges `LO .. HI`; functions `[i in SET -> EXPR]` and application `f[k]`;
+records `[a |-> E, b |-> E]` and field access `r.a`; sequences (and
+tuples, which are sequences) `<<E, E>>`, `s[i]` from 1, `Len(s)`,
+`Head(s)`, `Tail(s)`, `Append(s, e)`, `SubSeq(s, m, n)` and `s \o t`;
+comparisons `== != < <= > >=`, `A in SET`; boolean `and or not`;
+quantifiers `all V in SET : E`, `some V in SET : E`; and `count V in SET
+: E` (cardinality).
+
+An update `[B except P = V, ...]` replaces the part of B at each path P,
+as TLA+'s `[B EXCEPT !P = V]`: P is `[k]` (a function key or sequence
+position) or `.a` (a record field), chained for nested values, with an
+optional leading `!`.  In V, `@` is the part being replaced:
+`[srv except ![c].votes = @ + 1]`.  A path outside B (a key not in the
+function's domain, a position past the sequence's end, a missing field)
+is a model error; TLC leaves the value unchanged with a warning.
 
 Every operand is checked against its operator, as TLC checks it.
-Arithmetic, orders, range bounds, set elements and function keys and
-values are integers; `and`, `or`, `not`, quantifier bodies, guards,
+Arithmetic, orders, range bounds, set elements, function keys and
+sequence positions are integers; `and`, `or`, `not`, quantifier bodies, guards,
 invariants and liveness goals are booleans; `==` and `!=` compare two
-values of one type.  Anything else, such as `not votes` for a set
+values of one type, part by part (a record with a function, or a field
+`TRUE` with a field `1`, is an error).  `Head` and `Tail` of `<<>>`, an
+index outside `1 .. Len(s)`, `SubSeq` bounds past the end and a missing
+field are errors too.  Anything else, such as `not votes` for a set
 `votes`, or `TRUE == 1`, is a model error (exit 3), never a value.
 
 `and` and `or` evaluate left to right and stop once the left operand
@@ -177,7 +204,8 @@ scalar one whole (`c = ...`); each spec variable at most once.  The
 file may start with `spec =` and `binary =` lines for its reader.  A
 line the reader cannot use (an unknown section or variable, a second
 binding, a field offset that is not 0 to 254) is an error, never
-skipped.
+skipped.  A binding builds integers and functions of integers only: a
+record or sequence variable, or a function of them, is refused.
 
 At each reached implementation state the abstract state is built from the
 binding, each bound variable is checked against its declared domain (a
@@ -210,8 +238,11 @@ after the module.  `make
 check-emit-tla` verifies that the generated TLA+ agrees with
 `cmc --spec` on every example.
 
-The module carries Apalache `@type` annotations (each constant and
-scalar variable is `Int`, a function variable is `Int -> Int`) and a
+Records, sequences and defs are emitted as their TLA+ forms (the module
+extends `Sequences`, and each def becomes an operator definition).  The
+module carries Apalache `@type` annotations (each constant and scalar
+variable is `Int`, a function variable `Int -> T`, a record `{ a: T, b:
+T }`, a sequence `Seq(T)`) and a
 `CInit` operator that binds the constants to their `.cml` values, so
 Apalache's symbolic, Z3-backed checker accepts it directly:
 
@@ -264,7 +295,9 @@ search.  **Obligation:** the values must be genuinely interchangeable
 wherever they appear -- use a dedicated range, disjoint from other
 integer uses (the discipline TLA+ enforces with model values).  The gate
 checks the verdict is identical with symmetry on and off; a declaration
-that changed it would be unsound.
+that changed it would be unsound.  A permutation maps every integer of
+the set wherever a value holds it: in sets, function keys and values,
+record fields and sequence elements (not field names or positions).
 
 ## Liveness
 
