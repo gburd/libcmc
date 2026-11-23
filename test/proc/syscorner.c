@@ -42,6 +42,7 @@
 
 static unsigned char rec[64];
 static int	nrec = 1;
+static unsigned short own;		/* natively, the port listener(BASE) got */
 
 static void
 code(long r)
@@ -69,9 +70,16 @@ addr(int port)
 	memset(&a, 0, sizeof a);
 	a.sin_family = AF_INET;
 	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	/* natively, away from 20000, where another check on the same host
-	 * may be listening; under cmc node i is 20000 + i */
-	a.sin_port = htons((unsigned short) (port + (getenv("CMC_STATE_FD") ? 0 : 9300)));
+	/* under cmc node i is 20000 + i.  Natively the node's own listener
+	 * is on a port the kernel picked, so that two checks on one host
+	 * never share it, and other ports are away from 20000, where nothing
+	 * a check runs listens */
+	if (getenv("CMC_STATE_FD"))
+		a.sin_port = htons((unsigned short) port);
+	else if (port == BASE && own)
+		a.sin_port = own;
+	else
+		a.sin_port = htons((unsigned short) (port + 9300));
 	return a;
 }
 
@@ -80,12 +88,19 @@ listener(int port)
 {
 	int			s = socket(AF_INET, SOCK_STREAM, 0), one = 1;
 	struct sockaddr_in a = addr(port);
+	socklen_t	al = sizeof a;
 
-	/* natively, modes run one after another on one port, and a dial of
-	 * the last one may still hold it in TIME_WAIT */
+	/* a dial of an earlier run may still hold the port in TIME_WAIT */
 	setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	if (!getenv("CMC_STATE_FD") && port == BASE)
+		a.sin_port = 0;
 	bind(s, (struct sockaddr *) &a, sizeof a);
 	listen(s, 8);
+	if (!getenv("CMC_STATE_FD") && port == BASE)
+	{
+		getsockname(s, (struct sockaddr *) &a, &al);
+		own = a.sin_port;
+	}
 	return s;
 }
 

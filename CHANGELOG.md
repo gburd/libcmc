@@ -5,6 +5,19 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+The process gate's rows that compare cmc with a native Linux run
+(nbconnect, syscorner, tcpsem) no longer depend on timing.  Their
+native runs used fixed loopback ports, so two checks on one host (gcc
+and clang at once) met each other's sockets, and sleeps ordered the
+native processes.  Node 0 now forks its peer itself, every native
+listener is on a port the kernel picks, and pipes order the two
+processes.  Measured on a 32-core host under load, with two copies
+running at once: nbconnect early gave Linux's record in 72 of 100 runs
+and now 200 of 200, tcpsem 96 of 100 and now 400 of 400, syscorner
+selfdial 99 of 100 and now 200 of 200.  cmc's answers did not vary
+(200 of 200 runs of the early model alike).  The records, and so what
+the rows check, are unchanged.
+
 ## 2.2.0 (2026-11-22)
 
 Takes the process engine toward checking a program in place, as Greg
