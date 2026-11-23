@@ -168,6 +168,7 @@ in the kernel, untouched.
 | `constraint` and `action_constraint` (TLC's `CONSTRAINT`, `ACTION_CONSTRAINT`) | exact | a state outside the model is checked against the invariants but not counted, kept or expanded; `x'` is readable only in an action constraint | spec_gate constraint rows, spec_calibrate constrain, emit_gate constrain |
 | a liveness property under a constraint; `--refine` against a spec with a constraint | refused | exit 3 | spec_gate constraint refusals, refine refusal |
 | `--trace-out` ITF and JSON counterexamples | exact | the printed shortest trace, integers, functions, records and sequences (nested) as Apalache writes them, with its varTypes text; a liveness violation as a lasso with ADR-015's `loop` (JSON: the loop state repeated with `back_to`) | spec_gate trace and lasso rows, apalache_gate VIOLATION rows ([ITF against Apalache]({{ '/background/itf-traces/' | relative_url }})) |
+| several `when` lines in an action | exact | conjoined, as TLA+ `/\` lines, in the check and in `--emit-tla`; a `when` outside an action is exit 3 | spec_gate when rows |
 | `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
 | declared domains | exact | init and every successor must lie in each variable's domain | spec_gate boundpass, succbound |

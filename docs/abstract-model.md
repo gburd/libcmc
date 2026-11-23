@@ -74,7 +74,8 @@ SMT-encodable -- not full TLA+.
 - `init PREDICATE` -- a conjunction of `var == EXPR` fixing the initial
   state (repeat `init` to add conjuncts).
 - `action NAME:` / `action NAME(p in SET, ...):` -- a transition.  A
-  `when GUARD` line is its enabling condition; `NAME' = EXPR` lines are
+  `when GUARD` line is its enabling condition (several `when` lines
+  are conjoined, as TLA+ `/\` lines); `NAME' = EXPR` lines are
   simultaneous assignments to the next state.  Parameters range over
   finite sets, giving the non-determinism.  An action tagged
   `[TAG]` is active only with `--define TAG` (used to plant a bug).

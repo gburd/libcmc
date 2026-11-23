@@ -1186,7 +1186,14 @@ static int sp_load_into(const char *path){
 			} else CPY(cur->name,sp_trim(rest),"action name");
 			in_action=1; continue;
 		}
-		if(!strncmp(s,"when ",5)){ if(!cur){ fprintf(stderr,"cmc: %s:%d: when outside action\n",path,ln); goto bad; } CPY(cur->guard,sp_trim(s+5),"guard"); continue; }
+		if(!strncmp(s,"when ",5)){
+			if(!in_action || !cur){ fprintf(stderr,"cmc: %s:%d: when outside action\n",path,ln); goto bad; }
+			/* each further when line is one more conjunct, as a TLA+ /\ line */
+			const char *g=sp_trim(s+5);
+			if(!cur->guard[0]) CPY(cur->guard,g,"guard");
+			else { char both[2*SP_EXPR+16]; snprintf(both,sizeof both,"(%s) and (%s)",cur->guard,g); CPY(cur->guard,both,"guard"); }
+			continue;
+		}
 		if(!strncmp(s,"deadlock",8) && (s[8]==' '||s[8]=='=')){
 			char *v=sp_trim(s+8);
 			if(*v!='='){ fprintf(stderr,"cmc: %s:%d: deadlock needs = on or = off\n",path,ln); goto bad; }

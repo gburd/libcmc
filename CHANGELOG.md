@@ -125,6 +125,15 @@ selfdial 99 of 100 and now 200 of 200.  cmc's answers did not vary
 (200 of 200 runs of the early model alike).  The records, and so what
 the rows check, are unchanged.
 
+Fixes to the `.cml` loader and `--emit-tla`, from an independent review
+of `cmc --spec` against TLC (each a false pass or a broken TLC twin
+before):
+
+- Two `when` lines in one action are two conjuncts, as TLA+ `/\` lines,
+  in the check and in the emitted module.  The second line used to
+  replace the first.  A `when` line outside an action (after an
+  `invariant`, say) is an error; it used to attach to the last action.
+
 ## 2.2.0 (2026-11-22)
 
 Takes the process engine toward checking a program in place, as Greg

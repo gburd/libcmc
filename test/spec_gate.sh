@@ -625,6 +625,12 @@ bad "a property of no known form"   "property must be"         "$V\nproperty p: 
 bad "an action property on a non-boolean" "expected a boolean in an action property" "$V\naction a:\n  x' = 1 - x\nproperty p: always [x']_vars"
 bad "an invariant without a name"   "invariant needs name:"    "$V\ninvariant x <= 1"
 bad "a when outside an action"      "when outside action"      "$V\nwhen x == 0\n$I"
+bad "a when after an action ends"   "when outside action"      "$V\naction a:\n  x' = 1 - x\n$I\nwhen x == 5"
+# two when lines are two conjuncts, as TLA+ /\\ lines; the second must not
+# replace the first, in the check or in the emitted module
+printf 'module w2\nvar x : 0 .. 3\ninit x == 0\naction inc:\n  when x != 1\n  when x < 3\n  x%s = x + 1\ninvariant i: x <= 1\n' "'" > "$OUT/w2.cml"
+expect "two when lines are both required"  0 "2 distinct states found" --spec "$OUT/w2.cml" --no-deadlock
+expect "emit-tla: two when lines are conjoined" 0 "(x # 1) /. (x < 3)" --emit-tla "$OUT/w2.cml"
 bad "an action parameter without in" "action param needs 'in'" "$V\naction a(i):\n  x' = 1\n$I"
 bad "a line that is nothing"        "cannot parse: x = 1"      "$V\nx = 1\n$I"
 bad "an extends that does not load" "cannot extend nosuch"     "extends nosuch\n$V\n$I"
