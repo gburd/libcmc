@@ -637,6 +637,14 @@ bad "an extends that does not load" "cannot extend nosuch"     "extends nosuch\n
 bad "a function var without ]"     "function var needs ]"     "var f : [0 .. 1 -> 0 .. 1\ninit f == [i in 0 .. 1 -> 0]\n$I"
 bad "an action tag without ]"       "action tag needs ]"       "$V\naction a [BUG:\n  x' = 1\n$I"
 bad "action parameters without )"   "action parameters need )" "$V\naction a(i in 0 .. 1:\n  x' = i\n$I"
+# the [TAG] is the bracket after the parameter list, never a bracket
+# inside a parameter domain (which read as tag i and turned the action off)
+printf 'module tg\nvar f : [1 .. 2 -> 0 .. 2]\nvar b : 0 .. 1\ninit f == [k in 1 .. 2 -> 1] and b == 0\naction pick(i in 1 .. 2, j in 0 .. f[i]):\n  when j == 1\n  b%s = 1\ninvariant nobad: b == 0\n' "'" > "$OUT/tg.cml"
+expect "a [ in a parameter domain is not a tag" 1 "nobad is violated" --spec "$OUT/tg.cml"
+bad "text after the action tag"     "cannot parse action header" "$V\naction a [BUG] x:\n  x' = 1\n$I"
+bad "text after the parameters"     "cannot parse action header" "$V\naction a(i in 0 .. 1) x:\n  x' = i\n$I"
+bad "an action tag that is not a name" "action tag is not a name" "$V\naction a [B G]:\n  x' = 1\n$I"
+bad "an action name that is not a name" "cannot parse action header" "$V\naction a b:\n  x' = 1\n$I"
 bad "an assignment without a prime"  "cannot parse: x = 1"      "$V\naction a:\n  x = 1\n$I"
 bad "a prime only after the ="      "cannot parse: x == 1 or x'" "$V\naction a:\n  x == 1 or x'\n$I"
 bad "an extends of a missing .cml"  "cannot open .*nosuch.cml" "extends nosuch.cml\n$V\n$I"

@@ -1166,24 +1166,42 @@ static int sp_load_into(const char *path){
 			if(S.nact>=SP_MAXACT){ fprintf(stderr,"cmc: too many actions\n"); goto bad; }
 			cur=&S.act[S.nact++]; memset(cur,0,sizeof *cur);
 			char *rest=sp_trim(s+7);
-			/* name( params ) [TAG] : */
+			/* NAME, then an optional (params) and an optional [TAG], then
+			 * the colon.  The tag is only the bracket after the parameter
+			 * list, so a domain such as 0 .. f[i] is never read as one. */
 			char *cl=strrchr(rest,':');
 			if(cl) *cl=0;
 			rest=sp_trim(rest);
-			/* an optional [TAG] gate before the colon */
-			char *tb=strrchr(rest,'[');
-			if(tb && !strchr(tb,']')){ fprintf(stderr,"cmc: %s:%d: action tag needs ]\n",path,ln); goto bad; }
-			if(tb){ char *te=strchr(tb,']'); *te=0; CPY(cur->tag,sp_trim(tb+1),"action tag"); *tb=0; rest=sp_trim(rest); }
-			char *lp=strchr(rest,'(');
-			if(lp){ *lp=0; char *params=lp+1; char *pe=strrchr(params,')'); if(!pe){ fprintf(stderr,"cmc: %s:%d: action parameters need )\n",path,ln); goto bad; } *pe=0;
-				CPY(cur->name,sp_trim(rest),"action name");
+			char *p=rest;
+			while(isalnum((unsigned char)*p)||*p=='_') p++;
+			char *ne=p, *params=NULL, *tag=NULL;
+			while(*p==' '||*p=='\t') p++;
+			if(*p=='('){
+				int d=0; char *q=p;
+				for(;*q;q++){ if(*q=='('||*q=='['||*q=='{') d++; else if(*q==')'||*q==']'||*q=='}'){ if(--d==0) break; } }
+				if(*q!=')'){ fprintf(stderr,"cmc: %s:%d: action parameters need )\n",path,ln); goto bad; }
+				*q=0; params=p+1; p=q+1;
+				while(*p==' '||*p=='\t') p++;
+			}
+			if(*p=='['){
+				char *te=strchr(p,']');
+				if(!te){ fprintf(stderr,"cmc: %s:%d: action tag needs ]\n",path,ln); goto bad; }
+				*te=0; tag=sp_trim(p+1); p=te+1;
+				while(*p==' '||*p=='\t') p++;
+				for(char *c=tag;*c;c++) if(!isalnum((unsigned char)*c)&&*c!='_'){ fprintf(stderr,"cmc: %s:%d: action tag is not a name: [%s]\n",path,ln,tag); goto bad; }
+			}
+			if(ne==rest || *p){ fprintf(stderr,"cmc: %s:%d: cannot parse action header: %s\n",path,ln,rest); goto bad; }
+			*ne=0;
+			CPY(cur->name,rest,"action name");
+			if(tag) CPY(cur->tag,tag,"action tag");
+			if(params){
 				/* parse  p in SET, q in SET */
 				char *save=NULL; for(char *t=strtok_r(params,",",&save); t; t=strtok_r(NULL,",",&save)){
 					char *in=strstr(t," in "); if(!in){ fprintf(stderr,"cmc: %s:%d: action param needs 'in'\n",path,ln); goto bad; }
 					*in=0; if(cur->nparam>=SP_MAXPARAM){ fprintf(stderr,"cmc: too many params\n"); goto bad; }
 					CPY(cur->pname[cur->nparam],sp_trim(t),"parameter name"); CPY(cur->pdom[cur->nparam],sp_trim(in+4),"parameter domain"); cur->nparam++;
 				}
-			} else CPY(cur->name,sp_trim(rest),"action name");
+			}
 			in_action=1; continue;
 		}
 		if(!strncmp(s,"when ",5)){

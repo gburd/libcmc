@@ -78,7 +78,10 @@ SMT-encodable -- not full TLA+.
   are conjoined, as TLA+ `/\` lines); `NAME' = EXPR` lines are
   simultaneous assignments to the next state.  Parameters range over
   finite sets, giving the non-determinism.  An action tagged
-  `[TAG]` is active only with `--define TAG` (used to plant a bug).
+  `[TAG]`, written after the parameter list (`action NAME(p in SET)
+  [TAG]:`), is active only with `--define TAG` (used to plant a bug).
+  A bracket inside a parameter domain, `j in 0 .. f[i]`, is part of the
+  domain, and a header with anything else in it is an error.
 - `invariant NAME: EXPR` -- checked in every reachable state.
 - `symmetry SET` -- declare SET's values interchangeable, collapsing
   symmetric states (see below).  SET is a constant set of at most 8

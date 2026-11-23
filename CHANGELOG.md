@@ -133,6 +133,12 @@ before):
   in the check and in the emitted module.  The second line used to
   replace the first.  A `when` line outside an action (after an
   `invariant`, say) is an error; it used to attach to the last action.
+- An action's `[TAG]` is the bracket after its parameter list.  The
+  loader took the last `[` in the header, so `action pick(i in 1 ..
+  2, j in 0 .. f[i]):` read as an action tagged `i`, inactive without
+  `--define i`, and the model passed with the action left out (of the
+  emitted module too).  A header with text it cannot place, or a tag
+  that is not a name, is an error.
 
 ## 2.2.0 (2026-11-22)
 
