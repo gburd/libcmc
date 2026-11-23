@@ -60,6 +60,15 @@ check() {
 			echo "FAIL $mod [$want]: cmc trace=$ct, TLC trace=$tt"; echo x>"$OUT/fail"; return
 		fi
 		echo "ok   $mod [$want]: TLC agrees (trace=$tt)"
+	elif [ "$want" = TEMPORAL ]; then
+		# the lasso: as many states, and the same state the cycle
+		# goes back to (or a stutter), in cmc's print as in TLC's
+		shape='^(State [0-9]+: Stuttering|State [0-9]+|Back to state [0-9]+)'
+		cl=$(grep -oE "$shape" "$d/cmc.txt" | tr '\n' ' ') tl=$(grep -oE "$shape" "$d/out.txt" | tr '\n' ' ')
+		if [ -z "$tl" ] || [ "$cl" != "$tl" ]; then
+			echo "FAIL $mod [$want]: cmc lasso [$cl], TLC lasso [$tl]"; echo x>"$OUT/fail"; return
+		fi
+		echo "ok   $mod [$want]: TLC agrees (lasso $(echo "$tl" | sed 's/State //g'))"
 	else
 		echo "ok   $mod [$want]: TLC agrees"
 	fi
@@ -167,6 +176,8 @@ check test/spec/fair inner_wf inner_wf TEMPORAL
 check test/spec/fair inner_sf inner_sf TEMPORAL
 check test/spec/fair inner_sf2 inner_sf2 PASS
 check test/spec/fair param param TEMPORAL
+check test/spec/fair lasso lasso TEMPORAL
+check test/spec/fair lasso_sf lasso_sf TEMPORAL
 check test/spec/fair mono mono PASS
 check test/spec/fair mono_bad mono_bad ACTION
 check test/spec/fair mono_c mono_c ACTION

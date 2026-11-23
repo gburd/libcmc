@@ -28,6 +28,12 @@ each checked against single-worker TLC 2.19 on the emitted module
   successors of a guard with an existential once per witness, so its
   generated count can be larger (Paxos phase2a, ZAB commit); the
   distinct counts match.
+- A liveness violation prints its lasso as TLC does: the states from
+  the initial one, then `Back to state N: <action>` or `State N:
+  Stuttering`.  `--trace-out` writes it, in ITF with ADR-015's `loop`
+  index (and `loopAction` in `#meta`), in JSON with the loop state
+  repeated and a `back_to` index; before, no file was written.  The
+  emit gate checks each TEMPORAL row's lasso against TLC's.
 
 `cmc --spec` has TLC's checking options (docs/plans/2.3-tla-users.md,
 item 1), each calibrated against single-worker TLC 2.19 on the same

@@ -1650,24 +1650,30 @@ static const char *ty_itf(int ti, char *buf, size_t cap){
 	return buf;
 }
 
-/* Write the counterexample that ends at `end` to `file`, one state per
- * line, as ITF (fmt "itf") or as a JSON array (fmt "json").  The ITF
- * header follows what Apalache writes for the module cmc --emit-tla
- * makes of this spec: the constants as "params", repeated in every
- * state, and each variable's type in "varTypes".  Each state's #meta
- * also names the action that led to it, which Apalache leaves out.
- * Returns 0, or -1 if the file could not be written. */
-static int spec_write_trace(const char *file, const char *fmt, const QN *end){
+/* Write a counterexample of n states to `file`, one state per line, as
+ * ITF (fmt "itf") or as a JSON array (fmt "json").  State i has the
+ * words w[i] and, past the first, was reached by action act[i].  A
+ * lasso (loop >= 0) goes on from its last state back to state loop by
+ * action loopact, or stutters there forever when loopact is NULL.  ITF
+ * says so as ADR-015 does, with "loop": loop, and names loopact in the
+ * header's #meta; JSON repeats state loop as a last entry with the
+ * action and "back_to": loop.  The ITF header follows what Apalache
+ * writes for the module cmc --emit-tla makes of this spec: the
+ * constants as "params", repeated in every state, and each variable's
+ * type in "varTypes".  Each state's #meta also names the action that
+ * led to it, which Apalache leaves out.  Returns 0, or -1 if the file
+ * could not be written. */
+static int spec_write_trace(const char *file, const char *fmt, const long *const *w, const char *const *act,
+		int n, int loop, const char *loopact){
 	char tb[1024];
-	int itf=!strcmp(fmt,"itf"), n=0;
-	for(const QN *x=end; x; x=x->prev) n++;
-	const QN **path=malloc((size_t)n*sizeof *path);
-	FILE *o=path?fopen(file,"w"):NULL;
-	if(!o){ free(path); return -1; }
-	int i=n; for(const QN *x=end; x; x=x->prev) path[--i]=x;
+	int itf=!strcmp(fmt,"itf"), i;
+	FILE *o=fopen(file,"w");
+	if(!o) return -1;
 	if(itf){
 		fprintf(o,"{\"#meta\":{\"format\":\"ITF\",\"format-description\":\"https://apalache-mc.org/docs/adr/015adr-trace.html\","
-			"\"description\":\"Created by cmc --spec from %s\",\"varTypes\":{",S.modname);
+			"\"description\":\"Created by cmc --spec from %s\",",S.modname);
+		if(loop>=0) fprintf(o,"\"loopAction\":\"%s\",",loopact?loopact:"Stuttering");
+		fprintf(o,"\"varTypes\":{");
 		for(int vi=0;vi<S.nvar;vi++) fprintf(o,"%s\"%s\":\"%s\"",vi?",":"",S.var[vi].name,ty_itf(S.var[vi].ty,tb,sizeof tb));
 		fprintf(o,"}},\n\"params\":[");
 		for(int c=0;c<S.ncst;c++) fprintf(o,"%s\"%s\"",c?",":"",S.cst[c].name);
@@ -1676,25 +1682,28 @@ static int spec_write_trace(const char *file, const char *fmt, const QN *end){
 		fprintf(o,"],\n\"states\":[\n");
 	}
 	else fprintf(o,"[\n");
-	for(i=0;i<n;i++){
-		const QN *x=path[i];
-		Value vv[SP_MAXVAR]; qn_views(x,vv);
+	int last=n+(loop>=0 && !itf);	/* JSON repeats the loop state */
+	for(i=0;i<last;i++){
+		int k=i<n?i:loop;
+		Value vv[SP_MAXVAR]; const long *p=w[k];
+		for(int vi=0;vi<S.nvar;vi++){ vv[vi]=enc_view(p); p+=enc_len(p); }
 		if(itf){
 			fprintf(o,"{\"#meta\":{\"index\":%d",i);
-			if(i) fprintf(o,",\"action\":\"%s\"",x->step);
+			if(i) fprintf(o,",\"action\":\"%s\"",act[i]);
 			fprintf(o,"}");
 			for(int c=0;c<S.ncst;c++) fprintf(o,",\"%s\":{\"#bigint\":\"%ld\"}",S.cst[c].name,S.cst[c].val);
 		}
-		else if(i) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"vars\":{",i,x->step);
+		else if(i==n) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"back_to\":%d,\"vars\":{",i,loopact?loopact:"Stuttering",loop);
+		else if(i) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"vars\":{",i,act[i]);
 		else fprintf(o,"{\"index\":0,\"action\":null,\"vars\":{");
 		for(int vi=0;vi<S.nvar;vi++){
 			fprintf(o,"%s\"%s\":",vi||itf?",":"",S.var[vi].name);
 			trace_value(o,&vv[vi],itf);
 		}
-		fprintf(o,"%s%s\n",itf?"}":"}}",i+1<n?",":"");
+		fprintf(o,"%s%s\n",itf?"}":"}}",i+1<last?",":"");
 	}
-	fprintf(o,"%s\n",itf?"]}":"]");
-	free(path);
+	if(itf && loop>=0) fprintf(o,"],\n\"loop\":%d}\n",loop);
+	else fprintf(o,"%s\n",itf?"]}":"]");
 	return fclose(o)?-1:0;
 }
 
@@ -1756,7 +1765,13 @@ static int print_trace(const QN *cur){
 	for(int vi=0;vi<S.nvar;vi++){ printf(" %s=",S.var[vi].name); val_print(&vv[vi]); }
 	printf("\n");
 	if(!g_trace_out) return 0;
-	if(spec_write_trace(g_trace_out,g_trace_fmt,cur)){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
+	const long **w=malloc((size_t)cn*2*sizeof *w);
+	if(!w){ fprintf(stderr,"cmc: out of memory\n"); exit(1); }
+	const char **act=(const char **)(void *)(w+cn);
+	si=cn; for(const QN *x=cur; x; x=x->prev){ si--; w[si]=x->w; act[si]=x->step; }
+	int wr=spec_write_trace(g_trace_out,g_trace_fmt,w,act,cn,-1,NULL);
+	free(w);
+	if(wr){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
 	printf("Trace written to %s (%s, %d states).\n",g_trace_out,g_trace_fmt,cn);
 	return 0;
 }
@@ -2015,19 +2030,120 @@ out:	free(comp); free(dis);
 	return rc;
 }
 
-/* the bad region of mask: reg[i] is set for each masked state that
- * reaches, through masked states, the fair core.  Returns 0 ok, -1 on
- * OOM. */
-static int lv_bad_region(const unsigned char *mask, unsigned char *reg){
+/* the fair core of mask into core[], and its bad region: reg[i] is set
+ * for each masked state that reaches, through masked states, the fair
+ * core.  Returns 0 ok, -1 on OOM. */
+static int lv_bad_region(const unsigned char *mask, unsigned char *core, unsigned char *reg){
 	int n=lv.n, qt=0;
 	int *queue=malloc(sizeof(int)*(size_t)n+1);
-	if(!queue || lv_fair_core(mask,reg)){ free(queue); return -1; }
+	if(!queue || lv_fair_core(mask,core)){ free(queue); return -1; }
+	memcpy(reg,core,(size_t)n);
 	for(int u=0;u<n;u++) if(reg[u]) queue[qt++]=u;
 	for(int qh=0; qh<qt; qh++){ int v=queue[qh];
 		for(int k=lv.rhead[v];k<lv.rhead[v+1];k++){ int u=lv.rsrc[k];
 			if(mask[u] && !reg[u]){ reg[u]=1; queue[qt++]=u; } } }
 	free(queue);
 	return 0;
+}
+
+/* A lasso counterexample under construction: the states s[0 .. n-1].st
+ * of the liveness graph, each reached from the one before by action
+ * s[i].act (s[0].act is -1, the initial state). */
+typedef struct { struct { int st, act; } *s; int n, cap; } Lasso;
+
+static int lasso_push(Lasso *q, int st, int act){
+	if(q->n==q->cap){
+		int nc=q->cap*2+64;
+		void *ns=realloc(q->s,sizeof q->s[0]*(size_t)nc); if(!ns) return -1;
+		q->s=ns; q->cap=nc;
+	}
+	q->s[q->n].st=st; q->s[q->n].act=act; q->n++;
+	return 0;
+}
+static int lasso_last(const Lasso *q){ return q->s[q->n-1].st; }
+
+/* The shortest path from src to a state with goal[] set, through states
+ * with allow[] set (every state when allow is NULL), appended to q past
+ * src, which q already ends in.  Returns the state reached, src itself
+ * when goal[src] is set, or -1 on OOM or when no goal is reachable,
+ * which the callers rule out. */
+static int lv_path(int src, const unsigned char *allow, const unsigned char *goal, Lasso *q){
+	if(goal[src]) return src;
+	int n=lv.n, qt=0, hit=-1;
+	int *par=malloc(sizeof(int)*3*(size_t)n); if(!par) return -1;
+	int *pe=par+n, *fifo=pe+n;
+	for(int i=0;i<n;i++) par[i]=-1;
+	par[src]=src; fifo[qt++]=src;
+	for(int qh=0; qh<qt && hit<0; qh++){ int u=fifo[qh];
+		for(int e=lv.head[u]; e!=-1; e=lv.next[e]){ int v=lv.to[e];
+			if(par[v]!=-1 || (allow && !allow[v])) continue;
+			par[v]=u; pe[v]=e; fifo[qt++]=v;
+			if(goal[v]){ hit=v; break; }
+		}
+	}
+	/* walk back to src, then append forwards (fifo is free now) */
+	int k=0; for(int v=hit; v>=0 && v!=src; v=par[v]) fifo[k++]=v;
+	while(k>0){ int v=fifo[--k]; if(lasso_push(q,v,lv.act[pe[v]])){ hit=-1; break; } }
+	free(par);
+	return hit;
+}
+
+/* Is fair action a still owed on the walk q->s[from .. q->n-1], the
+ * steps between them taken?  WF(a) is met once a is taken or disabled at
+ * a state of the walk, SF(a) once a is taken or if it is enabled at no
+ * state of the walk. */
+static int lv_owed(const Lasso *q, int from, int a){
+	int na=S.nact, f=act_fair(a), en=0;
+	if(!f) return 0;
+	for(int i=from;i<q->n;i++){
+		if(i>from && q->s[i].act==a) return 0;
+		en|=lv.en[(size_t)q->s[i].st*(size_t)na+(size_t)a];
+		if(f==1 && !lv.en[(size_t)q->s[i].st*(size_t)na+(size_t)a]) return 0;
+	}
+	return f==1 || en;
+}
+
+/* Close a fair cycle that starts at entry, the last state of q and a
+ * state of the fair core, staying inside entry's SCC of the core (each
+ * such SCC is one the fixpoint in lv_fair_core() kept).  While a fair
+ * action is owed (lv_owed()), walk to the nearest state of the SCC that
+ * discharges it: one with an a step inside the SCC, then take it, or
+ * for WF one where a is disabled.  Such a state exists: in a kept SCC a
+ * WF action is disabled somewhere or taken inside it, and an SF action
+ * enabled in it is taken inside it.  Once nothing is owed, walk back to
+ * entry, and go on while that leg left something owed.  Each round
+ * discharges an action for good or closes the cycle, so the walk ends.
+ * When nothing was ever owed the cycle is a stutter at entry, *loopact
+ * -1; otherwise *loopact is the action of the step back to entry, which
+ * q does not hold.  Returns 0, or -1 on OOM. */
+static int lv_cycle(const unsigned char *core, Lasso *q, int *loopact){
+	int n=lv.n, na=S.nact, entry=lasso_last(q), start=q->n-1, rc=-1;
+	int *comp=malloc((sizeof(int)+2)*(size_t)n);
+	if(!comp) return -1;
+	unsigned char *in=(unsigned char *)(comp+n), *goal=in+n;
+	if(lv_scc(core,comp)<0) goto out;
+	for(int u=0;u<n;u++) in[u]=(unsigned char)(core[u] && comp[u]==comp[entry]);
+	for(;;){
+		int a=0; while(a<na && !lv_owed(q,start,a)) a++;
+		int last=lasso_last(q);
+		if(a==na && last==entry) break;
+		for(int u=0;u<n;u++){
+			goal[u]=0;
+			if(!in[u]) continue;
+			if(a==na){ goal[u]=u==entry; continue; }
+			if(act_fair(a)==1 && !lv.en[(size_t)u*(size_t)na+(size_t)a]) goal[u]=1;
+			for(int e=lv.head[u];e!=-1;e=lv.next[e]) if(lv.act[e]==a && in[lv.to[e]]) goal[u]=1;
+		}
+		int u=lv_path(last,in,goal,q);
+		if(u<0) goto out;
+		if(a==na || !lv.en[(size_t)u*(size_t)na+(size_t)a]) continue;
+		int e=lv.head[u]; while(lv.act[e]!=a || !in[lv.to[e]]) e=lv.next[e];
+		if(lasso_push(q,lv.to[e],a)) goto out;
+	}
+	*loopact = q->n>start+1 ? q->s[--q->n].act : -1;
+	rc=0;
+out:	free(comp);
+	return rc;
 }
 
 /* evaluate expr at state u into *holds; -1 on an evaluation error,
@@ -2041,29 +2157,81 @@ static int lv_holds(const char *expr, int u, int *holds, char *err, size_t errca
 	return ok ? 0 : -1;
 }
 
-/* check all liveness properties; returns index+1 of a violated property
- * (name via *name), 0 if all hold, -1 on error */
-static int liveness_check(const State *init, const char **name, char *err, size_t errcap){
+/* Print the lasso q, whose cycle runs from its last state back to state
+ * q->s[loop] by action loopact (-1: it stutters there), as TLC prints
+ * a temporal counterexample, and write it to the --trace-out file if
+ * one was named.  Returns 0, or 3 if that file could not be written. */
+static int print_lasso(const Lasso *q, int loop, int loopact){
+	const char *la = loopact<0 ? NULL : S.act[loopact].name;
+	printf("Error: The following behavior constitutes a counter-example:\n");
+	for(int i=0;i<q->n;i++){
+		static State st; lv_get(q->s[i].st,&st);
+		Value vv[SP_MAXVAR]; st_views(&st,vv);
+		printf("State %d: <%s>\n  ",i+1,i?S.act[q->s[i].act].name:"Initial predicate");
+		for(int vi=0;vi<S.nvar;vi++){ printf("%s%s=",vi?" ":"",S.var[vi].name); val_print(&vv[vi]); }
+		printf("\n");
+	}
+	if(la) printf("Back to state %d: <%s>\n",loop+1,la);
+	else printf("State %d: Stuttering\n",q->n+1);
+	if(!g_trace_out) return 0;
+	const long **w=malloc((size_t)q->n*2*sizeof *w);
+	if(!w){ fprintf(stderr,"cmc: out of memory\n"); exit(1); }
+	const char **act=(const char **)(void *)(w+q->n);
+	for(int i=0;i<q->n;i++){ w[i]=lv.pool+lv.off[q->s[i].st]; act[i]=i?S.act[q->s[i].act].name:NULL; }
+	int wr=spec_write_trace(g_trace_out,g_trace_fmt,w,act,q->n,loop,la);
+	free(w);
+	if(wr){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
+	printf("Trace written to %s (%s, %d states, loop at state %d).\n",g_trace_out,g_trace_fmt,q->n,loop+1);
+	return 0;
+}
+
+/* The counterexample to a property whose goal fails on the bad region
+ * reg[] with fair core core[] (see the section comment): a shortest
+ * path from the initial state to a state of start[], where the property
+ * fails, on through the bad region to the core, then a fair cycle
+ * there.  Prints it; returns 1, 3 if the trace file could not be
+ * written, or -1 on OOM. */
+static int lv_lasso(const unsigned char *start, const unsigned char *reg, const unsigned char *core, char *err, size_t errcap){
+	Lasso q={0}; int rc=-1, loopact;
+	if(lasso_push(&q,0,-1) || lv_path(0,NULL,start,&q)<0 || lv_path(lasso_last(&q),reg,core,&q)<0) goto out;
+	int loop=q.n-1;
+	if(lv_cycle(core,&q,&loopact)) goto out;
+	rc=print_lasso(&q,loop,loopact) ? 3 : 1;
+out:	if(rc<0) snprintf(err,errcap,"out of memory");
+	free(q.s);
+	return rc;
+}
+
+/* Check all liveness properties.  At the first violated one, print the
+ * violation and its lasso; returns 1, or 3 if the trace file could not
+ * be written.  Returns 0 if all hold, -1 on error (message in err). */
+static int liveness_check(const State *init, char *err, size_t errcap){
 	if(S.nprop==0) return 0;
 	if(g_symok){ snprintf(err,errcap,"liveness properties cannot be checked under symmetry reduction"); return -1; }
 	int rc=0;
-	unsigned char *mask=NULL, *reg=NULL;
+	unsigned char *mask=NULL, *reg=NULL, *core=NULL, *start=NULL;
 	if(lv_build(init,err,errcap)){ rc=-1; goto out; }
-	mask=malloc((size_t)lv.n); reg=malloc((size_t)lv.n);
-	if(!mask||!reg){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+	mask=malloc((size_t)lv.n*4);
+	if(!mask){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+	reg=mask+lv.n; core=reg+lv.n; start=core+lv.n;
 	for(int pi=0; pi<S.nprop && rc==0; pi++){ const SpProp *P=&S.prop[pi];
 		if(P->kind==2) continue;	/* an action property: checked on each step */
 		const char *goal = P->kind==0 ? P->a : P->b;
 		for(int u=0;u<lv.n;u++){ int g; if(lv_holds(goal,u,&g,err,errcap)){ rc=-1; goto out; } mask[u]=!g; }
-		if(lv_bad_region(mask,reg)){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
-		if(P->kind==0){ if(reg[0]){ *name=P->name; rc=pi+1; } continue; }
-		for(int u=0;u<lv.n && rc==0;u++){
-			if(!reg[u]) continue;
-			int a; if(lv_holds(P->a,u,&a,err,errcap)){ rc=-1; goto out; }
-			if(a){ *name=P->name; rc=pi+1; }
+		if(lv_bad_region(mask,core,reg)){ snprintf(err,errcap,"out of memory"); rc=-1; goto out; }
+		/* where the property fails: init for eventually, each A state
+		 * of the bad region for A ~> B */
+		int bad=0;
+		for(int u=0;u<lv.n;u++){
+			int a=P->kind==0 ? u==0 : 1;
+			if(reg[u] && a && P->kind==1 && lv_holds(P->a,u,&a,err,errcap)){ rc=-1; goto out; }
+			start[u]=(unsigned char)(reg[u] && a); bad|=start[u];
 		}
+		if(!bad) continue;
+		printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",P->name);
+		rc=lv_lasso(start,reg,core,err,errcap);
 	}
-out:	free(mask); free(reg); lv_free();
+out:	free(mask); lv_free();
 	return rc;
 }
 
@@ -2180,13 +2348,10 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, co
 	if(ret==0){
 		/* safety held; now check any liveness properties on the full graph */
 		if(S.nprop>nactp){
-			const char *pn=NULL; char lerr[256];
-			int lr=liveness_check(&init,&pn,lerr,sizeof lerr);
+			char lerr[256];
+			int lr=liveness_check(&init,lerr,sizeof lerr);
 			if(lr<0){ fprintf(stderr,"cmc: liveness: %s\n",lerr); ret=3; }
-			else if(lr>0){
-				printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",pn); ret=1;
-				if(trace_out) printf("No trace written: a liveness violation is reported without a path.\n");
-			}
+			else ret=lr;
 		}
 		if(ret==0){
 			printf("Model checking completed. No error has been found.\n");

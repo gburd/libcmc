@@ -620,7 +620,6 @@ bad "an action property without ["  "an action property is"    "$V\nproperty p: 
 bad "an empty action property"      "an action property is"    "$V\nproperty p: always []_vars\n$I"
 bad "an action property too long"   "property"                 "$V\nproperty p: always [$(printf 'x == x and %.0s' $(seq 60))TRUE]_vars\n$I"
 bad "an action property without _vars" "an action property is"   "$V\nproperty p: always [x' >= x]\n$I"
-bad "an action property without _vars" "an action property is"   "$V\nproperty p: always [x' >= x]\n$I"
 bad "a property without a name"     "property needs name:"     "$V\nproperty x == 1\n$I"
 bad "a property of no known form"   "property must be"         "$V\nproperty p: x == 0\n$I"
 bad "an action property on a non-boolean" "expected a boolean in an action property" "$V\naction a:\n  x' = 1 - x\nproperty p: always [x']_vars"
@@ -914,7 +913,20 @@ expect "trace: a format other than itf or json is an error" 3 "the formats are i
 expect "trace: --trace-format without --trace-out is an error" 3 "needs --trace-out" --spec "$HERE/test/spec/mutex.cml" --trace-format json
 expect "trace: an unwritable file is an error" 3 "could not write" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out "$OUT/no/such/dir/t.itf"
 expect "trace: a failed write is an error"     3 "could not write" --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out /dev/full
-expect "trace: a liveness violation writes no file" 1 "No trace written" --spec "$HERE/test/spec/sound/dead.cml" --trace-out "$OUT/live.itf"
+# a liveness violation prints its lasso, as TLC does, and writes it:
+# ITF marks the cycle with ADR-015's "loop", JSON repeats its first state
+expect "lasso: printed with the state the cycle goes back to" 1 "Back to state 3: <flip>" --spec "$HERE/test/spec/fair/lasso.cml"
+expect "lasso: a cycle that stutters is printed so" 1 "State 2: Stuttering" --spec "$HERE/test/spec/sound/dead.cml"
+expect "lasso: written as ITF with its loop" 1 '(itf, 4 states, loop at state 3)' --spec "$HERE/test/spec/fair/lasso.cml" --trace-out "$OUT/live.itf"
+expectp "lasso: ITF loop is the index of the cycle's first state" 0 '"loop":2}' cat "$OUT/live.itf"
+expectp "lasso: ITF names the action that closes the cycle" 0 '"loopAction":"flip"' cat "$OUT/live.itf"
+expect "lasso: a stutter cycle loops at its last state" 1 '(json, 1 states, loop at state 1)' --spec "$HERE/test/spec/sound/dead.cml" --trace-out "$OUT/live.json" --trace-format json
+expectp "lasso: JSON repeats the loop state, a stutter" 0 '"action":"Stuttering","back_to":0' cat "$OUT/live.json"
+expect "lasso: as JSON" 1 '(json, 4 states, loop at state 3)' --spec "$HERE/test/spec/fair/lasso.cml" --trace-out "$OUT/live.json" --trace-format json
+expectp "lasso: JSON repeats the loop state with its action" 0 '"index":4,"action":"flip","back_to":2' cat "$OUT/live.json"
+expect "lasso: strong fairness owes only what is enabled" 1 "Back to state 3: <flip>" --spec "$HERE/test/spec/fair/lasso_sf.cml"
+expect "lasso: the cycle of A ~> B starts at an A state" 1 "State 3: Stuttering" --spec "$HERE/test/spec/sound/leads.cml"
+expect "lasso: an unwritable file is an error" 3 "could not write" --spec "$HERE/test/spec/sound/dead.cml" --trace-out /dev/full
 expect "trace: --emit-tla takes no --trace-out" 3 "not supported with --emit-tla" --emit-tla "$HERE/test/spec/mutex.cml" --trace-out "$OUT/t.itf"
 rm -f "$OUT/pass.itf"
 expect "trace: a pass writes no file" 0 "No error has been found" --spec "$HERE/test/spec/mutex.cml" --trace-out "$OUT/pass.itf"

@@ -290,10 +290,23 @@ records and whether it is
 .Ql crashed ,
 and the
 .Ql replies .
-A liveness or
-.Ic eventually
-violation has no path, so no file is written, and neither is one on a
-pass.
+With
+.Fl -spec ,
+a liveness violation writes its lasso: in
+.Cm itf
+the states of the prefix and the cycle, with ADR-015's
+.Ql loop
+holding the index of the state the cycle goes back to and the header's
+.Ql #meta
+naming that last action as
+.Ql loopAction
+.Pq Ql Stuttering No when the cycle stutters ;
+in
+.Cm json
+the same states, then the loop state again with that action and a
+.Ql back_to
+index.
+No file is written on a pass.
 A file that cannot be written is exit 3.
 .It Fl -emit-tla Ar file
 Translate the abstract specification

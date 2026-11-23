@@ -281,8 +281,16 @@ led to it (Apalache leaves that out).  `json` writes a plain array, one
 object per state with its `index`, its `action` (`null` for the first)
 and its `vars`, an integer as a number, a function as an object keyed
 by its arguments, a record as an object of its fields and a sequence as
-an array.  A liveness violation has no path to write, and
-a pass writes no file.
+an array.  A pass writes no file.
+
+A liveness violation writes the lasso cmc prints (see Liveness): ITF
+lists the prefix and the cycle and marks the state the cycle goes back
+to with ADR-015's `"loop": INDEX`, and the header's `#meta` names the
+closing action as `loopAction` (`Stuttering` for a cycle that stays put).
+JSON lists the same states, then the loop state again, with that action
+and `"back_to": INDEX`.  Apalache 0.63 writes no `loop` for a temporal
+violation; it repeats the loop state and adds its own `__InLoop`
+variables, so the Apalache gate compares invariant traces only.
 
 The spec gate checks that each file parses, holds the printed actions
 plus the initial state, and ends in the printed state; the Apalache gate
@@ -315,7 +323,14 @@ property reaches_max: eventually x == N
 Under weak fairness (every continuously-enabled action eventually fires),
 `eventually E` requires every behaviour to reach `E`, and `A ~> B`
 requires every `A` to be followed by a `B`.  A violation is a fair cycle
-that avoids the goal.  This is bounded, in-process liveness on the
+that avoids the goal, printed as TLC prints it: the states of a path
+to it, then `Back to state N: <action>` for the step that closes the
+cycle, or `State N: Stuttering` when the run just stops there.  The
+prefix takes a shortest path to a state where the property fails, then
+a shortest one on to the cycle, and the cycle takes each action the
+fairness asks it to take, so the lasso is a fair run that never meets
+the goal.  The emit gate checks that TLC prints a lasso of the same
+length, going back to the same state, on every violated property.  This is bounded, in-process liveness on the
 abstract model; `cmc --emit-tla` emits the fairness and the property so
 TLC can check the same thing.
 

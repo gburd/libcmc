@@ -1,0 +1,13 @@
+# test/spec/fair/lasso_sf.cml: lasso.cml under strong fairness of up and
+# flip only.  The cycle between 2 and 3 must take flip, which is
+# enabled there, and owes nothing to up, which is enabled nowhere on it;
+# stop has no fairness.  So `eventually x == 4` fails on the lasso of
+# lasso.cml, and the emit gate checks TLC prints the same one.
+
+module lasso_sf
+
+extends lasso
+
+fair strong up
+fair strong flip
+fair weak flip
