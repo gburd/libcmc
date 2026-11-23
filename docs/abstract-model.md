@@ -105,6 +105,12 @@ comparisons `== != < <= > >=`, `A in SET`; boolean `and or not`;
 quantifiers `all V in SET : E`, `some V in SET : E`; and `count V in SET
 : E` (cardinality).
 
+Precedence is TLA+'s, and the mixes TLA+ refuses are refused: `/` or
+`mod` next to another `*`, `/` or `mod` (`x mod 3 * 2`, `x * 2 / 2`),
+`mod` next to `+` or `-` (`1 + x mod 4`), and `and` next to `or` (`a or
+b and c`) each need parentheses.  `*` chains (`x * 2 * 3`) and `+`/`-`
+chains do not.
+
 An update `[B except P = V, ...]` replaces the part of B at each path P,
 as TLA+'s `[B EXCEPT !P = V]`: P is `[k]` (a function key or sequence
 position) or `.a` (a record field), chained for nested values, with an

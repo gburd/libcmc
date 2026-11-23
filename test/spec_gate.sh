@@ -451,23 +451,23 @@ value "functions of one length differ in a key"   1 "[i in 0 .. 1 -> i] == [i in
 # the right operand of a decided and/or is not evaluated (cmc 2.1
 # evaluated it and refused each of these)
 value "or skips a division by zero"  0 "x == 0 or 1 / x == 1"
-value "and skips an application outside the domain" 0 "x > 0 and f[2] == 0 or x == 0"
+value "and skips an application outside the domain" 0 "(x > 0 and f[2] == 0) or x == 0"
 value "or skips a non-boolean"       0 "TRUE or f"
 value "and skips a quantifier" 0 "not (FALSE and (all i in 0 .. 1 : 1 / i == 0))"
 value "a quantifier over no element evaluates no body" 0 "all i in 1 .. x : 1 / (i - 1) == 0"
-value "and skips an overflow"        0 "x == 1 and 9223372036854775807 + 1 == 0 or TRUE"
+value "and skips an overflow"        0 "(x == 1 and 9223372036854775807 + 1 == 0) or TRUE"
 value "or skips a set past its limit" 0 "TRUE or x in 0 .. 99"
 value "and skips a function literal" 0 "not (FALSE and [i in 0 .. 1 -> 1 / i] == f)"
-value "and skips an except outside the domain" 0 "x == 1 and [x except [0] = 1] == f or TRUE"
+value "and skips an except outside the domain" 0 "(x == 1 and [x except [0] = 1] == f) or TRUE"
 value "an evaluated operand still errs" 1 "x == 0 and f[0] == 1"
 # a skipped operand is parsed, not evaluated: no error from its values
 value "and skips a literal over a set" 0 "not (FALSE and [i in {0, 1} -> 0] == f)"
 value "and skips membership of a scalar" 0 "not (FALSE and x in 0)"
-value "and skips a mixed comparison" 0 "FALSE and {0} == 1 or TRUE"
-value "and skips each arithmetic error" 0 "FALSE and 9223372036854775807 * 2 + 1 / 0 + (0 - 1) / 1 + 1 / (0 - 2) == 0 or TRUE"
-value "and skips each mod error" 0 "FALSE and 1 mod 0 + (0 - 1) mod 2 + 1 mod (0 - 2) == 0 or TRUE"
-value "and skips an overflow in -" 0 "FALSE and (0 - 9223372036854775807) - 2 == 0 or TRUE"
-value "and skips a two-key except" 0 "FALSE and [f except [0] = 1, [1] = 1] == f or TRUE"
+value "and skips a mixed comparison" 0 "(FALSE and {0} == 1) or TRUE"
+value "and skips each arithmetic error" 0 "(FALSE and 9223372036854775807 * 2 + 1 / 0 + (0 - 1) / 1 + 1 / (0 - 2) == 0) or TRUE"
+value "and skips each mod error" 0 "(FALSE and (1 mod 0) + ((0 - 1) mod 2) + (1 mod (0 - 2)) == 0) or TRUE"
+value "and skips an overflow in -" 0 "(FALSE and (0 - 9223372036854775807) - 2 == 0) or TRUE"
+value "and skips a two-key except" 0 "(FALSE and [f except [0] = 1, [1] = 1] == f) or TRUE"
 # the same operators on the right types still evaluate
 printf 'module m\nvar x : 0 .. 1\nvar f : [0 .. 1 -> 0 .. 1]\ninit x == 0 and f == [i in 0 .. 1 -> 0]\naction a:\n  when not (x == 1) and (TRUE or FALSE) and x in {0, 1}\n  x%s = 1\n  f%s = [f except [x] = 1]\ninvariant i: (count i in 0 .. 1 : f[i] == 1) + x * 2 <= 3 and {x} != {2} and f != [i in 0 .. 1 -> 1] and (TRUE == TRUE)\n' "'" "'" > "$OUT/typed-ok.cml"
 expect "well-typed operators still evaluate" 0 "2 distinct states found" --spec "$OUT/typed-ok.cml" --no-deadlock
@@ -479,7 +479,7 @@ echo "-- records, bounded sequences and def operators"
 # rs DESC WANT EXPR: invariant EXPR over a record r, a sequence q and a
 # function of records g holds (0), is violated (1) or is an error (3)
 rs() {
-	printf 'module m\ndef two = 2\ndef inc(a) = a + 1\ndef pick(c, a, b) = c and a or not c and b\nvar r : [a : 0 .. 3, b : 0 .. 1]\nvar q : Seq(0 .. 3, 3)\nvar g : [0 .. 1 -> [c : 0 .. 2, d : Seq(0 .. 1, 2)]]\ninit r == [b |-> 0, a |-> 1] and q == <<1, 2>> and g == [i in 0 .. 1 -> [c |-> i, d |-> <<i>>]]\ninvariant i: %s\n' "$3" > "$OUT/rs.cml"
+	printf 'module m\ndef two = 2\ndef inc(a) = a + 1\ndef pick(c, a, b) = (c and a) or (not c and b)\nvar r : [a : 0 .. 3, b : 0 .. 1]\nvar q : Seq(0 .. 3, 3)\nvar g : [0 .. 1 -> [c : 0 .. 2, d : Seq(0 .. 1, 2)]]\ninit r == [b |-> 0, a |-> 1] and q == <<1, 2>> and g == [i in 0 .. 1 -> [c |-> i, d |-> <<i>>]]\ninvariant i: %s\n' "$3" > "$OUT/rs.cml"
 	case $2 in
 	0) expect "$1" 0 "No error has been found" --spec "$OUT/rs.cml" --no-deadlock ;;
 	1) expect "$1" 1 "Invariant i is violated" --spec "$OUT/rs.cml" --no-deadlock ;;
@@ -535,7 +535,7 @@ else echo "FAIL encfuzz.c does not build"; fail=1; fi
 rs "an except path past its depth"     "an except path is too deep" "[g except ![0].d[1].c.e = 1] == g"
 rs "an except path with no field name" "expected a field name after ." "[r except !. = 1] == r"
 rs "an except path with no selector"   "expected \\[ or . in except" "[r except ! = 1] == r"
-rs "an except with a skipped @ body"   0 "FALSE and [r except !.a = @ / 0] == r or TRUE"
+rs "an except with a skipped @ body"   0 "(FALSE and [r except !.a = @ / 0] == r) or TRUE"
 rs "a record literal with no field name" "expected a field name in record" "[a |-> 1, ] == r"
 rs "a record literal with no ]"        "expected \] to close record" "r == [a |-> 1, b |-> 0"
 rs "a sequence operator with no ("     "expected ( after a sequence" "Len == 0"
@@ -545,11 +545,11 @@ rs "a def call with a broken argument" "expected )" "inc((1) == 2"
 rs "an Append past the sequence limit" "sequence too large" "Len(Append(<<0,0,0,0,0,0,0,0,0,0,0,0>>, 0)) == 13"
 rs "a concatenation past the limit"    "sequence too large" "Len(<<0,0,0,0,0,0>> \\o <<0,0,0,0,0,0,0>>) == 13"
 rs "SubSeq bounds of a set"            "expected an integer in SubSeq" "SubSeq(q, {1}, 1) == q"
-rs "a skipped sequence operator"       0 "FALSE and Head(<<>>) == Tail(<<>>) and SubSeq(q, 0, 9) == Append(q, 0) and Len(r) == 0 or TRUE"
-rs "a skipped field access and index"  0 "FALSE and q.a == g[5].c and r[0] == 0 and <<1>> == <<>> or TRUE"
-rs "a skipped record literal"          0 "FALSE and [a |-> 1 / 0] == r or TRUE"
-rs "a skipped sequence literal"        0 "FALSE and <<1 / 0, 2>> == q or TRUE"
-rs "a skipped concatenation"           0 "FALSE and (q \\o r) == q or TRUE"
+rs "a skipped sequence operator"       0 "(FALSE and Head(<<>>) == Tail(<<>>) and SubSeq(q, 0, 9) == Append(q, 0) and Len(r) == 0) or TRUE"
+rs "a skipped field access and index"  0 "(FALSE and q.a == g[5].c and r[0] == 0 and <<1>> == <<>>) or TRUE"
+rs "a skipped record literal"          0 "(FALSE and [a |-> 1 / 0] == r) or TRUE"
+rs "a skipped sequence literal"        0 "(FALSE and <<1 / 0, 2>> == q) or TRUE"
+rs "a skipped concatenation"           0 "(FALSE and (q \\o r) == q) or TRUE"
 rs "an application of a record"        "applied a non-function" "r[1] == 0"
 rs "== of records of other fields"     1 "[a |-> 1] == [b |-> 1]"
 rs "a range is a set operand"          0 "(0 .. 2) == {0, 1, 2} and 1 in 0 .. 2"
@@ -605,6 +605,16 @@ bad "a const without ="             "const needs ="            "const N 3\n$V\n$
 bad "a const that is not a number"  "const N: bad value"       "const N = {1}\n$V\n$I"
 bad "a const that fails to evaluate" "const N: bad value"      "const N = M\n$V\n$I"
 bad "a const that is a boolean"     "const N: bad value"       "const N = TRUE\n$V\n$I"
+# the mixes of operators TLA+ refuses, or reads otherwise, are refused:
+# `x mod 3 * 2` was (x mod 3) * 2 here and x % 6 to TLC
+bad "mod beside *"                  "needs parentheses, as in TLA+" "$V\ninvariant i: x mod 3 * 2 != 4"
+bad "* beside /"                    "needs parentheses, as in TLA+" "$V\ninvariant i: x * 2 / 2 == x"
+bad "/ after /"                     "needs parentheses, as in TLA+" "$V\ninvariant i: x / 2 / 1 == 0"
+bad "mod after +"                   "needs parentheses, as in TLA+" "$V\ninvariant i: 1 + x mod 4 >= 1"
+bad "mod before -"                  "needs parentheses, as in TLA+" "$V\ninvariant i: x mod 4 - 1 <= 1"
+bad "and beside or"                 "needs parentheses, as in TLA+" "$V\ninvariant i: x == 1 or x == 0 and TRUE"
+bad "or beside and"                 "needs parentheses, as in TLA+" "$V\ninvariant i: x == 0 and TRUE or x == 1"
+expect "prec: parenthesised mixes, read as TLA+ reads them" 0 "3 distinct states found" --spec "$HERE/test/spec/prec.cml"
 bad "a const declared twice"        "const N is declared twice" "const N = 1\nconst N = 2\n$V\n$I"
 # a const an extended module declared cannot be overridden: the base has
 # already evaluated with its value (the emitted .cfg had both values)

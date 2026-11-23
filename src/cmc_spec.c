@@ -227,7 +227,10 @@ static int fld_id(const char *name){
  * but its value is ignored and evaluation errors in it (a wrong type,
  * division by zero, an application outside the domain, an overflow)
  * are not raised: `x > 0 and y / x == 2` is FALSE at x = 0. */
-typedef struct { const char *p; Env *env; int ok; char err[128]; int dead; } Pst;
+/* lastmod and lastand say whether the term sp_mul() or sp_and() just
+ * read was a `mod` or held an `and`, so that the caller can refuse the
+ * mixes TLA+ refuses (see sp_mul()). */
+typedef struct { const char *p; Env *env; int ok; char err[128]; int dead; int lastmod, lastand; } Pst;
 
 static void sp_skip(Pst *s){ while(*s->p && isspace((unsigned char)*s->p)) s->p++; }
 static int sp_word(Pst *s, const char *w){
@@ -798,22 +801,43 @@ static Value sp_setspec(Pst *s){
  * refused on negative operands, where C's truncating division differs
  * from TLA+'s \div and %, so the emitted module would mean something
  * else. */
+/*
+ * Precedence follows TLA+ wherever cmc accepts a form, and the forms
+ * TLA+ refuses are refused: SANY gives \div no associativity and %
+ * a level of its own, between + and *, with none.  So a `/` or a `mod`
+ * stands alone in its chain of * / mod, and a `mod` beside + or - needs
+ * parentheses (sp_add()).  Read with C's rules, `x mod 3 * 2` meant
+ * (x mod 3) * 2 to cmc and x % 6 to TLC.
+ */
 static Value sp_mul(Pst *s){
 	Value a=sp_post(s);
+	int nop=0, odd=0, lm=0;	/* operators read; one was / or mod; the last was mod */
 	for(;;){ sp_skip(s);
-		if(*s->p=='*'){ s->p++; Value b=sp_post(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
-		else if(*s->p=='/'){ s->p++; Value b=sp_post(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0 && efail(s,"divide by zero")) return a; if((a.i<0||b.i<0) && efail(s,"/ of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i/b.i:0); }
-		else if(sp_word(s,"mod")){ Value b=sp_post(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0 && efail(s,"mod by zero")) return a; if((a.i<0||b.i<0) && efail(s,"mod of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i%b.i:0); }
-		else break; }
+		int ismul=*s->p=='*', isdiv=*s->p=='/', ismod=!ismul && !isdiv && sp_word(s,"mod");
+		if(!ismul && !isdiv && !ismod) break;
+		if(nop && (odd || !ismul)){ fail(s,"/ or mod next to * / mod needs parentheses, as in TLA+"); return a; }
+		nop++; odd|=!ismul; lm=ismod;
+		if(ismul){ s->p++; Value b=sp_post(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
+		else if(isdiv){ s->p++; Value b=sp_post(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0 && efail(s,"divide by zero")) return a; if((a.i<0||b.i<0) && efail(s,"/ of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i/b.i:0); }
+		else { Value b=sp_post(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0 && efail(s,"mod by zero")) return a; if((a.i<0||b.i<0) && efail(s,"mod of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i%b.i:0); }
+	}
+	s->lastmod=lm;
 	return a;
 }
+/* `mod` binds below + and - in TLA+, with no relative precedence, so a
+ * mod term next to + or - needs parentheses (SANY refuses it). */
 static Value sp_add(Pst *s){
-	Value a=sp_mul(s);
+	Value a=sp_mul(s); int nop=0, mods=s->lastmod;
 	for(;;){ sp_skip(s);
-		if(*s->p=='+'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(__builtin_add_overflow(a.i,b.i,&r) && efail(s,"integer overflow in +")) return a; a=vint(r); }
-		else if(*s->p=='-'&&s->p[1]!='>'){ s->p++; Value b=sp_mul(s); long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(__builtin_sub_overflow(a.i,b.i,&r) && efail(s,"integer overflow in -")) return a; a=vint(r); }
+		int isplus=*s->p=='+', isminus=*s->p=='-'&&s->p[1]!='>';
+		if(isplus||isminus) nop++;
+		if(isplus){ s->p++; Value b=sp_mul(s); mods|=s->lastmod; long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(__builtin_add_overflow(a.i,b.i,&r) && efail(s,"integer overflow in +")) return a; a=vint(r); }
+		else if(isminus){ s->p++; Value b=sp_mul(s); mods|=s->lastmod; long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(__builtin_sub_overflow(a.i,b.i,&r) && efail(s,"integer overflow in -")) return a; a=vint(r); }
 		else if(s->p[0]=='\\' && s->p[1]=='o' && !isalnum((unsigned char)s->p[2])){ s->p+=2; Value b=sp_mul(s); if(!need(s,&a,T_SEQ,"\\o") || !need(s,&b,T_SEQ,"\\o")) return a; if(!s->dead) a=seq_cat(s,&a,&b); }
-		else break; }
+		else break;
+		if(nop && mods){ fail(s,"mod next to + or - needs parentheses, as in TLA+"); return a; }
+	}
+	s->lastmod=0;
 	return a;
 }
 
@@ -868,23 +892,28 @@ static Value sp_not(Pst *s){ sp_skip(s); if(sp_word(s,"not")){ Value v=sp_not(s)
  * the left operand decides the result, the right one is parsed but not
  * evaluated (see Pst.dead) */
 static Value sp_and(Pst *s){
-	Value a=sp_not(s);
-	while(sp_word(s,"and")){
+	Value a=sp_not(s); int nand=0;
+	while(sp_word(s,"and")){ nand++;
 		if(!need(s,&a,T_BOOL,"and")) return a;
 		int skip=!a.i; s->dead+=skip;
 		Value b=sp_not(s);
 		s->dead-=skip;
 		if(!skip && need(s,&b,T_BOOL,"and")) a=b;
 	}
+	s->lastand=nand>0;
 	return a;
 }
+/* TLA+ gives /\ and \/ no relative precedence: SANY refuses
+ * `a \/ b /\ c`, so `a or b and c` needs parentheses here too. */
 static Value sp_or(Pst *s){
-	Value a=sp_and(s);
+	Value a=sp_and(s); int ands=s->lastand;
 	while(sp_word(s,"or")){
+		if(ands){ fail(s,"and next to or needs parentheses, as in TLA+"); return a; }
 		if(!need(s,&a,T_BOOL,"or")) return a;
 		int skip=a.i!=0; s->dead+=skip;
 		Value b=sp_and(s);
 		s->dead-=skip;
+		if(s->lastand){ fail(s,"and next to or needs parentheses, as in TLA+"); return a; }
 		if(!skip && need(s,&b,T_BOOL,"or")) a=b;
 	}
 	return a;

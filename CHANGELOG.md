@@ -146,6 +146,13 @@ before):
   failed (also in 2.2).  The override is refused rather than honoured
   because the base already evaluated with the first value (a const
   defined from it, a Seq bound).
+- Operator mixes TLA+ refuses or reads otherwise are refused: `/` or
+  `mod` beside `*`, `/` or `mod`, `mod` beside `+` or `-`, and `and`
+  beside `or` need parentheses.  cmc read `x mod 3 * 2` as `(x mod 3) *
+  2` and emitted `x % 3 * 2`, which TLC reads as `x % 6`, so the model
+  and its TLC twin checked different formulas; the other mixes emitted
+  modules SANY rejects.  test/spec/prec.cml holds the parenthesised
+  forms, gated against TLC.
 
 ## 2.2.0 (2026-11-22)
 

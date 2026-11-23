@@ -1,0 +1,18 @@
+# test/spec/prec.cml: the operator mixes TLA+ accepts only with
+# parentheses, written with them.  cmc refuses `x mod 3 * 2`, `1 + x
+# mod 4`, `x * 2 / 2` and `a or b and c` unparenthesised, as SANY does
+# (or, for the first, reads it as x % 6); emit_gate.sh checks that TLC
+# finds the same 3 states here (x % 6 would let inc run to x = 4).
+module prec
+
+var x : 0 .. 5
+
+init x == 0
+
+action inc:
+  when ((x mod 3) * 2 != 4 and x < 5) or x == 9
+  x' = x + 1
+
+deadlock = off
+
+invariant ok: (x / 2) * 2 <= x and (x mod 2) + 1 >= 1 and (x == 0 or all i in 0 .. x : i < 3 and i >= 0)

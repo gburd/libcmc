@@ -126,6 +126,7 @@ check test/spec distinct distinct PASS
 # SYMMETRY, so TLC must find the 357 states cmc finds without it
 ND=357 check test/spec symrec symrec PASS
 check test/spec countops countops PASS
+check test/spec prec prec PASS
 check test/spec guard guard PASS
 check test/spec guard guardb VIOLATION --define BUG
 # the deadlock check and TLC's CONSTRAINT and ACTION_CONSTRAINT, with
