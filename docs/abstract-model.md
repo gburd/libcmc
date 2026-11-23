@@ -54,7 +54,10 @@ SMT-encodable -- not full TLA+.
 - `module NAME` -- the module name (and, for TLA+, the output file name).
 - `extends NAME` (or `import NAME`) -- merge another module's constants,
   variables, actions and invariants; a shared base is written once.
-- `const NAME = EXPR` -- a finite integer parameter.
+- `const NAME = EXPR` -- a finite integer parameter.  A name is declared
+  once: a second `const` of it, in the module or in one it extends, is
+  an error (the extended module already evaluated with the first value;
+  to check a bigger instance, edit the base or give it its own module).
 - `var NAME : LO .. HI` -- a variable over a finite integer range.
 - `var NAME : [LO .. HI -> T]` -- a function (finite map) variable over
   integer keys, used as an array (`NAME[k]`).  T is any variable type.

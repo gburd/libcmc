@@ -139,6 +139,13 @@ before):
   `--define i`, and the model passed with the action left out (of the
   emitted module too).  A header with text it cannot place, or a tag
   that is not a name, is an error.
+- A `const` declared twice, in one module or over an `extends`, is an
+  error.  The loader kept the first value while `--emit-cfg` wrote both
+  and TLC took the last, so a model "overriding" a base module's
+  constant checked the base's value and passed where its TLC twin
+  failed (also in 2.2).  The override is refused rather than honoured
+  because the base already evaluated with the first value (a const
+  defined from it, a Seq bound).
 
 ## 2.2.0 (2026-11-22)
 

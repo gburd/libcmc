@@ -1115,6 +1115,10 @@ static int sp_load_into(const char *path){
 		if(!strncmp(s,"const ",6)){
 			char *rest=sp_trim(s+6); char *eq=strchr(rest,'='); if(!eq){ fprintf(stderr,"cmc: %s:%d: const needs =\n",path,ln); goto bad; }
 			*eq=0; char *nm=sp_trim(rest), *vv=sp_trim(eq+1);
+			/* No override, even of an extended module's const: that
+			 * module's load-time values (a derived const, a Seq bound)
+			 * already used the first value.  SANY refuses it too. */
+			{ int dup; (void)cst_lookup(nm,&dup); if(dup){ fprintf(stderr,"cmc: %s:%d: const %s is declared twice\n",path,ln,nm); goto bad; } }
 			if(S.ncst>=SP_MAXCONST){ fprintf(stderr,"cmc: too many consts\n"); goto bad; }
 			int ok; long val=sp_const_eval(vv,&ok); if(!ok){ fprintf(stderr,"cmc: %s:%d: const %s: bad value\n",path,ln,nm); goto bad; }
 			CPY(S.cst[S.ncst].name,nm,"const name"); S.cst[S.ncst].val=val; S.ncst++; in_action=0; continue;

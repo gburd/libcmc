@@ -605,6 +605,11 @@ bad "a const without ="             "const needs ="            "const N 3\n$V\n$
 bad "a const that is not a number"  "const N: bad value"       "const N = {1}\n$V\n$I"
 bad "a const that fails to evaluate" "const N: bad value"      "const N = M\n$V\n$I"
 bad "a const that is a boolean"     "const N: bad value"       "const N = TRUE\n$V\n$I"
+bad "a const declared twice"        "const N is declared twice" "const N = 1\nconst N = 2\n$V\n$I"
+# a const an extended module declared cannot be overridden: the base has
+# already evaluated with its value (the emitted .cfg had both values)
+printf 'module ovb\nconst N = 2\n' > "$OUT/ovb.cml"
+bad "a const that redeclares an extended one" "const N is declared twice" "extends ovb\nconst N = 4\n$V\n$I"
 bad "a var without :"               "var needs :"              "var x 0 .. 1\ninit x == 0\n$I"
 bad "a function var without ->"     "function var needs ->"    "var f : [0 .. 1, 0 .. 1]\ninit f == 0\n$I"
 bad "fairness other than weak or strong" "fairness is weak or strong" "$V\nfairness fast\n$I"
