@@ -33,7 +33,9 @@ each checked against single-worker TLC 2.19 on the emitted module
   Stuttering`.  `--trace-out` writes it, in ITF with ADR-015's `loop`
   index (and `loopAction` in `#meta`), in JSON with the loop state
   repeated and a `back_to` index; before, no file was written.  The
-  emit gate checks each TEMPORAL row's lasso against TLC's.
+  lasso is a valid fair counterexample but in general not TLC's (its
+  prefix or cycle can differ in length or loop state); on the emit
+  gate's TEMPORAL rows it is TLC's, and the gate compares the two.
 
 `cmc --spec` has TLC's checking options (docs/plans/2.3-tla-users.md,
 item 1), each calibrated against single-worker TLC 2.19 on the same

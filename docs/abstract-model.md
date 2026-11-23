@@ -350,8 +350,13 @@ cycle, or `State N: Stuttering` when the run just stops there.  The
 prefix takes a shortest path to a state where the property fails, then
 a shortest one on to the cycle, and the cycle takes each action the
 fairness asks it to take, so the lasso is a fair run that never meets
-the goal.  The emit gate checks that TLC prints a lasso of the same
-length, going back to the same state, on every violated property.  This is bounded, in-process liveness on the
+the goal.  It is a valid fair counterexample, but in general not the
+one TLC prints: its prefix or cycle can be longer or shorter than
+TLC's, or close at another state (an independent review found 663 of
+1060 random violations differed in shape, and all 1089 lassos it
+checked valid).  On the gated TEMPORAL rows the lasso is TLC's, and
+the emit gate compares the two there, since both searches are
+deterministic; a change that moves one of them is flagged.  This is bounded, in-process liveness on the
 abstract model; `cmc --emit-tla` emits the fairness and the property so
 TLC can check the same thing.
 

@@ -62,7 +62,10 @@ check() {
 		echo "ok   $mod [$want]: TLC agrees (trace=$tt)"
 	elif [ "$want" = TEMPORAL ]; then
 		# the lasso: as many states, and the same state the cycle
-		# goes back to (or a stutter), in cmc's print as in TLC's
+		# goes back to (or a stutter), in cmc's print as in TLC's.
+		# cmc's lasso is a valid fair one but not TLC's in general;
+		# on these rows both searches are deterministic and agree,
+		# so a change that moves either is flagged here
 		shape='^(State [0-9]+: Stuttering|State [0-9]+|Back to state [0-9]+)'
 		cl=$(grep -oE "$shape" "$d/cmc.txt" | tr '\n' ' ') tl=$(grep -oE "$shape" "$d/out.txt" | tr '\n' ' ')
 		if [ -z "$tl" ] || [ "$cl" != "$tl" ]; then
