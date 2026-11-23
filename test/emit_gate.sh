@@ -127,6 +127,7 @@ check test/spec distinct distinct PASS
 ND=357 check test/spec symrec symrec PASS
 check test/spec countops countops PASS
 check test/spec prec prec PASS
+check test/spec names names PASS
 check test/spec guard guard PASS
 check test/spec guard guardb VIOLATION --define BUG
 # the deadlock check and TLC's CONSTRAINT and ACTION_CONSTRAINT, with

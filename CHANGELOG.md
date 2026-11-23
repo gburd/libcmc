@@ -153,6 +153,12 @@ before):
   and its TLC twin checked different formulas; the other mixes emitted
   modules SANY rejects.  test/spec/prec.cml holds the parenthesised
   forms, gated against TLC.
+- `--emit-tla` rewrites a keyword only when it is a whole word.  It
+  checked only the character after one, so `votedFor` came out as
+  `votedF\/`, `small` as `sm\A` and `min` as `m\in`, which SANY
+  rejects.  A `count` inside brackets (`g[count i in S : E]`) ended at
+  the bracket that encloses it; its body used to run past the `]`.
+  test/spec/names.cml holds both, gated against TLC.
 
 ## 2.2.0 (2026-11-22)
 

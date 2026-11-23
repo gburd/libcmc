@@ -2650,41 +2650,50 @@ int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errc
  * a standard module.  cmc --emit-tla FILE.cml writes to stdout.
  * ===================================================================== */
 
-/* translate one .cml expression to TLA+ into out (bounded) */
-static int tla_word(const char **p, const char *w, FILE *o, const char *repl){
-	size_t n=strlen(w);
-	if(!strncmp(*p,w,n) && !isalnum((unsigned char)(*p)[n]) && (*p)[n]!='_'){ fputs(repl,o); *p+=n; return 1; }
-	return 0;
+/* the TLA+ spelling of the .cml keyword w[0 .. n), or NULL when the
+ * word is a name and is written as it is */
+static const char *tla_kw(const char *w, size_t n){
+	static const char *kw[][2]={{"all","\\A"},{"some","\\E"},{"not","~"},{"and","/\\"},
+		{"or","\\/"},{"in","\\in"},{"mod","%"},{"except","EXCEPT"}};
+	for(size_t i=0;i<sizeof kw/sizeof kw[0];i++) if(strlen(kw[i][0])==n && !strncmp(w,kw[i][0],n)) return kw[i][1];
+	return NULL;
 }
+static int tla_idch(char c){ return isalnum((unsigned char)c) || c=='_'; }
 /* Translate the .cml expression e[0 .. n) (n < 0: to its end) to TLA+
  * on o: a token-level rewrite, recursing into a count body so that every
- * operator there is translated as it is outside. */
+ * operator there is translated as it is outside.  A keyword is only a
+ * whole word: the name votedFor keeps its `or`. */
 static void tla_expr_n(const char *e, long n, FILE *o){
 	const char *p=e, *end=n<0?e+strlen(e):e+n;
 	while(p<end){
 		if(isspace((unsigned char)*p)){ fputc(*p++,o); continue; }
-		if(tla_word(&p,"all",o,"\\A")) continue;
-		if(tla_word(&p,"some",o,"\\E")) continue;
-		if(!strncmp(p,"count",5) && !isalnum((unsigned char)p[5]) && p[5]!='_'){ fputs("Cardinality({",o); p+=5;
-			while(p<end&&isspace((unsigned char)*p))p++;
-			while(p<end&&(isalnum((unsigned char)*p)||*p=='_')) fputc(*p++,o);
-			fputs(" \\in ",o); while(p<end&&isspace((unsigned char)*p))p++;
-			if(!strncmp(p,"in",2)) p+=2;
-			while(p<end&&isspace((unsigned char)*p))p++;
-			const char *set=p; while(p<end && *p!=':') p++;
-			tla_expr_n(set,p-set,o);
-			if(p<end && *p==':'){ p++; fputs(" : ",o); }
-			/* the body runs to the paren that closes the count */
-			const char *body=p; int depth=0;
-			while(p<end){ if(*p=='(') depth++; if(*p==')'){ if(depth==0) break; depth--; } p++; }
-			tla_expr_n(body,p-body,o);
-			fputs("})",o); continue; }
-		if(tla_word(&p,"not",o,"~")) continue;
-		if(tla_word(&p,"and",o,"/\\")) continue;
-		if(tla_word(&p,"or",o,"\\/")) continue;
-		if(tla_word(&p,"in",o,"\\in")) continue;
-		if(tla_word(&p,"mod",o,"%")) continue;
-		if(tla_word(&p,"except",o,"EXCEPT")) continue;
+		if(tla_idch(*p)){
+			const char *w=p; while(p<end && tla_idch(*p)) p++;
+			size_t wn=(size_t)(p-w);
+			if(wn==5 && !strncmp(w,"count",5)){ fputs("Cardinality({",o);
+				while(p<end&&isspace((unsigned char)*p))p++;
+				while(p<end&&tla_idch(*p)) fputc(*p++,o);
+				fputs(" \\in ",o); while(p<end&&isspace((unsigned char)*p))p++;
+				if(!strncmp(p,"in",2)) p+=2;
+				while(p<end&&isspace((unsigned char)*p))p++;
+				const char *set=p; while(p<end && *p!=':') p++;
+				tla_expr_n(set,p-set,o);
+				if(p<end && *p==':'){ p++; fputs(" : ",o); }
+				/* the body runs to the bracket that encloses the count,
+				 * or a comma beside it, as the parser reads it */
+				const char *body=p; int depth=0;
+				while(p<end){
+					if(*p=='('||*p=='['||*p=='{') depth++;
+					else if(*p==')'||*p==']'||*p=='}'){ if(depth==0) break; depth--; }
+					else if(*p==',' && depth==0) break;
+					p++;
+				}
+				tla_expr_n(body,p-body,o);
+				fputs("})",o); continue; }
+			const char *r=tla_kw(w,wn);
+			if(r) fputs(r,o); else fwrite(w,1,wn,o);
+			continue;
+		}
 		if(!strncmp(p,"|->",3)){ fputs("|->",o); p+=3; continue; }
 		if(!strncmp(p,"->",2)){ fputs("|->",o); p+=2; continue; }
 		if(*p=='/' && p[1]!='\\'){ fputs("\\div ",o); p++; continue; }

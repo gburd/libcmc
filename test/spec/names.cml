@@ -1,0 +1,27 @@
+# test/spec/names.cml: names that end in an operator word (votedFor,
+# origin, small, ...), as Raft's TLA+ has, and a count inside an
+# application.  The TLA+ bridge must leave each name whole and close
+# the count at its own bracket; emit_gate.sh runs SANY and TLC on the
+# emitted module, spec_gate.sh pins cmc --spec's counts.
+module names
+
+const N = 2
+
+var votedFor : [1 .. N -> 0 .. N]
+var min : 0 .. 2
+var g : [0 .. N -> 0 .. N]
+
+def small = min < 2
+def origin(xin) = xin + 0
+
+init votedFor == [i in 1 .. N -> 0] and min == 0 and g == [k in 0 .. N -> k]
+
+action vote(i in 1 .. N, j in 1 .. N):
+  when votedFor[i] == 0 and small
+  votedFor' = [votedFor except ![i] = j]
+  min' = min + 1
+
+deadlock = off
+
+invariant once: all i in 1 .. N : votedFor[i] <= N
+invariant counted: g[count i in 1 .. N : votedFor[i] != 0] == origin(min)

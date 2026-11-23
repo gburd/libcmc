@@ -615,6 +615,12 @@ bad "mod before -"                  "needs parentheses, as in TLA+" "$V\ninvaria
 bad "and beside or"                 "needs parentheses, as in TLA+" "$V\ninvariant i: x == 1 or x == 0 and TRUE"
 bad "or beside and"                 "needs parentheses, as in TLA+" "$V\ninvariant i: x == 0 and TRUE or x == 1"
 expect "prec: parenthesised mixes, read as TLA+ reads them" 0 "3 distinct states found" --spec "$HERE/test/spec/prec.cml"
+# names that end in an operator word stay whole, and a count inside an
+# application closes at its bracket (emit_gate runs SANY and TLC on it)
+expect "names: votedFor, small, origin and min"   0 "9 distinct states found" --spec "$HERE/test/spec/names.cml"
+expect "emit-tla: a name ending in an operator word" 0 "votedFor\\[i\\] = 0 /. small" --emit-tla "$HERE/test/spec/names.cml"
+expect "emit-tla: a parameter ending in in"       0 "origin(xin) ==" --emit-tla "$HERE/test/spec/names.cml"
+expect "emit-tla: a count inside an application"  0 "g\\[Cardinality({i .in 1 .. N  :  votedFor\\[i\\] # 0})\\] = origin(min)" --emit-tla "$HERE/test/spec/names.cml"
 bad "a const declared twice"        "const N is declared twice" "const N = 1\nconst N = 2\n$V\n$I"
 # a const an extended module declared cannot be overridden: the base has
 # already evaluated with its value (the emitted .cfg had both values)
