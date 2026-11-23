@@ -148,6 +148,7 @@ in the kernel, untouched.
 | a run that never progressed | refused | INCOMPLETE without an `eventually` property | proc_gate noprogress |
 | a fault signal (`abort`, a failed `assert`, `SIGSEGV`, `SIGBUS`, `SIGFPE`, `SIGILL`) | exact at the default disposition | the node is killed and the run ends with a violation (exit 1) and its trace; a handler is exit 3 | proc_gate fault |
 | a thread blocked in, or busy outside, the calls the checker sees | refused | exit 1 after 10 s with no checked call | proc_gate kernelfd |
+| `--trace-out` JSON counterexample | exact | each listed step and the world after it: node records, durable records, crashed flags, replies; the network and timers are not written | proc_gate trace rows |
 | `--refine` (C1) and `--refine-steps` (C2) | exact for the bound variables | C2 needs every spec variable bound; checks init, gated actions, exact states | proc_gate mono, spec_gate C2 rows |
 
 ## Abstract checker (`cmc --spec`)
@@ -162,6 +163,7 @@ in the kernel, untouched.
 | deadlock (a state with no enabled action) | exact | on by default, as TLC; `deadlock = off` or `--no-deadlock` turns it off and `--emit-cfg` writes `CHECK_DEADLOCK FALSE`; a step that changes nothing, or one outside the model, is a successor; invariants are checked as states are generated and deadlock as they are expanded, so the first error reported is TLC's | spec_gate deadlock rows, spec_calibrate deadlock, emit_gate deadlock, dlorder, nostep |
 | `constraint` and `action_constraint` (TLC's `CONSTRAINT`, `ACTION_CONSTRAINT`) | exact | a state outside the model is checked against the invariants but not counted, kept or expanded; `x'` is readable only in an action constraint | spec_gate constraint rows, spec_calibrate constrain, emit_gate constrain |
 | a liveness property under a constraint; `--refine` against a spec with a constraint | refused | exit 3 | spec_gate constraint refusals, refine refusal |
+| `--trace-out` ITF and JSON counterexamples | exact | the printed shortest trace, integers and functions as Apalache writes them; an invariant violation only (a liveness one has no path) | spec_gate trace rows, apalache_gate VIOLATION rows ([ITF against Apalache]({{ '/background/itf-traces/' | relative_url }})) |
 | `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
 | declared domains | exact | init and every successor must lie in each variable's domain | spec_gate boundpass, succbound |

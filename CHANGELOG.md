@@ -34,6 +34,18 @@ constrain*.cml).
   with no action now emits `Next == FALSE`, so TLC finds the deadlock
   `cmc --spec` finds (it emitted `UNCHANGED vars`, a stutter).
 
+- Machine-readable counterexamples.  `cmc --spec` takes `--trace-out
+  FILE` and `--trace-format itf|json`: ITF (the default) is laid out as
+  Apalache writes a counterexample for the module `--emit-tla` makes,
+  with the action per state in `#meta`; json is a plain array of states
+  with the action taken.  `cmc --model-file` takes `--trace-out FILE`
+  and writes json: each listed step and the world after it (node
+  records, durable records, crashed flags, replies).  Gates: spec_gate
+  and proc_gate trace rows (the file parses, has the shortest trace's
+  length, and its steps and final state are the printed ones), and
+  apalache_gate, which compares cmc's ITF file for each planted bug
+  with the one Apalache writes.
+
 ## 2.2.0 (2026-11-22)
 
 Takes the process engine toward checking a program in place, as Greg

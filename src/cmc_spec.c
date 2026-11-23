@@ -903,6 +903,67 @@ static int seen_insert(const State *st){
 
 typedef struct QN { State st; struct QN *prev; char step[64]; int depth; } QN;
 
+/* One value of a state in a trace file.  In ITF (Apalache's ADR-015)
+ * an integer is {"#bigint": "N"}, as Apalache writes every integer, and
+ * a function is {"#map": [[k, v], ...]}; in plain JSON an integer is a
+ * number and a function an object keyed by its arguments.  A state's
+ * variables have passed in_domains(), so each is one of the two. */
+static void trace_value(FILE *o, const Value *v, int itf){
+	if(v->tag==T_INT){ fprintf(o,itf?"{\"#bigint\":\"%ld\"}":"%ld",v->i); return; }
+	fprintf(o,itf?"{\"#map\":[":"{");
+	for(int j=0;j<v->n;j++){
+		if(itf) fprintf(o,"%s[{\"#bigint\":\"%ld\"},{\"#bigint\":\"%ld\"}]",j?",":"",v->k[j],v->v[j]);
+		else fprintf(o,"%s\"%ld\":%ld",j?",":"",v->k[j],v->v[j]);
+	}
+	fprintf(o,itf?"]}":"}");
+}
+
+/* Write the counterexample that ends at `end` to `file`, one state per
+ * line, as ITF (fmt "itf") or as a JSON array (fmt "json").  The ITF
+ * header follows what Apalache writes for the module cmc --emit-tla
+ * makes of this spec: the constants as "params", repeated in every
+ * state, and each variable's type in "varTypes".  Each state's #meta
+ * also names the action that led to it, which Apalache leaves out.
+ * Returns 0, or -1 if the file could not be written. */
+static int spec_write_trace(const char *file, const char *fmt, const QN *end){
+	int itf=!strcmp(fmt,"itf"), n=0;
+	for(const QN *x=end; x; x=x->prev) n++;
+	const QN **path=malloc((size_t)n*sizeof *path);
+	FILE *o=path?fopen(file,"w"):NULL;
+	if(!o){ free(path); return -1; }
+	int i=n; for(const QN *x=end; x; x=x->prev) path[--i]=x;
+	if(itf){
+		fprintf(o,"{\"#meta\":{\"format\":\"ITF\",\"format-description\":\"https://apalache-mc.org/docs/adr/015adr-trace.html\","
+			"\"description\":\"Created by cmc --spec from %s\",\"varTypes\":{",S.modname);
+		for(int vi=0;vi<S.nvar;vi++) fprintf(o,"%s\"%s\":\"%s\"",vi?",":"",S.var[vi].name,S.var[vi].is_fun?"(Int -> Int)":"Int");
+		fprintf(o,"}},\n\"params\":[");
+		for(int c=0;c<S.ncst;c++) fprintf(o,"%s\"%s\"",c?",":"",S.cst[c].name);
+		fprintf(o,"],\n\"vars\":[");
+		for(int vi=0;vi<S.nvar;vi++) fprintf(o,"%s\"%s\"",vi?",":"",S.var[vi].name);
+		fprintf(o,"],\n\"states\":[\n");
+	}
+	else fprintf(o,"[\n");
+	for(i=0;i<n;i++){
+		const QN *x=path[i];
+		if(itf){
+			fprintf(o,"{\"#meta\":{\"index\":%d",i);
+			if(i) fprintf(o,",\"action\":\"%s\"",x->step);
+			fprintf(o,"}");
+			for(int c=0;c<S.ncst;c++) fprintf(o,",\"%s\":{\"#bigint\":\"%ld\"}",S.cst[c].name,S.cst[c].val);
+		}
+		else if(i) fprintf(o,"{\"index\":%d,\"action\":\"%s\",\"vars\":{",i,x->step);
+		else fprintf(o,"{\"index\":0,\"action\":null,\"vars\":{");
+		for(int vi=0;vi<S.nvar;vi++){
+			fprintf(o,"%s\"%s\":",vi||itf?",":"",S.var[vi].name);
+			trace_value(o,&x->st.v[vi],itf);
+		}
+		fprintf(o,"%s%s\n",itf?"}":"}}",i+1<n?",":"");
+	}
+	fprintf(o,"%s\n",itf?"]}":"]");
+	free(path);
+	return fclose(o)?-1:0;
+}
+
 /* Is the step from `from` to `to` inside the model, as TLC's CONSTRAINT
  * and ACTION_CONSTRAINT decide it?  Every state constraint must hold in
  * `to`, and, unless `from` is NULL (an initial state), every action
@@ -921,9 +982,15 @@ static int sp_in_model(const State *from, const State *to, int *in, char *err, s
 	return 0;
 }
 
+/* Where cmc_spec_main() was asked to write a counterexample, if
+ * anywhere (--trace-out), and in which format. */
+static const char *g_trace_out, *g_trace_fmt;
+
 /* Print the shortest behaviour from the initial state to `cur` and the
- * variable values there, after the caller's "Error: ..." line. */
-static void print_trace(const QN *cur){
+ * variable values there, after the caller's "Error: ..." line, and write
+ * it to the --trace-out file if one was named.  Returns 0, or 3 if that
+ * file could not be written. */
+static int print_trace(const QN *cur){
 	int cn=0; for(const QN *x=cur; x; x=x->prev) cn++;
 	printf("Error: The behavior up to this point is (%d actions):\n", cn-1);
 	const char **steps = malloc((size_t)cn * sizeof *steps); int si=0;
@@ -936,6 +1003,10 @@ static void print_trace(const QN *cur){
 		if(v->tag==T_FUN){ printf("["); for(int j=0;j<v->n;j++) printf("%s%ld:%ld",j?",":"",v->k[j],v->v[j]); printf("]"); }
 		else printf("%ld",v->i); }
 	printf("\n");
+	if(!g_trace_out) return 0;
+	if(spec_write_trace(g_trace_out,g_trace_fmt,cur)){ fprintf(stderr,"cmc: could not write %s: %s\n",g_trace_out,strerror(errno)); return 3; }
+	printf("Trace written to %s (%s, %d states).\n",g_trace_out,g_trace_fmt,cn);
+	return 0;
 }
 
 /* Check the invariants in the state of `x`, newly generated, and report
@@ -946,8 +1017,7 @@ static int check_new(const QN *x){
 	if(bad==-2){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); return 3; }
 	if(bad<0) return 0;
 	printf("Error: Invariant %s is violated.\n", S.inv[bad].name);
-	print_trace(x);
-	return 1;
+	return print_trace(x) ? 3 : 1;
 }
 
 /* =====================================================================
@@ -1179,7 +1249,8 @@ static int set_defines(char **defs, int ndefs){
 	return 0;
 }
 
-int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off){
+int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt){
+	g_trace_out=trace_out; g_trace_fmt=trace_fmt;
 	if(set_defines(defs,ndefs) || sp_load(path)) return 3;
 	char err[256];
 	if(sym_init(err,sizeof err)){ fprintf(stderr,"cmc: %s: %s\n",path,err); return 3; }
@@ -1245,8 +1316,7 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off){
 		}
 		if(!ret && nsucc==0 && !(S.deadlock_off || deadlock_off)){
 			printf("Error: Deadlock reached.\n");
-			print_trace(cur);
-			ret=1;
+			ret=print_trace(cur) ? 3 : 1;
 		}
 		qh++;
 	}
@@ -1256,7 +1326,10 @@ int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off){
 			const char *pn=NULL; char lerr[256];
 			int lr=liveness_check(&init,&pn,lerr,sizeof lerr);
 			if(lr<0){ fprintf(stderr,"cmc: liveness: %s\n",lerr); ret=3; }
-			else if(lr>0){ printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",pn); ret=1; }
+			else if(lr>0){
+				printf("Error: Property %s is violated (a fair cycle avoids the goal).\n",pn); ret=1;
+				if(trace_out) printf("No trace written: a liveness violation is reported without a path.\n");
+			}
 		}
 		if(ret==0){
 			printf("Model checking completed. No error has been found.\n");

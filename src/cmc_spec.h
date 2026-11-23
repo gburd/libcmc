@@ -11,9 +11,10 @@
 /* Model-check the .cml specification at `path` on its own.  `defs` are
  * the -D tags given (to activate [TAG]-gated actions); a nonzero
  * `deadlock_off` turns the deadlock check off, as `deadlock = off` in the
- * model does.  Returns an exit status: 0 no violation, 1 a violation, 2
- * incomplete, 3 a model error. */
-int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off);
+ * model does.  If `trace_out` is not NULL, a counterexample is also
+ * written there in `trace_fmt` ("itf" or "json").  Returns an exit
+ * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
+int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt);
 
 /* ---- refinement support (Milestone C) ------------------------------
  * The refinement checker runs an implementation and, at each reached

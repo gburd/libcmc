@@ -1352,6 +1352,32 @@ expect "restart: the counterexample names the restart" 1 "restart n1" $(run rest
 # checkable, and that a model with restarts = 0 behaves exactly as before.
 printf '[target]\nnodes = 2\n[environment]\nclient_write = 7\ncrashes = 1\nrestarts = 0\n[invariants]\nno_lost_ack = "all r in replies : r.val in node[0] or r.val in node[1]"\n' > "$OUT/restart0.model"
 expect "restart: restarts = 0 keeps the crash final"     0 "No error has been found" --model-file "$OUT/restart0.model" --binary "$B/proc/restart-bug"
+
+# --trace-out: a counterexample's worlds as JSON.  The file parses, has
+# one world per listed step plus the first, and its steps, final node
+# records and replies are the ones cmc printed (test/trace_check.py).
+# durlog's trace has an unnumbered STEP; restart's carries a durable
+# record across a crash.
+trace_proc() {
+	f="$OUT/trace-$2.json"; : > "$f"
+	$PFX "$CMC" $(run "$1" "$2") --trace-out "$f" > "$OUT/trace.txt" 2>&1
+	rc=$?
+	if [ $rc = 1 ] && python3 "$HERE/test/trace_check.py" proc "$OUT/trace.txt" "$f" > "$OUT/tc.txt" 2>&1 &&
+	   grep -q "$3" "$f"; then
+		echo "ok   trace json $2: the worlds cmc printed"
+	else
+		echo "FAIL trace json $2 -> exit $rc"; sed 's/^/     /' "$OUT/trace.txt" "$OUT/tc.txt" | head -30; fail=1
+	fi
+}
+if command -v python3 > /dev/null 2>&1; then
+	trace_proc durlog durlog-bug '"action":"step n1","number":null'
+	trace_proc restart restart-bug '"durable":\[[0-9]'
+else
+	echo "skip trace json rows: no python3"
+fi
+expect "trace: --model-file writes json, not itf" 3 "itf is for --spec" $(run durlog durlog-bug) --trace-out "$OUT/t.itf" --trace-format itf
+expect "trace: an unwritable file is an error"   3 "could not write" $(run durlog durlog-bug) --trace-out "$OUT/no/such/dir/t.json"
+expect "trace: a failed write is an error"       3 "could not write" $(run durlog durlog-bug) --trace-out /dev/full
 # arithmetic evaluates with the usual precedence
 printf '[target]\nnodes = 2\n[environment]\nclient_write = 5\n[invariants]\nt = "2 + 3 * 4 == 14 and 10 mod 3 == 1 and (1 + 1) * 2 == 4"\n' > "$OUT/q.model"
 expect "arithmetic: precedence and mod"                 0 "No error has been found" --model-file "$OUT/q.model" --binary "$B/proc/repl"

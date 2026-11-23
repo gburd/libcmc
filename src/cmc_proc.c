@@ -6260,6 +6260,37 @@ act_name(const Act *a, char *b, size_t n)
 	return b;
 }
 
+/* --trace-out: the file a counterexample's worlds go to, as JSON,
+ * opened when there is one to write */
+static FILE *g_trace;
+static const char *g_trace_path;
+
+/* One world of the trace file: the action that led to it (null for the
+ * first world; a STEP is unnumbered, as print_trace() lists it) and the
+ * world as report() prints it, each node's volatile and durable records
+ * and whether it is crashed, and the replies. */
+static void
+trace_world(int idx, int num, const char *act)
+{
+	FILE *o = g_trace;
+	fprintf(o, "%s{\"index\":%d,", idx ? ",\n" : "", idx);
+	if (!act) fprintf(o, "\"action\":null,\"number\":null,");
+	else if (num) fprintf(o, "\"action\":\"%s\",\"number\":%d,", act, num);
+	else fprintf(o, "\"action\":\"%s\",\"number\":null,", act);
+	fprintf(o, "\"nodes\":[");
+	for (int i = 0; i < M.nodes; i++)
+	{
+		fprintf(o, "%s{\"node\":%d,\"crashed\":%s,\"state\":[", i ? "," : "", i, N[i].crashed ? "true" : "false");
+		for (int k = 0; k < N[i].canon_len; k++) fprintf(o, "%s%d", k ? "," : "", N[i].canon[k]);
+		fprintf(o, "],\"durable\":[");
+		for (int k = 0; k < N[i].durable_len; k++) fprintf(o, "%s%d", k ? "," : "", N[i].durable[k]);
+		fprintf(o, "]}");
+	}
+	fprintf(o, "],\"replies\":[");
+	for (int i = 0; i < nrep; i++) fprintf(o, "%s{\"node\":%d,\"value\":%d}", i ? "," : "", rep_src[i], rep_val[i]);
+	fprintf(o, "]}");
+}
+
 /* Replay seq from a fresh launch, printing each action by name.  The
  * environment's actions are numbered; a STEP (which of the nodes that
  * were running together went first) is listed between them unnumbered.
@@ -6272,18 +6303,32 @@ print_trace(const int *seq, int len)
 	for (int pass = 0; pass < 2; pass++)
 	{
 		run_seq(NULL, 0, a, &na);
+		if (pass == 1 && g_trace_path && !(g_trace = fopen(g_trace_path, "w")))
+			die(3, "could not write %s: %s", g_trace_path, strerror(errno));
+		int out = pass == 1 && g_trace;
 		if (pass == 1) printf("Error: The behavior up to this point is (%d actions):\n", n);
+		if (out) { fprintf(g_trace, "[\n"); trace_world(0, 0, NULL); }
 		for (int i = 0; i < len; i++)
 		{
 			if (seq[i] >= na) die(1, "replay of the counterexample diverged at step %d", i);
 			int step = a[seq[i]].kind == A_STEP;
+			act_name(&a[seq[i]], nm, sizeof nm);
 			if (pass == 0) n += !step;
-			else if (step) printf("       %s\n", act_name(&a[seq[i]], nm, sizeof nm));
-			else printf("    %d. %s\n", ++k, act_name(&a[seq[i]], nm, sizeof nm));
+			else if (step) printf("       %s\n", nm);
+			else printf("    %d. %s\n", ++k, nm);
 			apply(&a[seq[i]]);
 			na = enum_actions(a);
+			if (out) trace_world(i + 1, step ? 0 : k, nm);
 		}
 		if (pass == 0) kill_all();
+		if (out)
+		{
+			fprintf(g_trace, "\n]\n");
+			int bad = ferror(g_trace);
+			if (fclose(g_trace) || bad) die(3, "could not write %s", g_trace_path);
+			g_trace = NULL;
+			printf("Trace written to %s (json, %d worlds).\n", g_trace_path, len + 1);
+		}
 	}
 }
 
@@ -6457,6 +6502,7 @@ int
 cmc_proc_main(const CmcProcOptions *po)
 {
 	if (load_model(po->model_file)) return 3;
+	g_trace_path = po->trace_out;
 	if (po->binary)
 		snprintf(M.binary, sizeof M.binary, "%s", po->binary);
 	if (!*M.binary)
