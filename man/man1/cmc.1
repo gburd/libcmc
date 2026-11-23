@@ -341,6 +341,12 @@ strings, set operators, a constant substitution
 or a fairness condition
 .Pa .cml
 does not have, is refused with its line and name (exit 3).
+So is what SANY or TLC would stop on: a
+.Li /\e
+beside a
+.Li \e/
+without parentheses, a parameter or bound name that names something
+already declared, and arithmetic or order on a model value.
 .Fl -define
 is refused: a module's switches are its constants.
 .It Fl -config Ar file

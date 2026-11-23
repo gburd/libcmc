@@ -34,6 +34,17 @@ guard, deadlock, constrain and logrep twins directly and matches TLC;
 spec_gate has a row for each refusal.  The paxos-family and zab twins
 are refused (strings, `\X`).
 
+An adversarial review of the reader against TLC found three inputs it
+read to a different model than TLC checks, each now refused with a
+spec_gate row: `a /\ b \/ c` without parentheses (SANY: a precedence
+conflict), a definition parameter or bound name that names a variable,
+constant, definition or enclosing bound name (SANY: multiply defined),
+and arithmetic or order on a model value (TLC stops; the reader held
+model values as integers from 1000000 and computed with them, a false
+pass).  Model values now start at 2^40, past TLC's integers, so no
+integer equals one, and a variable may hold an integer in one state and
+a model value in another, as TLC allows.
+
 `.cml` gains `if C then A else B`, TLA+'s `IF`: only the branch taken
 is evaluated.  `cmc --emit-tla` writes it as `IF THEN ELSE`
 (test/spec/ifexpr.cml agrees with TLC: 11 distinct states, depth 7).

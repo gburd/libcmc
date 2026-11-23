@@ -340,7 +340,10 @@ Expressions are the `.cml` ones in their TLA+ spelling: `=`, `#`,
 `[f EXCEPT ![k].a = @ + 1]`, records `[a |-> e]` and `r.a`, tuples and
 sequences with the `Sequences` operators, `IF THEN ELSE`, `x \in Nat`
 and `/\` and `\/` bullet lists, an item ending at the first token at or
-left of its bullet's column.  TLA+'s variables have no types and
+left of its bullet's column.  As in SANY, `a /\ b \/ c` without
+parentheses is refused, and so is a definition parameter or bound name
+that names a variable, constant, definition or enclosing bound name
+again (TLA+ has no shadowing).  TLA+'s variables have no types and
 `.cml`'s do, so the reader infers each from `Init` and every assignment:
 an integer becomes any of TLC's (`-2^31 .. 2^31-1`, so a value TLC could
 not hold is a model error here too), a function's key set comes from
@@ -361,8 +364,11 @@ a model value `p1` or a set `{p1, p2}` of integers or model values;
 `SPECIFICATION`, or `INIT` and `NEXT`; `INVARIANT(S)`;
 `PROPERTY`/`PROPERTIES` of the forms `<>P`, `P ~> Q` and `[][A]_vars`;
 `CONSTRAINT(S)`; `ACTION_CONSTRAINT(S)`; and `CHECK_DEADLOCK`.  A model
-value becomes an integer from 1000000 up, which no arithmetic in a
-model reaches, so `SYMMETRY Sym` with `Sym == Permutations(P)` for a set
+value becomes an integer from 2^40 up, past TLC's integers, so it is
+unequal to every integer, as in TLC.  Arithmetic and order on a model
+value, and `\in Nat` or `Int` of one, which TLC stops on, are refused;
+a variable may hold an integer in one state and a model value in
+another.  `SYMMETRY Sym` with `Sym == Permutations(P)` for a set
 P of model values is `.cml`'s `symmetry` over those integers: the
 dedicated range its obligation asks for.  `SYMMETRY` of anything else
 is refused, and so is a `VIEW` other than the tuple of all the

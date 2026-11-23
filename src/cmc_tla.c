@@ -519,16 +519,17 @@ static Node *expr(Ps *p, int minp){
 		if(in->prec<minp) break;
 		next(p);
 		Node *r=expr(p,in->prec+1);
+		Node *b;
 		if(!strcmp(in->op,"/\\")||!strcmp(in->op,"\\/")){
-			int k=!strcmp(in->op,"/\\")?X_AND:X_OR;
-			Node *b=mk(k,o->line,2); b->a[0]=x; b->a[1]=r; x=b; continue;
+			b=mk(!strcmp(in->op,"/\\")?X_AND:X_OR,o->line,2); b->a[0]=x; b->a[1]=r;
+		} else {
+			b=mk(X_BIN,o->line,2); snprintf(b->op,sizeof b->op,"%s",in->op); b->a[0]=x; b->a[1]=r;
 		}
-		Node *b=mk(X_BIN,o->line,2); snprintf(b->op,sizeof b->op,"%s",in->op); b->a[0]=x; b->a[1]=r;
 		/* TLA+ gives no meaning to a op b op2 c where either operator
-		 * does not associate with the other (a = b = c, a + b % c):
-		 * SANY rejects it, and so does this reader */
+		 * does not associate with the other (a = b = c, a + b % c,
+		 * a /\ b \/ c): SANY rejects it, and so does this reader */
 		Tok *q=peek(p); const Infix *i2=infix_of(q);
-		if(i2 && i2->prec==in->prec && (!in->chain || !i2->chain || strcmp(in->op,q->t)) && strcmp(in->op,"/\\") && strcmp(in->op,"\\/")
+		if(i2 && i2->prec==in->prec && (!in->chain || !i2->chain || strcmp(in->op,q->t))
 		   && !((!strcmp(in->op,"+")||!strcmp(in->op,"-")) && (!strcmp(q->t,"+")||!strcmp(q->t,"-"))))
 			refuse(q->line,"%s ... %s needs parentheses",in->op,q->t);
 		x=b;
@@ -557,9 +558,10 @@ static struct {
 	Node *assume[TL_MAX]; int nassume;
 } M;
 
-/* model values get integers from TL_MV, far from the small integers a
- * model uses, so a SYMMETRY set of them is a dedicated range */
-#define TL_MV 1000000L
+/* model values get integers from TL_MV (2^40), past TLC's 32-bit
+ * integers, so no integer TLC computes equals one, and a SYMMETRY set
+ * of them is a dedicated range */
+#define TL_MV 1099511627776L
 static char g_mv[32][48]; static int g_nmv;
 
 static int cst_of(const char *n){ for(int i=0;i<M.ncst;i++) if(!strcmp(M.cst[i].name,n)) return i; return -1; }
@@ -579,6 +581,7 @@ typedef struct Env {
 	char name[48];
 	Node *arg; const struct Env *argenv;	/* a parameter */
 	char as[48];							/* a bound name */
+	Node *set; const struct Env *se;		/* the set a bound name ranges over */
 	int before;
 } Env;
 /* the bound names in scope in the .cml text being written */
@@ -622,8 +625,7 @@ static int unit_kw(const Tok *t){
 }
 /* index of the token that opens the definition whose == is at i */
 static int def_head(Toks *ts, int i){
-	int j=i-1;
-	if(j<0) refuse(ts->v[i].line,"== with no name before it");
+	int j=i-1;	/* i is past the module header, so j >= 0 */
 	Tok *t=&ts->v[j];
 	if(t->kind==K_OP && (!strcmp(t->t,")")||!strcmp(t->t,"]"))){
 		const char *open=t->t[0]==')'?"(":"[";
@@ -706,7 +708,7 @@ static void add_def(Toks *ts, int i, int end){
 		j++;
 		d->np=np; d->pname=zalloc(sizeof tmp[0]*(size_t)np); memcpy(d->pname,tmp,sizeof tmp[0]*(size_t)np);
 	}
-	if(strcmp(ts->v[j].t,"==")) refuse(ts->v[j].line,"definition %s: expected ==",n->t);
+	/* def_head() found the head from this ==, so ts->v[j] is it */
 	d->b0=j+1; d->end=end;
 	if(d->b0>=end) refuse(n->line,"definition %s has no body",n->t);
 	M.ndef++;
@@ -772,6 +774,34 @@ static void module(Toks *ts){
 	}
 }
 
+/* SANY refuses a bound name or a definition's parameter that is
+ * already declared where it appears: a variable, a constant, a
+ * definition above, a parameter or an enclosing bound name (TLA+ has
+ * no shadowing).  Refused here too, so a module TLC would not load is
+ * never checked.  in: the names bound around x, n of them; before: the
+ * definition being read, which sees itself and the ones above. */
+static void no_redeclare(const char *nm, int line, char (*in)[48], int n, int before){
+	int dup=cst_of(nm)>=0 || var_of(nm)>=0 || def_of(nm,before+1)>=0;
+	for(int i=0;i<n;i++) if(!strcmp(in[i],nm)) dup=1;
+	if(dup) refuse(line,"%s is declared again: TLA+ has no shadowing, rename it",nm);
+}
+static void check_binders(Node *x, char (*in)[48], int n, int before){
+	if(!x) return;
+	int bnd=x->k==X_QUANT||x->k==X_FILTER||x->k==X_FUNC||x->k==X_SETMAP;
+	int m=n+(bnd?x->nb:0);
+	char (*inner)[48]=in;
+	if(bnd){
+		if(m>64) refuse(x->line,"bound names nest too deeply");
+		inner=zalloc(sizeof *inner*(size_t)m); if(n) memcpy(inner,in,sizeof *in*(size_t)n);
+		for(int i=0;i<x->nb;i++){ no_redeclare(x->bname[i],x->line,inner,n+i,before); snprintf(inner[n+i],48,"%s",x->bname[i]); }
+	}
+	for(int i=0;i<x->n;i++){
+		/* a binder's own sets are read outside its names */
+		int out=bnd && i<x->nb;
+		check_binders(x->a[i],out?in:inner,out?n:m,before);
+	}
+}
+
 /* the body of definition di, parsed now if this is its first use */
 static Node *def_body(int di){
 	Def *d=&M.def[di];
@@ -780,6 +810,8 @@ static Node *def_body(int di){
 	Ps p={&g_ts,0,d->end}; g_ts.i=d->b0;
 	Node *b=expr(&p,0);
 	if(g_ts.i<d->end) refuse(g_ts.v[g_ts.i].line,"unexpected %s in the definition of %s",g_ts.v[g_ts.i].t,d->name);
+	for(int i=0;i<d->np;i++) no_redeclare(d->pname[i],d->line,d->pname,i,di);
+	check_binders(b,d->pname,d->np,di);
 	g_ts.i=save; d->body=b;
 	return b;
 }
@@ -949,6 +981,11 @@ static int expand(Node **xp, const Env **ep){
 static void expand_all(Node **xp, const Env **ep){ while(expand(xp,ep)) ; }
 
 static int render(Buf *o, Node *x, const Env *e, const Scope *sc, int cx);
+static void mv_check(Node *x, const Env *e);
+typedef struct Ty Ty;
+static Ty *g_at;				/* the type of @ in the EXCEPT value being read */
+static Ty *ty_of(Node *x, const Env *e);
+static Ty *ty_path(Ty *t, Node *path);
 static void render_set(Buf *o, Node *x, const Env *e, const Scope *sc, int cx);
 
 /* x printed at a level of at least need */
@@ -974,9 +1011,10 @@ static void cst_text(Buf *o, const Cst *c){
 }
 
 /* a quantifier or a function literal binds name: push its .cml name */
-static void bind(const char *name, const Env **e, const Scope **sc, char *as){
+static void bind(const char *name, Node *set, const Env **e, const Scope **sc, char *as){
 	fresh(*sc,name,as);
 	Env *ne=zalloc(sizeof *ne); snprintf(ne->name,48,"%s",name); snprintf(ne->as,48,"%s",as);
+	ne->set=set; ne->se=*e;
 	ne->up=*e; ne->before=env_before(*e); *e=ne;
 	Scope *ns=zalloc(sizeof *ns); snprintf(ns->name,48,"%s",as); ns->up=*sc; *sc=ns;
 }
@@ -1029,7 +1067,7 @@ static int render_quant(Buf *o, Node *x, const Env *e, const Scope *sc, int cx){
 	const Env *be=e; const Scope *bs=sc;
 	for(int i=0;i<x->nb;i++){
 		char as[48]; Buf s={0}; render_set(&s,x->a[i],e,sc,cx);
-		bind(x->bname[i],&be,&bs,as);
+		bind(x->bname[i],x->a[i],&be,&bs,as);
 		bput(o,"%s %s in %s : ",x->op[1]=='A'?"all":"some",as,bstr(&s));
 	}
 	sub(o,x->a[x->nb],be,bs,cx,L_OR);
@@ -1043,7 +1081,7 @@ static int render_card(Buf *o, Node *x, const Env *e, const Scope *sc, int cx){
 	char as[48]; const Env *be=se; const Scope *bs=sc;
 	if(s->k==X_FILTER){
 		Buf t={0}; render_set(&t,s->a[0],se,sc,cx);
-		bind(s->bname[0],&be,&bs,as);
+		bind(s->bname[0],s->a[0],&be,&bs,as);
 		bput(o,"count %s in %s : ",as,bstr(&t)); sub(o,s->a[1],be,bs,cx,L_OR);
 		return 0;
 	}
@@ -1129,7 +1167,7 @@ static int render_list(Buf *o, Node *x, const Env *e, const Scope *sc, int cx){
 static int render_func(Buf *o, Node *x, const Env *e, const Scope *sc, int cx){
 	if(x->nb!=1) refuse(x->line,"a function of more than one argument is not supported");
 	Buf s={0}; render_set(&s,x->a[0],e,sc,cx);
-	char as[48]; const Env *be=e; const Scope *bs=sc; bind(x->bname[0],&be,&bs,as);
+	char as[48]; const Env *be=e; const Scope *bs=sc; bind(x->bname[0],x->a[0],&be,&bs,as);
 	bput(o,"[%s in %s -> ",as,bstr(&s)); sub(o,x->a[1],be,bs,cx,L_OR); bput(o,"]");
 	return L_ATOM;
 }
@@ -1144,7 +1182,10 @@ static int render_except(Buf *o, Node *x, const Env *e, const Scope *sc, int cx)
 			if(!pa->a[j]){ bput(o,".%s",pa->bname[j]); continue; }
 			bput(o,"["); sub(o,pa->a[j],e,sc,cx,L_OR); bput(o,"]");
 		}
+		/* @ has the type of what the path reaches, for mv_check() */
+		Ty *save=g_at; g_at=ty_path(ty_of(x->a[0],e),pa);
 		bput(o," = "); sub(o,x->a[i+1],e,sc,cx,L_OR);
+		g_at=save;
 	}
 	bput(o,"]");
 	return L_ATOM;
@@ -1165,8 +1206,11 @@ static int render_rec(Buf *o, Node *x, const Env *e, const Scope *sc, int cx){
 /* x as .cml text; returns its level */
 static int render(Buf *o, Node *x, const Env *e, const Scope *sc, int cx){
 	expand_all(&x,&e);
+	mv_check(x,e);
 	switch(x->k){
-	case X_NUM: bput(o,"%ld",x->num); return L_ATOM;
+	case X_NUM:
+		if(x->num>=TL_MV) refuse(x->line,"the integer %ld is past TLC's integers",x->num);
+		bput(o,"%ld",x->num); return L_ATOM;
 	case X_ID: return render_id(o,x,e,cx);
 	case X_CALL: return render_call(o,x,e,sc,cx);
 	case X_AND: case X_OR: return render_list(o,x,e,sc,cx);
@@ -1250,8 +1294,10 @@ typedef struct {
 	char name[48];
 	int np; char pn[TL_MAXP][48]; const char *pd[TL_MAXP];
 	Item guard[TL_MAX]; int ng;
+	Item pset[TL_MAXP];		/* each parameter's set, where it is read */
 	Item asg[TL_MAX];		/* by variable: the right side, x NULL if none */
 	char asg_as[TL_MAX][48];	/* or a parameter: x' \in S */
+	const Env *asg_se[TL_MAX];	/* where that S is read */
 	int unch[TL_MAX];
 	const Scope *sc;
 	char chain[16][48]; int chain_np[16]; int nchain;	/* definitions expanded, for WF */
@@ -1271,9 +1317,10 @@ static void walk(const Work *w, Act *a);
 static void walk_in(const Work *w, Act *a, int vi, Node *set, const Env *e, int line){
 	if(a->np==TL_MAXP) refuse(line,"too many \\E parameters in one action");
 	Buf s={0}; render_set(&s,set,e,a->sc,0);
-	char as[48]; const Env *be=e; bind(M.var[vi],&be,&a->sc,as);
+	char as[48]; const Env *be=e; bind(M.var[vi],set,&be,&a->sc,as);
+	a->pset[a->np].x=set; a->pset[a->np].e=e;
 	snprintf(a->pn[a->np],48,"%s",as); a->pd[a->np]=bstr(&s); a->np++;
-	snprintf(a->asg_as[vi],48,"%s",as); a->asg[vi].x=set; a->asg[vi].e=NULL;
+	snprintf(a->asg_as[vi],48,"%s",as); a->asg[vi].x=set; a->asg[vi].e=NULL; a->asg_se[vi]=e;
 	walk(w,a);
 }
 
@@ -1350,7 +1397,8 @@ static void walk(const Work *w, Act *a){
 		for(int i=0;i<x->nb;i++){
 			if(a->np==TL_MAXP) refuse(x->line,"too many \\E parameters in one action");
 			Buf s={0}; render_set(&s,x->a[i],e,a->sc,0);
-			char as[48]; bind(x->bname[i],&be,&a->sc,as);
+			char as[48]; bind(x->bname[i],x->a[i],&be,&a->sc,as);
+			a->pset[a->np].x=x->a[i]; a->pset[a->np].e=e;
 			snprintf(a->pn[a->np],48,"%s",as); a->pd[a->np]=bstr(&s); a->np++;
 		}
 		walk(push(w,x->a[x->nb],be),a); return;
@@ -1367,19 +1415,18 @@ static void walk(const Work *w, Act *a){
  * or a set in a variable is refused, as are two types that do not
  * unify (TLC would compare them and stop with an error).
  * ===================================================================== */
-enum { TY_U, TY_I, TY_B, TY_SET, TY_F, TY_R, TY_S };
-typedef struct Ty {
+enum { TY_U, TY_I, TY_B, TY_SET, TY_F, TY_R, TY_S, TY_MV, TY_IM };	/* TY_IM: an integer or a model value */
+struct Ty {
 	int k;
 	struct Ty *sub;				/* TY_F: the range; TY_S: the element */
 	Node *dom; const Env *de;	/* TY_F: the key set, where known */
 	int nf; char (*fn)[48]; struct Ty **ft;	/* TY_R: fields */
-} Ty;
+};
 static Ty *ty_new(int k){ Ty *t=zalloc(sizeof *t); t->k=k; return t; }
 static Ty *g_vty[TL_MAX];		/* each variable's type */
-static Ty *g_at;				/* the type of @ in the EXCEPT value being typed */
 
 static const char *ty_word(int k){
-	static const char *const w[]={"unknown","an integer","a boolean","a set","a function","a record","a sequence"};
+	static const char *const w[]={"unknown","an integer","a boolean","a set","a function","a record","a sequence","a model value","an integer or a model value"};
 	return w[k];
 }
 static int ty_occurs(const Ty *t, const Ty *u);
@@ -1390,6 +1437,10 @@ static void ty_unify(Ty *a, Ty *b, int line, const char *what){
 		if(ty_occurs(b,a)) refuse(line,"%s would hold itself: a recursive type is not supported",what);
 		*a=*b; return;
 	}
+	/* TLC lets a variable hold an integer in one state and a model
+	 * value in another (x = 0, then x' = p): both are held as integers */
+	int ia=a->k==TY_I||a->k==TY_MV||a->k==TY_IM, ib=b->k==TY_I||b->k==TY_MV||b->k==TY_IM;
+	if(ia && ib){ if(a->k!=b->k) a->k=TY_IM; return; }
 	if(a->k!=b->k) refuse(line,"%s is %s in one place and %s in another",what,ty_word(a->k),ty_word(b->k));
 	if(a->k==TY_F){ if(!a->dom){ a->dom=b->dom; a->de=b->de; } ty_unify(a->sub,b->sub,line,what); }
 	if(a->k==TY_S) ty_unify(a->sub,b->sub,line,what);
@@ -1415,14 +1466,32 @@ static void ty_join(Ty *a, Ty *b, int line, const char *what){
 	ty_unify(a,b,line,what);
 }
 
-/* a bound name for typing: every set a name ranges over is a set of
- * integers in .cml, so a bound name is an integer */
-static const Env *bind_int(const Env *e, const char *name){
+/* a bound name for typing, over set */
+static const Env *bind_ty(const Env *e, const char *name, Node *set){
 	Env *ne=zalloc(sizeof *ne); snprintf(ne->name,48,"%s",name); snprintf(ne->as,48,"%s",name);
-	ne->up=e; ne->before=env_before(e); return ne;
+	ne->set=set; ne->se=e; ne->up=e; ne->before=env_before(e); return ne;
 }
 
-static Ty *ty_of(Node *x, const Env *e);
+
+/* The type of an element of the set x: an integer, or a model value
+ * for a constant set of model values.  TY_U where it does not show,
+ * and for a .cfg set that mixes the two. */
+static Ty *ty_elem(Node *x, const Env *e){
+	expand_all(&x,&e);
+	if(x->k==X_BIN && !strcmp(x->op,"..")) return ty_new(TY_I);
+	if(x->k==X_ID && !env_find(e,x->name) && cst_of(x->name)>=0){
+		const Cst *c=&M.cst[cst_of(x->name)];
+		int nmv=0;
+		for(int i=0;c->kind==CV_SET && i<c->n;i++) nmv+=c->set[i]>=TL_MV;
+		if(c->kind==CV_SET && c->n) return ty_new(nmv==c->n?TY_MV:nmv?TY_U:TY_I);
+	}
+	if(x->k==X_SET){
+		Ty *t=ty_new(TY_U);
+		for(int i=0;i<x->n;i++) ty_join(t,ty_of(x->a[i],e),x->line,"an element of a set");
+		return t;
+	}
+	return ty_new(TY_U);
+}
 
 /* the type the EXCEPT path reaches in t, or a fresh unknown */
 static Ty *ty_path(Ty *t, Node *path){
@@ -1458,12 +1527,16 @@ static Ty *ty_of(Node *x, const Env *e){
 	switch(x->k){
 	case X_NUM: return ty_new(TY_I);
 	case X_ID: {
-		if(env_find(e,x->name)) return ty_new(TY_I);
+		const Env *b=env_find(e,x->name);
+		if(b) return b->set ? ty_elem(b->set,b->se) : ty_new(TY_U);
 		int ci=cst_of(x->name), vi=var_of(x->name);
-		if(ci>=0) return ty_new(M.cst[ci].kind==CV_BOOL?TY_B:M.cst[ci].kind==CV_SET?TY_SET:TY_I);
-		if(vi>=0) return g_vty[vi];
+		if(ci>=0){
+			const Cst *c=&M.cst[ci];
+			return ty_new(c->kind==CV_BOOL?TY_B:c->kind==CV_SET?TY_SET:c->v>=TL_MV?TY_MV:TY_I);
+		}
+		if(vi>=0) return g_vty[vi] ? g_vty[vi] : ty_new(TY_U);
 		return ty_new(!strcmp(x->name,"TRUE")||!strcmp(x->name,"FALSE")?TY_B:TY_U); }
-	case X_PRIME: { int vi=var_named(x->a[0],e); return vi>=0 ? g_vty[vi] : ty_new(TY_U); }
+	case X_PRIME: { int vi=var_named(x->a[0],e); return vi>=0 && g_vty[vi] ? g_vty[vi] : ty_new(TY_U); }
 	case X_CALL: return ty_call(x,e);
 	case X_AND: case X_OR: case X_QUANT: return ty_new(TY_B);
 	case X_UN: return ty_new(x->op[0]=='~'?TY_B:TY_I);
@@ -1477,7 +1550,7 @@ static Ty *ty_of(Node *x, const Env *e){
 	case X_IF: { Ty *a=ty_of(x->a[1],e); ty_join(a,ty_of(x->a[2],e),x->line,"an IF's two branches"); return a; }
 	case X_FUNC: {
 		if(x->nb!=1) return ty_new(TY_U);
-		Ty *t=ty_new(TY_F); t->dom=x->a[0]; t->de=e; t->sub=ty_of(x->a[1],bind_int(e,x->bname[0])); return t; }
+		Ty *t=ty_new(TY_F); t->dom=x->a[0]; t->de=e; t->sub=ty_of(x->a[1],bind_ty(e,x->bname[0],x->a[0])); return t; }
 	case X_EXCEPT: {
 		Ty *b=ty_of(x->a[0],e), *save=g_at;
 		for(int i=1;i+1<x->n;i+=2){
@@ -1506,6 +1579,27 @@ static Ty *ty_of(Node *x, const Env *e){
 		return t; }
 	default: return ty_new(TY_U);
 	}
+}
+
+/* Model values are held as integers from TL_MV, so an operator that
+ * reads one as a number would compute what TLC refuses: arithmetic and
+ * order on a model value, and \in Nat or Int (true of the integer,
+ * false of a model value).  Refused where the types show it.  = and
+ * \in a set need nothing: TLC finds a model value unequal to every
+ * integer, and so does the checker, since TL_MV lies past TLC's
+ * integers. */
+static void mv_check(Node *x, const Env *e){
+	if(!g_nmv || (x->k!=X_BIN && x->k!=X_UN)) return;
+	Ty *a=ty_of(x->a[0],e), *b=x->k==X_BIN ? ty_of(x->a[1],e) : ty_new(TY_U);
+	const char *op=x->op;
+	if(!strcmp(op,"\\in") || !strcmp(op,"\\notin")){
+		Node *r=x->a[1]; const Env *re=e; expand_all(&r,&re);
+		if(a->k>=TY_MV && r->k==X_ID && !env_find(re,r->name) && (!strcmp(r->name,"Nat")||!strcmp(r->name,"Int")))
+			refuse(x->line,"%s %s of a model value is not supported",op,r->name);
+		return;
+	}
+	if(strchr("<>+-*%.",op[0]) || !strcmp(op,"\\div"))
+		if(a->k>=TY_MV || b->k>=TY_MV) refuse(x->line,"%s on %s: model values have no arithmetic or order",op,ty_word(a->k>=TY_MV?a->k:b->k));
 }
 
 /* =====================================================================
@@ -1621,8 +1715,14 @@ static void assume(Node *x){
 static void ty_text(Buf *o, const Ty *t, const char *var){
 	switch(t->k){
 	case TY_I: bput(o,TL_INTS); return;
+	/* every model value, so an integer stored here is a model error */
+	case TY_MV: num(o,TL_MV); bput(o," .. "); num(o,TL_MV+g_nmv-1); return;
+	/* shortcut: also admits integers from 2^31 to TL_MV, which only
+	 * arithmetic past TLC's integers stores (TLC stops there with an
+	 * overflow); a set type of the two ranges would close it */
+	case TY_IM: bput(o,"0 - 2147483648 .. "); num(o,TL_MV+g_nmv-1); return;
+	/* a TY_F comes only from [x \\in S |-> e], so it has its key set */
 	case TY_F:
-		if(!t->dom) refuse(0,"the key set of a function in %s is not known (give it an Init value [x \\in S |-> e])",var);
 		bput(o,"["); render_set(o,t->dom,t->de,NULL,0); bput(o," -> "); ty_text(o,t->sub,var); bput(o,"]"); return;
 	case TY_S: bput(o,"Seq("); ty_text(o,t->sub,var); bput(o,", %d)",TL_SEQMAX); return;
 	case TY_R:
@@ -1725,7 +1825,7 @@ static void infer(void){
 			for(int a=0;a<g_nact;a++){
 				Item *it=&g_act[a]->asg[v];
 				if(!it->x) continue;
-				if(!it->e) ty_join(g_vty[v],ty_new(TY_I),it->x->line,what);
+				if(!it->e) ty_join(g_vty[v],ty_elem(it->x,g_act[a]->asg_se[v]),it->x->line,what);
 				else ty_join(g_vty[v],ty_of(it->x,it->e),it->x->line,what);
 			}
 		}

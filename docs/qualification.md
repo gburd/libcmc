@@ -199,7 +199,7 @@ in the kernel, untouched.
 | hand-written twins: counter, mutex, guard, deadlock, constrain, logrep | exact | TLC's verdict, distinct states, depth and trace length on the same `.tla` and `.cfg`; logrep with a `.cfg` that leaves out `TypeOK` | spec_calibrate read rows, spec_gate TLA+ reader rows |
 | paxos, fpaxos, caspaxos, fastpaxos, zab twins | refused | exit 3 naming the first construct: strings, `\X` | spec_gate twin refusals |
 | `CONSTANT(S)` of integers, `TRUE`, `FALSE`, model values, sets of them; `ASSUME C \in Nat/Int/BOOLEAN` | exact | an unbound, undeclared or substituted (`<-`) constant, or a false `ASSUME`, is exit 3 | spec_gate `.cfg` rows |
-| definitions `Op(p, ...) == e` | exact | expanded by name with bound names renamed apart; each sees only those above it, so recursion is exit 3 | spec_gate def and recursion rows |
+| definitions `Op(p, ...) == e` | exact | expanded by name with bound names renamed apart; each sees only those above it, so recursion is exit 3; a parameter or bound name that redeclares a name in scope (SANY's rule) is exit 3 | spec_gate def and recursion rows |
 | `Init` as `x = e` conjuncts; `Next` as actions of guards, `x' = e`, `x' \in S`, `UNCHANGED` under `\E` | exact | a variable an action leaves unsaid, or both assigns and leaves `UNCHANGED`, a nondeterministic `Init`, a prime outside an assignment or action constraint: exit 3 | spec_gate action rows |
 | variable types | inferred | from `Init` and every assignment: integer (TLC's 32-bit range), function, record, sequence (at most 12 elements: a longer one is exit 3); a boolean or set variable, or conflicting types, is exit 3 | spec_gate type rows |
 | `WF_vars(A)`, `SF_vars(A)`, A one action of `Next` | exact | `.cml`'s `fair weak A`, `fair strong A`; fairness on a disjunction, or under an `\E` of Next, is exit 3 | spec_gate fairness rows, tla_gate test/spec/fair |
@@ -207,7 +207,7 @@ in the kernel, untouched.
 | `THEOREM` and proofs; `ASSUME C = n` | skipped; checked | a proof is TLAPS's; an ASSUME false for the .cfg is exit 3 | spec_gate THEOREM row, tla_gate test/spec/ind |
 | a variable of no finite type (`x' = <<x>>`) | refused | exit 3 at load | spec_gate recursive-type row |
 | `PROPERTY` `<>P`, `P ~> Q`, `[][A]_vars`; `CONSTRAINT`, `ACTION_CONSTRAINT`, `CHECK_DEADLOCK`, `INIT`/`NEXT` | exact | other temporal forms are exit 3 | spec_gate `.cfg` rows, spec_calibrate read rows |
-| `SYMMETRY Permutations(P)`, P a set of model values | exact | model values are integers from 1000000; `SYMMETRY` of anything else, a `VIEW` other than all the variables, `ALIAS`: exit 3 | spec_gate symmetry rows |
+| `SYMMETRY Permutations(P)`, P a set of model values | exact | model values are integers from 2^40, unequal to every integer; arithmetic, order and `\in Nat`/`Int` on one, `SYMMETRY` of anything else, a `VIEW` other than all the variables, `ALIAS`: exit 3 | spec_gate symmetry rows |
 | `LET`, `CHOOSE`, `CASE`, `SUBSET`, `UNION`, `DOMAIN`, `ENABLED`, `INSTANCE`, `RECURSIVE`, strings, set operators, `[S -> T]`, unbounded and temporal quantifiers, infix and function definitions, `EXTENDS` of other modules | refused | exit 3 with file, line and construct | spec_gate refusal rows |
 
 ## In-process engine (`cmc --model`, `libcmc(3)`)
