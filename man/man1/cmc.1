@@ -175,6 +175,8 @@ and sequences of at most N elements
 .Pq Li Seq(T, N) ;
 a value outside its variable's type, a sequence past its bound
 included, is a model error (exit 3), never cut.
+A type's sets are constant expressions; one that reads a variable is
+refused.
 .Li def NAME(p, ...) = EXPR
 declares a named operator, expanded where it is used; a def may use
 only the defs before it, so recursion is refused.
