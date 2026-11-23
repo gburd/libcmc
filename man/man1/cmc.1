@@ -248,6 +248,19 @@ records and whether it is
 .Ql crashed ,
 and the
 .Ql replies .
+With
+.Fl -refine ,
+each object also has a
+.Ql spec :
+the world in the terms of the abstract spec, null where the
+refinement check does not judge it (between two nodes' steps, or inside
+one), else
+.Ql state ,
+the bound abstract variables' values, and
+.Ql action ,
+the abstract action the step refined, with its parameters, or
+.Ql stutter
+.Pq Fl -refine-steps ; null without it .
 A liveness or
 .Ic eventually
 violation has no path, so no file is written, and neither is one on a
@@ -291,6 +304,14 @@ the abstract
 At each reached implementation state the abstract invariants are
 checked against the mapped state, so one abstract model validates many
 implementations.
+A counterexample is shown in spec terms too: below each listed step
+after which the check judges the world, a
+.Ql spec:
+line gives the abstract state the binding built there (the bound
+variables only) and, with
+.Fl -refine-steps ,
+the abstract action the step refined
+.Pq Ql init , Ql stutter , or Ql NAME(p=v, ...) .
 Requires
 .Fl -bind .
 .It Fl -bind Ar file
@@ -301,6 +322,8 @@ for
 .Fl -refine .
 Each spec variable is bound at most once, a function variable entry by
 entry; a line the reader cannot use is an error.
+A binding builds integers and functions of integers only: a record or
+sequence variable, or a function of them, is refused.
 .It Fl -refine-steps
 Check refinement at the level of
 .Em steps ,

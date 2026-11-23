@@ -223,6 +223,24 @@ which the state-level check cannot see.  It needs every spec variable to
 have a binding (matching an action step needs the whole abstract state)
 and refuses otherwise.
 
+A counterexample reads in the spec's terms as well as the program's.
+Below each listed step after which the check judges the world (settled,
+not between or inside nodes' steps), a `spec:` line gives the abstract
+state the binding built there; with `--refine-steps` it also names the
+abstract action the step refined, with its parameters, or `stutter`:
+
+```
+Error: the implementation does not refine the spec: a step has no matching abstract action.
+Error: The behavior up to this point is (1 actions):
+         spec: init -> c=0
+    1. timeout n0
+         spec: no matching abstract action -> c=2
+```
+
+`--trace-out` carries the same in each world's `spec` object
+(`{"action": "stutter", "state": {"c": 1}}`; `null` at a world the
+check does not judge).
+
 ## The TLA+ bridge
 
 ```

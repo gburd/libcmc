@@ -60,6 +60,14 @@ int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t err
 int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errcap);
 void cmc_refine_reset(void);
 
+/* For a counterexample in spec terms: what the last cmc_refine_check()
+ * or cmc_refine_step() built.  act gets the abstract action the step
+ * refined ("init", "stutter", "NAME(p=v, ...)", or why none matched;
+ * empty after a state-level check), vals the bound variables' values,
+ * as text or, with json set, a JSON object.  Returns 0, or -1 if the
+ * last check built no abstract state. */
+int cmc_refine_note(int json, char *act, size_t actcap, char *vals, size_t valcap);
+
 /* Milestone D: translate the .cml spec to TLA+ on stdout (for TLC,
  * Apalache, TLAPS), and write the TLC .cfg that goes with it.
  * `deadlock_off` as for cmc_spec_main().  Return 0 ok, 3 on a model

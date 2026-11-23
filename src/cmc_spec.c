@@ -1481,6 +1481,10 @@ out:	ar_release(m);
 	return rc;
 }
 
+/* When not NULL, bind_params() records in bp_env[k] the parameter
+ * bindings that produced succ[k], so a trace can name them. */
+static Env *bp_env;
+
 /* recursively bind an action's parameters over their finite domains and
  * invoke the body for each combination */
 static void bind_params(const Action *a, Env *env, int pi, const State *st,
@@ -1490,7 +1494,7 @@ static void bind_params(const Action *a, Env *env, int pi, const State *st,
 		static State out;	/* not on the stack: a state is SP_STATEW words */
 		int r=sp_step(a,env,st,&out,err,errcap);
 		if(r<0){ *rc=-1; return; }
-		if(r==1){ if(*nsucc<cap) succ[(*nsucc)++]=out; else { snprintf(err,errcap,"too many successors"); *rc=-1; } }
+		if(r==1){ if(*nsucc<cap){ if(bp_env) bp_env[*nsucc]=*env; succ[(*nsucc)++]=out; } else { snprintf(err,errcap,"too many successors"); *rc=-1; } }
 		return;
 	}
 	/* evaluate the param domain in the current state */
@@ -1691,22 +1695,23 @@ static int sp_in_model(const State *from, const State *to, int *in, char *err, s
 	return rc;
 }
 
-/* print v on stdout: an integer, TRUE or FALSE, {..}, a function as
+/* print v on o: an integer, TRUE or FALSE, {..}, a function as
  * [k:v,...], a record as [a |-> v, ...], a sequence as <<..>> */
-static void val_print(const Value *v){
-	if(v->tag==T_INT){ printf("%ld",v->i); return; }
-	if(v->tag==T_BOOL){ printf("%s",v->i?"TRUE":"FALSE"); return; }
-	if(v->tag==T_SET){ printf("{"); for(int j=0;j<val_n(v);j++) printf("%s%ld",j?", ":"",set_e(v,j)); printf("}"); return; }
+static void val_fprint(FILE *o, const Value *v){
+	if(v->tag==T_INT){ fprintf(o,"%ld",v->i); return; }
+	if(v->tag==T_BOOL){ fprintf(o,"%s",v->i?"TRUE":"FALSE"); return; }
+	if(v->tag==T_SET){ fprintf(o,"{"); for(int j=0;j<val_n(v);j++) fprintf(o,"%s%ld",j?", ":"",set_e(v,j)); fprintf(o,"}"); return; }
 	long key[SP_MAXFLD+SP_MAPMAX]; Value kid[SP_MAXFLD+SP_MAPMAX]; int n=comp_kids(v,key,kid);
-	printf(v->tag==T_SEQ?"<<":"[");
+	fprintf(o,v->tag==T_SEQ?"<<":"[");
 	for(int j=0;j<n;j++){
-		if(v->tag==T_FUN) printf("%s%ld:",j?",":"",key[j]);
-		else if(v->tag==T_REC) printf("%s%s |-> ",j?", ":"",S.fld[key[j]]);
-		else if(j) printf(", ");
-		val_print(&kid[j]);
+		if(v->tag==T_FUN) fprintf(o,"%s%ld:",j?",":"",key[j]);
+		else if(v->tag==T_REC) fprintf(o,"%s%s |-> ",j?", ":"",S.fld[key[j]]);
+		else if(j) fprintf(o,", ");
+		val_fprint(o,&kid[j]);
 	}
-	printf(v->tag==T_SEQ?">>":"]");
+	fprintf(o,v->tag==T_SEQ?">>":"]");
 }
+static void val_print(const Value *v){ val_fprint(stdout,v); }
 
 /* Where cmc_spec_main() was asked to write a counterexample, if
  * anywhere (--trace-out), and in which format. */
@@ -2208,9 +2213,19 @@ out:	ar_release(mark);
 	return rc;
 }
 
+/* The abstract state the last check built, and what the step to it
+ * refined, for cmc_refine_note(): R_have is 0 until a state is built;
+ * R_act is empty for a state-level check, else "init", "stutter", the
+ * matched action with its parameters, or (R_bad set) why none matched. */
+static State R_last;
+static int R_have, R_bad;
+static char R_act[160];
+
 int cmc_refine_check(const CmcObs *obs, const char **name, char *err, size_t errcap){
 	/* build the abstract state: each variable's Value from its binding */
-	State st; if(build_abstract(obs,&st,err,errcap)) return -2;
+	State st; R_have=0; R_act[0]=0; R_bad=0;
+	if(build_abstract(obs,&st,err,errcap)) return -2;
+	R_last=st; R_have=1;
 	/* check the abstract invariants on the built state */
 	int bad=sp_check(&st,err,errcap);
 	if(bad==-2) return -2;
@@ -2251,20 +2266,31 @@ static const char *first_unbound_var(void){
 
 /* does some active abstract action step take `from` to exactly `to`?  An
  * action gated out by a [TAG] that was not --define'd is not part of the
- * transition relation, as in the search and the TLA+ emitter. */
+ * transition relation, as in the search and the TLA+ emitter.  On a
+ * match, the first action in declaration order that makes the step, and
+ * its parameters, go into R_act as `name(p=v, ...)`. */
 static int abstract_step_exists(const State *from, const State *to, char *err, size_t errcap){
 	enum { C2_SUCC = 4096 };
 	State *succ = malloc((size_t)C2_SUCC * sizeof *succ);
-	if(!succ){ snprintf(err,errcap,"out of memory"); return -2; }
+	Env *envs = malloc((size_t)C2_SUCC * sizeof *envs);
+	if(!succ || !envs){ free(succ); free(envs); snprintf(err,errcap,"out of memory"); return -2; }
 	int found=0;
+	bp_env=envs;
 	for(int ai=0; ai<S.nact && !found; ai++){
 		if(!act_active(&S.act[ai])) continue;
 		int ns=0, rc=0; Env env=env_new(NULL);
 		bind_params(&S.act[ai],&env,0,from,succ,&ns,C2_SUCC,err,errcap,&rc);
-		if(rc<0){ free(succ); return -2; }
-		for(int k=0;k<ns;k++) if(state_eq(&succ[k],to)){ found=1; break; }
+		if(rc<0){ found=-2; break; }
+		for(int k=0;k<ns && !found;k++) if(state_eq(&succ[k],to)){
+			size_t n=(size_t)snprintf(R_act,sizeof R_act,"%s",S.act[ai].name);
+			for(int p=0;p<envs[k].np && n<sizeof R_act;p++)
+				n+=(size_t)snprintf(R_act+n,sizeof R_act-n,"%s%s=%ld",p?", ":"(",envs[k].pname[p],envs[k].pval[p]);
+			if(envs[k].np && n<sizeof R_act) snprintf(R_act+n,sizeof R_act-n,")");
+			found=1;
+		}
 	}
-	free(succ);
+	bp_env=NULL;
+	free(succ); free(envs);
 	return found;
 }
 
@@ -2279,24 +2305,58 @@ int cmc_refine_step(const CmcObs *obs, const char **name, char *err, size_t errc
 		const char *u=first_unbound_var();
 		if(u){ snprintf(err,errcap,"--refine-steps needs every spec variable bound; '%s' has no [map] entry (map it, or use --refine for the state-level check)",u); return -2; }
 	}
-	State cur; if(build_abstract(obs,&cur,err,errcap)) return -2;
-	/* C2 subsumes C1: the invariant must hold at every state */
+	State cur; R_have=0; R_bad=0;
+	if(build_abstract(obs,&cur,err,errcap)) return -2;
+	R_last=cur; R_have=1;
+	/* C2 subsumes C1: the invariant must hold at every state.  It is
+	 * reported before a step that matches no action, as it always was;
+	 * the step is still named, so the trace shows what led there. */
 	int bad=sp_check(&cur,err,errcap);
 	if(bad==-2) return -2;
-	if(bad>=0){ *name=S.inv[bad].name; return bad; }
 	if(C2_have){
-		if(!state_eq(&C2_prev,&cur)){	/* not a stutter */
+		if(state_eq(&C2_prev,&cur)) snprintf(R_act,sizeof R_act,"stutter");
+		else {
 			int e=abstract_step_exists(&C2_prev,&cur,err,errcap);
 			if(e==-2) return -2;
-			if(e==0){ *name="no matching abstract action"; C2_prev=cur; C2_have=1; return -3; }
+			if(e==0){ snprintf(R_act,sizeof R_act,"no matching abstract action"); R_bad=1; }
 		}
 	} else {
 		/* the first observation of a behaviour must be an initial state */
 		State init; if(sp_init_state(&init,err,errcap)) return -2;
-		if(!state_eq(&init,&cur)){ *name="the first state is not the spec's init"; return -3; }
+		if(state_eq(&init,&cur)) snprintf(R_act,sizeof R_act,"init");
+		else { snprintf(R_act,sizeof R_act,"not the spec's init"); R_bad=1; }
 	}
+	if(bad>=0){ *name=S.inv[bad].name; return bad; }
+	if(R_bad && !C2_have){ *name="the first state is not the spec's init"; return -3; }
+	if(R_bad){ *name="no matching abstract action"; C2_prev=cur; return -3; }
 	C2_prev=cur; C2_have=1;
 	return -1;
+}
+
+/* What the last cmc_refine_check() or cmc_refine_step() built, for a
+ * trace: the abstract action into act (empty after a state-level
+ * check) and the bound variables' values into vals, as `x=1 f=[0:1]`,
+ * or with json set as a JSON object, `{"x":1,"f":{"0":1}}`.  An unbound
+ * variable is not shown: C1 does not observe it.  Returns 0, or -1 if
+ * the last check built no state (it failed to evaluate). */
+int cmc_refine_note(int json, char *act, size_t actcap, char *vals, size_t valcap){
+	if(!R_have) return -1;
+	snprintf(act,actcap,"%s",R_act);
+	FILE *m=fmemopen(vals,valcap,"w");
+	if(!m) return -1;	/* GCOVR_EXCL_LINE: fmemopen of a caller's buffer */
+	Value vv[SP_MAXVAR]; st_views(&R_last,vv);
+	int first=1;
+	for(int vi=0;vi<S.nvar;vi++){
+		int bound=0;
+		for(int b=0;b<B_nmap && !bound;b++) if(var_index(B_map[b].var)==vi) bound=1;
+		if(!bound) continue;
+		if(json){ fprintf(m,"%s\"%s\":",first?"{":",",S.var[vi].name); trace_value(m,&vv[vi],0); }
+		else { fprintf(m,"%s%s=",first?"":" ",S.var[vi].name); val_fprint(m,&vv[vi]); }
+		first=0;
+	}
+	if(json) fputs(first?"{}":"}",m);
+	fclose(m);
+	return 0;
 }
 
 /* =====================================================================

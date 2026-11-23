@@ -150,6 +150,7 @@ in the kernel, untouched.
 | a thread blocked in, or busy outside, the calls the checker sees | refused | exit 1 after 10 s with no checked call | proc_gate kernelfd |
 | `--trace-out` JSON counterexample | exact | each listed step and the world after it: node records, durable records, crashed flags, replies; the network and timers are not written | proc_gate trace rows |
 | `--refine` (C1) and `--refine-steps` (C2) | exact for the bound variables | C2 needs every spec variable bound; checks init, gated actions, exact states | proc_gate mono, spec_gate C2 rows |
+| a `--refine` counterexample in spec terms | exact for the bound variables | each judged world's abstract state and, with C2, the action (and parameters) the step refined or `stutter`, printed and in `--trace-out`; a binding builds integers and functions of integers only (records and sequences refused) | proc_gate trace mono-bug, paxos2-bug rows |
 
 ## Abstract checker (`cmc --spec`)
 

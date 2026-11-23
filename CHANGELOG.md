@@ -46,6 +46,17 @@ constrain*.cml).
   apalache_gate, which compares cmc's ITF file for each planted bug
   with the one Apalache writes.
 
+Counterexamples of `cmc --model-file ... --refine SPEC --bind FILE` read
+in spec terms (docs/plans/2.3-tla-users.md, item 8).  Below each listed
+step after which the refinement check judges the world, a `spec:` line
+gives the abstract state the binding built (the bound variables), and
+with `--refine-steps` the abstract action the step refined, with its
+parameters, or `stutter`; `--trace-out` json carries the same in each
+world's `spec` object.  A binding still builds only integers and
+functions of integers, and refuses record and sequence variables.
+Gate: proc_gate trace rows on mono-bug (C2) and paxos2-bug (C1), which
+trace_check.py checks line by line against the file.
+
 The abstract language (`.cml`) gains records, bounded sequences and
 named operators, as a TLA+ user writes them.  A variable can be a record
 `[a : T, b : T]`, a sequence `Seq(T, N)` of at most N elements, or a
