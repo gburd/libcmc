@@ -17,6 +17,8 @@ fail=0
 java=$(sed -n 's/^JAVA=//p' "$TLC")
 if [ ! -x "$java" ] && ! command -v nix >/dev/null; then
 	echo "spec_calibrate: skipped (no TLC: neither the pinned java nor nix is available)"
+	# release evidence must not be a skip (as apalache_gate)
+	[ "${CMC_REQUIRE_TOOLS:-0}" = 1 ] && { echo "spec_calibrate: FAILED (CMC_REQUIRE_TOOLS=1 forbids a skip)"; exit 1; }
 	exit 0
 fi
 

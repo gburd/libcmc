@@ -9,6 +9,8 @@
 #   make check-msan          the engine tests under MemorySanitizer (clang)
 #   make check-calibration   every HC row against TLC (about 9 minutes)
 #   make check-hc-bugs       planted HC port bugs must fail calibration
+#   make check-spec-calibration  the .cml twins and the TLA+ reader against
+#                            TLC (needs nix or the pinned java)
 #   make check-all           all of the above
 #   make coverage            every gate of make check on a gcc --coverage
 #                            build; fails below 90% of functions or of
@@ -193,7 +195,8 @@ check-emit-tla: $(B)/cmc
 check-emit-apalache: $(B)/cmc
 	test/apalache_gate.sh $(B)/cmc
 
-check-all: check-unit check-msan check-asan check-calibration check-hc-bugs check-examples-slow
+check-all: check-unit check-msan check-asan check-calibration check-hc-bugs check-examples-slow \
+	check-spec-calibration
 
 install: $(LIB) $(B)/cmc $(PRELOAD)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \

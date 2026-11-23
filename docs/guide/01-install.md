@@ -49,6 +49,7 @@ The longer gates:
 | `make check-asan` | the spec gate under AddressSanitizer and UBSan | 20 s |
 | `make check-calibration` | all 22 calibration rows against TLC; about 7 GB of RAM | 8 min |
 | `make check-hc-bugs` | planted bugs in the calibration core must break calibration | 30 s |
+| `make check-spec-calibration` | the `.cml` models' TLA+ twins, and the TLA+ reader, against TLC (needs nix) | 2 min |
 | `make check-all` | all of the above | 10 min |
 
 The times are from a 48-core Xeon; every gate is single-threaded.

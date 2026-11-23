@@ -104,8 +104,9 @@ jobs:
         run: nix flake check -L
 
   calibration:
-    # The 22 calibration rows against TLC, and the planted bugs that must
-    # break them.  Weekly, on demand, and before a release.
+    # The 22 calibration rows against TLC, the planted bugs that must
+    # break them, and the .cml models' TLA+ twins against live TLC.
+    # Weekly, on demand, and before a release.
     # (a called workflow sees the caller's event, so a release is a push of
     # a tag ref; ci.yml itself only runs on pushes to main)
     if: >-
@@ -121,6 +122,13 @@ jobs:
         run: make check-hc-bugs
       - name: make check-examples-slow
         run: make check-examples-slow
+      - uses: cachix/install-nix-action@v31
+      - name: make check-spec-calibration
+        # the .cml twins and the TLA+ reader against live TLC; a missing
+        # TLC fails the step instead of skipping
+        env:
+          CMC_REQUIRE_TOOLS: 1
+        run: nix develop --command make check-spec-calibration
 
   bridge:
     # The TLA+ bridge: every .cml model's emitted module through TLC and
