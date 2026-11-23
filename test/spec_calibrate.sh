@@ -49,6 +49,7 @@ test/spec|constrain_inv.cml||constrain.tla|constrain_inv.cfg|VIOLATION
 test/spec|constrain_acinv.cml||constrain.tla|constrain_acinv.cfg|VIOLATION
 examples/spec|logrep.cml||logrep.tla|logrep_safe.cfg|PASS
 examples/spec|logrep.cml|--define BUG|logrep.tla|logrep_bug.cfg|VIOLATION
+docs/_includes/snippets|tcommit.cml||TCommit.tla|TCommit.cfg|PASS
 "
 # fastpaxos.tla keeps each round 2 promise's sender, which the .cml
 # counts away; fastpaxos_view.cfg checks it under VIEW Abstract, the

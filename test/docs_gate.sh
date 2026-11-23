@@ -14,7 +14,9 @@
 #      the guide's threaded node (counter.c) passes with the race
 #      runtime, reports its race without the lock, and is INCOMPLETE
 #      uninstrumented;
-#   5. the in-process example (quickstart.c, libcmc(3)) builds against
+#   5. the TLA+ guide's TCommit (tcommit.cml, tcommit.c): the counts,
+#      traces, refusal, round trip and refinement it shows;
+#   6. the in-process example (quickstart.c, libcmc(3)) builds against
 #      libcmc.a and behaves as its comments say.
 set -u
 B=${1:?usage: docs_gate.sh BUILDDIR}
@@ -119,6 +121,56 @@ if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
 	fi
 else
 	echo "docs: SKIP the guide's server: cmc --model-file needs Linux x86-64"
+fi
+
+# the TLA+ user's guide (04-from-tla.md): Lamport's TCommit as .cml,
+# the upstream module refused, the round trip, a planted bug's trace,
+# the proof hook (TLC's side of each is in spec_calibrate and emit_gate)
+K=$HERE/docs/_includes/snippets
+TB=$(cd "$B" && pwd)/guide-tla
+TC=$(cd "$B" && pwd)/cmc
+mkdir -p "$TB"
+cp "$K/tcommit.cml" "$K/tcommit.model" "$K/tcommit.bind" "$TB/"
+tc() {		# tc DESC EXIT NEEDLE args...: cmc in $TB, output in $OUT/tc.txt
+	d=$1 want=$2 needle=$3; shift 3
+	(cd "$TB" && timeout 300 "$TC" "$@" < /dev/null) > "$OUT/tc.txt" 2>&1
+	rc=$?
+	[ "$rc" = "$want" ] && grep -qF -- "$needle" "$OUT/tc.txt" ||
+		{ echo "docs: guide-tla: $d (exit $rc, wanted $want and \"$needle\")"; cat "$OUT/tc.txt"; fail=1; }
+}
+tc "tcommit.cml does not find TLC's states" 0 "94 states generated, 34 distinct states found" --spec tcommit.cml
+grep -q "search is 7\." "$OUT/tc.txt" || { echo "docs: guide-tla: tcommit.cml depth is not 7"; fail=1; }
+tc "the upstream module is not refused as the guide shows" 3 "TCommit.tla:9: a string literal: strings are not supported" --spec "$K/TCommit.tla" --config "$K/TCommit.cfg"
+tc "the planted spec bug is not caught" 1 "    5. DecideAbortBug" --spec tcommit.cml --define BUG --trace-out bug.itf.json
+grep -qF '{"#meta":{"index":5,"action":"DecideAbortBug"},"N":{"#bigint":"3"},"rmState":{"#map":[[{"#bigint":"0"},{"#bigint":"2"}],[{"#bigint":"1"},{"#bigint":"3"}],[{"#bigint":"2"},{"#bigint":"1"}]]}}' "$TB/bug.itf.json" ||
+	{ echo "docs: guide-tla: the ITF trace does not end in DecideAbortBug"; fail=1; }
+tc "the emitted module has no TLAPS theorem" 0 "THEOREM Inductive == Spec => []IndInv" --emit-tla tcommit.cml
+cp "$OUT/tc.txt" "$TB/tcommit.tla"
+tc "--emit-cfg fails" 0 "CHECK_DEADLOCK FALSE" --emit-cfg tcommit.cml
+cp "$OUT/tc.txt" "$TB/tcommit.cfg"
+tc "the emitted module does not read back" 0 "34 distinct states found" --spec tcommit.tla --config tcommit.cfg
+tc "TCConsistent is not inductive" 0 "of 64 states in TypeOK" --spec tcommit.cml --check-inductive
+if [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = x86_64 ]; then
+	# shellcheck disable=SC2086
+	if $CC $W -no-pie -o "$TB/tcommit" "$K/tcommit.c" &&
+		$CC $W -no-pie -DTC_BUG -o "$TB/tcommit-bug" "$K/tcommit.c"; then
+		R="--model-file tcommit.model --refine tcommit.cml --bind tcommit.bind"
+		# shellcheck disable=SC2086
+		{
+		tc "tcommit.c does not refine TCommit" 0 "391 distinct states found" $R
+		tc "tcommit.c does not refine TCommit step by step" 0 "No error has been found" $R --refine-steps
+		tc "the forgotten vote is not caught" 1 "abstract invariant TCConsistent is violated" $R --binary ./tcommit-bug
+		grep -q "^    11. deliver n0->n1" "$OUT/tc.txt" && grep -q "spec: rmState=\[0:2,1:3,2:1\]" "$OUT/tc.txt" ||
+			{ echo "docs: guide-tla: the bug's trace is not the one the guide shows"; fail=1; }
+		tc "the forgotten vote is not caught step by step" 1 "    8. deliver n0->n1" $R --binary ./tcommit-bug --refine-steps
+		grep -q "spec: no matching abstract action -> rmState=\[0:2,1:0,2:1\]" "$OUT/tc.txt" &&
+			grep -q "^    4. timeout n0" "$OUT/tc.txt" ||
+			{ echo "docs: guide-tla: the step-level trace is not the one the guide shows"; fail=1; }
+		tc "the forgotten vote shows without a timeout" 0 "No error has been found" $R --binary ./tcommit-bug --timeouts 0
+		}
+	else
+		echo "docs: tcommit.c does not build"; fail=1
+	fi
 fi
 
 # CFLAGS is libcmc.a's, so a build with --coverage or a sanitizer links

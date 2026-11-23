@@ -1,0 +1,11 @@
+# tcommit.bind: what TCommit's rmState is in tcommit.c.  Resource
+# manager rm of the spec (0 .. 2) is node rm + 1, and its state is
+# byte 0 of that node's hook.
+spec   = tcommit.cml
+binary = tcommit.c
+
+[fields]
+st = 0
+
+[map]
+rmState[rm] = "node[rm + 1].st"

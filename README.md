@@ -81,7 +81,9 @@ docs site.
 
 Exit status: 0 pass, 1 violation, 2 incomplete (a bound stopped the
 search; never a pass), 3 usage or model-file error.  The guide checks a
-complete example: `docs/guide/02-first-model.md`.
+complete example: `docs/guide/02-first-model.md`.  Coming from TLA+,
+`docs/guide/04-from-tla.md` takes Lamport's TCommit from tlaplus/Examples
+to `.cml` with TLC's counts, then checks a C implementation against it.
 
 The process front end needs Linux x86-64.  The engine also checks
 in-process models, C step functions against `include/cmc.h`

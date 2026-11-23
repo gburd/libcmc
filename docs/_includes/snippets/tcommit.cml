@@ -1,0 +1,47 @@
+# tcommit.cml: Lamport's TCommit.tla (tlaplus/Examples,
+# specifications/transaction_commit, MIT license; see TCommit.LICENSE)
+# in libcmc's abstract model language, for the guide
+# (docs/guide/04-from-tla.md).  test/docs_gate.sh checks that cmc
+# --spec finds what TLC finds on TCommit.tla with TCommit.cfg.
+#
+#   cmc --spec tcommit.cml
+#   cmc --spec tcommit.cml --define BUG     (abort after a commit)
+
+module tcommit
+
+# !region spec
+const N = 3                     # RM = {r1, r2, r3} is 0 .. N-1
+
+# rmState[rm]: 0 working, 1 prepared, 2 committed, 3 aborted
+var rmState : [0 .. N-1 -> 0 .. 3]
+
+def RM = 0 .. N-1
+def canCommit = all rm in RM : rmState[rm] == 1 or rmState[rm] == 2
+def notCommitted = all rm in RM : rmState[rm] != 2
+
+init rmState == [rm in RM -> 0]
+
+action Prepare(rm in RM):
+  when rmState[rm] == 0
+  rmState' = [rmState except ![rm] = 1]
+
+action DecideCommit(rm in RM):
+  when rmState[rm] == 1 and canCommit
+  rmState' = [rmState except ![rm] = 2]
+
+action DecideAbort(rm in RM):
+  when (rmState[rm] == 0 or rmState[rm] == 1) and notCommitted
+  rmState' = [rmState except ![rm] = 3]
+
+deadlock = off
+
+invariant TCConsistent [inductive]: all rm1 in RM : all rm2 in RM : not (rmState[rm1] == 3 and rmState[rm2] == 2)
+# !endregion spec
+
+# !region bug
+# The planted bug: a resource manager aborts without checking that no
+# one has committed.
+action DecideAbortBug(rm in RM) [BUG]:
+  when rmState[rm] == 0 or rmState[rm] == 1
+  rmState' = [rmState except ![rm] = 3]
+# !endregion bug

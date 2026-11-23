@@ -124,6 +124,9 @@ check examples/spec fastpaxos fastpaxos PASS
 check examples/spec fastpaxos fastpaxosb VIOLATION --define BUG
 check examples/spec logrep logrep PASS
 check examples/spec logrep logrepb VIOLATION --define BUG
+# the TLA+ user's guide's TCommit (docs/guide/04-from-tla.md)
+check docs/_includes/snippets tcommit tcommit PASS
+check docs/_includes/snippets tcommit tcommitb VIOLATION --define BUG
 check test/spec distinct distinct PASS
 # under symmetry cmc --spec finds 179 states; the emitted module has no
 # SYMMETRY, so TLC must find the 357 states cmc finds without it

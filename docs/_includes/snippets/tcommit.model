@@ -1,0 +1,18 @@
+# tcommit.model: four nodes running tcommit.c, node 0 the transaction
+# manager and nodes 1 .. 3 the resource managers, with one timeout so a
+# resource manager may give up and abort before it is asked.  The
+# safety property is the spec's TCConsistent, checked through the
+# binding (tcommit.bind); this file's own property is progress, so a run
+# in which the manager never decides fails rather than passes vacuously.
+[target]
+binary = tcommit
+nodes = 4
+
+[environment]
+timeouts = 1
+
+[fields]
+st = 0                  # byte 0 of each node's hook
+
+[invariants]
+decides = "eventually node[0].st != 0"
