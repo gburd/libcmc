@@ -172,6 +172,7 @@ in the kernel, untouched.
 | `const` declared twice (in a module or over `extends`) | refused | exit 3 | spec_gate const rows |
 | action header `NAME(p in SET, ...) [TAG]:` | exact | the tag is only the bracket after the parameters, so a domain `0 .. f[i]` stays a domain; other text in the header is exit 3 | spec_gate action header rows |
 | several `when` lines in an action | exact | conjoined, as TLA+ `/\` lines, in the check and in `--emit-tla`; a `when` outside an action is exit 3 | spec_gate when rows |
+| every emitted module parses | exact | SANY parses the `--emit-tla` output of every `.cml` in examples/spec and test/spec that `cmc --spec` accepts, with each `[TAG]` defined in turn (74 modules) | emit_gate SANY rows |
 | `--emit-tla` names and `count` extents | exact | a keyword is rewritten only as a whole word (votedFor, small, min stay names); a count body ends at its enclosing bracket or comma | spec_gate names rows, emit_gate names |
 | operator precedence | exact | TLA+'s; `/` or `mod` beside `* / mod`, `mod` beside `+ -`, and `and` beside `or` unparenthesised are exit 3, as SANY refuses them | spec_gate precedence rows, emit_gate prec |
 | `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |

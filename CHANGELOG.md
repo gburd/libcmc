@@ -168,6 +168,10 @@ before):
   numbers 0 .. 1 overlapped the client ids 1 .. 2, so its 278 states
   were no orbit count); its numbers are now 5 .. 6, and the gate pins
   179, the orbit count of TLC's 357-state dump under swapping clients.
+- The emit gate runs SANY on the module emitted from every `.cml` in
+  examples/spec and test/spec that `cmc --spec` accepts, with each
+  `[TAG]` defined in turn (74 modules), so an emitter syntax bug shows
+  on any model, not only on a row TLC runs.
 
 ## 2.2.0 (2026-11-22)
 

@@ -200,6 +200,29 @@ cov examples/spec zab zab distinct
 # and both properties
 check test/spec shape shape PASS
 
+# SANY over every module the bridge emits: each .cml in examples/spec
+# and test/spec (with each of its [TAG]s defined in turn) that cmc
+# checks must give a module SANY parses, so an emitter syntax bug is
+# caught on any model, not only on the rows above.  A file cmc refuses
+# (a base module with no init, a refusal fixture: exit 3) is skipped.
+echo "-- SANY parses every emitted module"
+d="$OUT/sany"; mkdir -p "$d"; nsany=0
+for src in "$HERE"/examples/spec/*.cml "$HERE"/test/spec/*.cml "$HERE"/test/spec/*/*.cml; do
+	for tag in "" $(sed -n 's/^action .*) *\[\([A-Za-z0-9_]*\)\] *:.*/\1/p; s/^action [A-Za-z0-9_]* *\[\([A-Za-z0-9_]*\)\] *:.*/\1/p' "$src" | sort -u); do
+		mod=S$(basename "$src" .cml | tr -c 'A-Za-z0-9\n' _)$tag
+		timeout 600 "$CMC" --spec "$src" ${tag:+--define "$tag"} > "$d/$mod.cmc" 2>&1
+		[ $? = 3 ] && continue
+		"$CMC" --emit-tla "$src" ${tag:+--define "$tag"} > "$d/$mod.tla" 2> "$d/$mod.err" || continue
+		sed -i "1s/MODULE [A-Za-z0-9_]* /MODULE $mod /" "$d/$mod.tla"
+		(cd "$d" && bash "$TLC" --sany "$mod.tla") > "$d/$mod.out" 2>&1
+		if [ $? != 0 ] || grep -qE 'Parse Error|Semantic errors|Fatal errors|Could not parse|\*\*\* Errors' "$d/$mod.out"; then
+			echo "FAIL SANY rejects the module emitted from ${src#"$HERE"/}${tag:+ --define $tag}"
+			grep -iE 'error|line' "$d/$mod.out" | head -4 | sed 's/^/     /'; echo x>"$OUT/fail"
+		else nsany=$((nsany+1)); fi
+	done
+done
+echo "ok   SANY parsed $nsany emitted modules"
+
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "emit_gate: ok (generated TLA+ parses and agrees with cmc --spec)" || echo "emit_gate: FAILED"
 exit $fail
