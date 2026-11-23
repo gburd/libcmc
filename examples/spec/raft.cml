@@ -15,11 +15,12 @@
 # at most one candidate's votesGranted, and two candidates cannot both
 # reach a quorum in the same term.
 #
-# Here, kept small: 3 servers (0 .. S-1), a quorum of 2.  votes[c]
-# accumulates the number of distinct servers that have granted candidate
-# c, and used[s] records that server s has already spent its one vote.
-# Because two quorums of 3 servers overlap, with each server voting once
-# at most one candidate can reach a quorum -- Election Safety.
+# Here, kept small: 3 servers (0 .. S-1), a quorum of 2.  Each server
+# is a record: srv[s].used records that s has already spent its one
+# vote for the term, and srv[c].votes counts the distinct servers that
+# have granted candidate c.  Because two quorums of 3 servers overlap,
+# with each server voting once at most one candidate can reach a quorum
+# -- Election Safety.
 #
 #   cmc --spec examples/spec/raft.cml
 #   cmc --spec examples/spec/raft.cml --define BUG   (unsafe: revote)
@@ -29,29 +30,28 @@ module raft
 const S = 3                     # servers and candidates 0 .. S-1
 const Q = 2                     # a quorum majority of S
 
-# used[s] = 1 once server s has granted its single vote for the term
-var used : [0 .. S-1 -> 0 .. 1]
-# votes[c] = how many distinct servers have granted candidate c
-var votes : [0 .. S-1 -> 0 .. S]
+def Server = 0 .. S-1
+# candidate c has a quorum of votes, so it becomes leader
+def Leader(c) = srv[c].votes >= Q
 
-init used == [s in 0 .. S-1 -> 0]
-init votes == [c in 0 .. S-1 -> 0]
+var srv : [0 .. S-1 -> [used : 0 .. 1, votes : 0 .. S]]
+
+init srv == [s in Server -> [used |-> 0, votes |-> 0]]
 
 # a server grants its one vote to candidate c: it must not have voted
-# yet (RequestVote grants at most one vote per term).  The grant is
-# recorded by spending the server's vote and incrementing c's tally.
-action grant(s in 0 .. S-1, c in 0 .. S-1):
-  when used[s] == 0
-  used' = [used except [s] = 1]
-  votes' = [votes except [c] = votes[c] + 1]
+# yet (RequestVote grants at most one vote per term).  The grant spends
+# the server's vote and adds one to c's tally.
+action grant(s in Server, c in Server):
+  when srv[s].used == 0 and srv[c].votes < S
+  srv' = [srv except ![s].used = 1, ![c].votes = @ + 1]
 
 # the planted bug: a server grants a vote without spending its single
 # vote, so one server can grant two candidates -- two candidates can
 # then each reach a quorum and both win in one term.
-action grant_bug(s in 0 .. S-1, c in 0 .. S-1) [BUG]:
-  when votes[c] < S
-  votes' = [votes except [c] = votes[c] + 1]
+action grant_bug(s in Server, c in Server) [BUG]:
+  when srv[c].votes < S
+  srv' = [srv except ![c].votes = @ + 1]
 
 # Election Safety: at most one candidate reaches a quorum in the term,
 # so at most one leader is elected.
-invariant election_safety: (count c in 0 .. S-1 : votes[c] >= Q) <= 1
+invariant election_safety: (count c in Server : Leader(c)) <= 1

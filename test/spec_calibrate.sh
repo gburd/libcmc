@@ -37,6 +37,8 @@ examples/spec|zab.cml||zab.tla|zab_safe.cfg|PASS
 examples/spec|zab.cml|--define BUG|zab.tla|zab_bug.cfg|VIOLATION
 examples/spec|fastpaxos.cml||fastpaxos.tla|fastpaxos_view.cfg|PASS
 examples/spec|fastpaxos.cml|--define BUG|fastpaxos.tla|fastpaxos_bug.cfg|VIOLATION
+examples/spec|logrep.cml||logrep.tla|logrep_safe.cfg|PASS
+examples/spec|logrep.cml|--define BUG|logrep.tla|logrep_bug.cfg|VIOLATION
 "
 # fastpaxos.tla keeps each round 2 promise's sender, which the .cml
 # counts away; fastpaxos_view.cfg checks it under VIEW Abstract, the

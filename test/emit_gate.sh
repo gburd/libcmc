@@ -12,6 +12,7 @@ mkdir -p "$OUT"
 fail=0
 
 # row: DIR | CML | MODULE | CFGLINE (TLC constants) | INV | want | define
+# | distinct (optional: the count cmc --spec reports, which TLC must find)
 rows="
 test/spec|counter|counter|CONSTANT N = 3|in_range|PASS|
 examples/spec|paxos|paxos|CONSTANTS V = 2  A = 3  B = 2  Q = 2|agreement|PASS|
@@ -30,12 +31,16 @@ examples/spec|twophase|twophase|CONSTANT N = 3|consistency|PASS|
 examples/spec|twophase|twophase|CONSTANT N = 3|consistency|VIOLATION|--define BUG
 examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|PASS|
 examples/spec|fastpaxos|fastpaxos|CONSTANTS V = 2  N = 3  QC = 2  QF = 3  QFBUG = 2|agreement|VIOLATION|--define BUG
+examples/spec|logrep|logrep|CONSTANTS F = 2  L = 2  C = 2  Q = 2|durable leader_ahead|PASS||4439
+examples/spec|logrep|logrep|CONSTANTS F = 2  L = 2  C = 2  Q = 2|durable leader_ahead|VIOLATION|--define BUG
+test/spec|distinct|distinct||ok|PASS||144
+test/spec|symrec|symrec|CONSTANT N = 2|ok|PASS||357
 test/spec|countops|countops|CONSTANT N = 3|bounded|PASS|
 test/spec|guard|guard|CONSTANT N = 3|ratio marked|PASS|
 test/spec|guard|guard|CONSTANT N = 3|ratio marked|VIOLATION|--define BUG
 "
 check() {
-	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7
+	dir=$1 cml=$2 mod=$3 cfgline=$4 inv=$5 want=$6 def=$7 nd=${8:-}
 	# the emitted module is named after the .cml `module` line; write it to
 	# <module>.tla so TLC's filename==module rule is satisfied
 	d="$OUT/$mod-$want"; mkdir -p "$d"
@@ -47,6 +52,9 @@ check() {
 		echo "FAIL $cml [$want]: TLC rejected the generated TLA+"; sed 's/^/     /' "$d/out.txt" | grep -iE 'error|line' | head -4; echo x>"$OUT/fail"; return
 	fi
 	v=$(grep -c 'is violated' "$d/out.txt")
+	if [ -n "$nd" ] && ! grep -q "generated, $nd distinct states found" "$d/out.txt"; then
+		echo "FAIL $cml [$want]: TLC does not find the $nd distinct states cmc --spec does"; echo x>"$OUT/fail"; return
+	fi
 	if [ "$want" = VIOLATION ]; then
 		[ "$v" -ge 1 ] && echo "ok   $cml [$want]: generated TLA+ violates in TLC" || { echo "FAIL $cml [$want]: expected a violation"; echo x>"$OUT/fail"; }
 	else
@@ -56,9 +64,9 @@ check() {
 
 echo "-- the TLA+ bridge: cmc --emit-tla produces TLC-checkable modules"
 rm -f "$OUT/fail"
-printf '%s\n' "$rows" | while IFS='|' read -r dir cml mod cfgline inv want def; do
+printf '%s\n' "$rows" | while IFS='|' read -r dir cml mod cfgline inv want def nd; do
 	[ -z "$cml" ] && continue
-	check "$dir" "$cml" "$mod" "$cfgline" "$inv" "$want" "$def"
+	check "$dir" "$cml" "$mod" "$cfgline" "$inv" "$want" "$def" "$nd"
 done
 
 # liveness: the generated TLA+ carries WF fairness and a temporal PROPERTY;

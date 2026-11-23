@@ -5,6 +5,36 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+The abstract language (`.cml`) gains records, bounded sequences and
+named operators, as a TLA+ user writes them.  A variable can be a
+record `[a : T, b : T]`, a sequence `Seq(T, N)` of at most N elements,
+or a function `[K -> T]` of any of these, nested; values are written
+`[a |-> E]`, `<<E, E>>` (a tuple is a sequence), with `r.a`, `s[i]`,
+`Len`, `Head`, `Tail`, `Append`, `SubSeq` and `\o`.  An update takes
+TLA+'s selector paths and `@`: `[f except ![i].d = Append(@, v)]`.
+`def NAME(p, ...) = EXPR` declares an operator, expanded where it is
+used; a def may use only the defs before it, so recursion is refused at
+load time.  A sequence longer than its bound, like any value outside
+its variable's type, is a model error (exit 3), never cut short.
+`cmc --emit-tla` writes the TLA+ forms, extends `Sequences`, and
+annotates records and sequences for Apalache.  Every value now has one
+canonical encoding of words that the seen set, the liveness graph, C2
+matching and symmetry all use, so two states that differ in one field,
+element or length stay distinct.  The new examples/spec/logrep.cml (log
+replication over records and sequences) and its hand-written TLA+ twin
+agree with TLC: 4439 distinct states at depth 16, and a 5-action
+counterexample for its planted bug.  examples/spec/raft.cml now keeps
+each server as a record, with the same 38 states.  Gates: spec_gate
+records/sequences rows and distinct, spec_calibrate logrep, emit_gate
+logrep, apalache_gate logrep.
+
+An update whose path is outside its value, `[f except [5] = 0]` on a
+function of keys 0 .. 1, is now a model error.  cmc 2.2 added the key,
+so `[f except [5] = 0] == f` was FALSE, where TLC leaves the function
+unchanged and finds TRUE.  A def name, like a constant or variable, can
+no longer be rebound by a quantifier, and up to 8 names can be bound at
+once, not 4.
+
 ## 2.2.0 (2026-11-22)
 
 Takes the process engine toward checking a program in place, as Greg

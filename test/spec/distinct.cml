@@ -1,0 +1,23 @@
+# test/spec/distinct.cml: two states that differ only in one record
+# field, one sequence element, or one sequence's length are distinct.
+# r ranges over the 4 records of two bits, q over the 4 sequences of
+# two bits, and g over 9 functions from two keys to a record holding a
+# sequence of at most one bit, so there are 4 * 4 * 9 = 144 states;
+# single-worker TLC on the emitted module finds the same 144 at depth 7
+# (make check-emit-tla).  A world encoding that dropped a field, an
+# element or a length would merge some of them.
+module distinct
+var r : [a : 0 .. 1, b : 0 .. 1]
+var q : Seq(0 .. 1, 2)
+var g : [0 .. 1 -> [c : Seq(0 .. 1, 1)]]
+init r == [a |-> 0, b |-> 0] and q == <<0, 0>> and g == [i in 0 .. 1 -> [c |-> <<>>]]
+action seta(v in 0 .. 1):
+  r' = [r except !.a = v]
+action setb(v in 0 .. 1):
+  r' = [r except !.b = v]
+action setq(i in 1 .. 2, v in 0 .. 1):
+  q' = [q except ![i] = v]
+action put(i in 0 .. 1, v in 0 .. 1):
+  when Len(g[i].c) == 0
+  g' = [g except ![i].c = <<v>>]
+invariant ok: TRUE

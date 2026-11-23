@@ -157,11 +157,15 @@ in the kernel, untouched.
 | safety verdicts, distinct states, depth | exact | agrees with TLC on every `.cml` model; the seen set compares canonical bytes, not hashes | spec_gate, emit_gate, apalache_gate |
 | `eventually P`, `A ~> B` under `fairness weak` or none | exact | TLA+ semantics with stuttering; checked against TLC on each probe | spec_gate liveness rows, emit_gate |
 | liveness under `symmetry` | refused | exit 3 | (code; no fixture yet) |
-| paxos, fpaxos, caspaxos, zab, fastpaxos against a hand-written TLA+ twin | exact | same distinct states and depth, and the same shortest trace for the BUG; fastpaxos under a VIEW (the twin keeps promise senders the `.cml` counts) | `make check-spec-calibration` |
-| Apalache on the emitted module | bounded | `--length 10` (fastpaxos 11): complete for counter, raft, hc, twophase, fastpaxos; a bounded pass for paxos, fpaxos, caspaxos, zab (longer runs: [Apalache past length 10]({{ '/background/apalache-length/' | relative_url }})) | apalache_gate |
+| paxos, fpaxos, caspaxos, zab, fastpaxos, logrep against a hand-written TLA+ twin | exact | same distinct states and depth, and the same shortest trace for the BUG; fastpaxos under a VIEW (the twin keeps promise senders the `.cml` counts) | `make check-spec-calibration` |
+| Apalache on the emitted module | bounded | `--length 10` (fastpaxos 11): complete for counter, raft, hc, twophase, fastpaxos; a bounded pass for paxos, fpaxos, caspaxos, zab, logrep (length 8) (longer runs: [Apalache past length 10]({{ '/background/apalache-length/' | relative_url }})) | apalache_gate |
 | `and`, `or` | exact | left to right, short-circuit, as TLC; a skipped operand is parsed (names, syntax) but not evaluated | spec_gate guard and short-circuit rows, spec_calibrate guard |
 | integers | exact | 64-bit; an overflowing literal or operation is exit 3; `/` and `mod` refuse negative operands | spec_gate overflow row |
 | declared domains | exact | init and every successor must lie in each variable's domain | spec_gate boundpass, succbound |
+| records, `[K -> T]` of any type, field access, `except` paths and `@` | exact | at most 32 field names, a state of at most 1024 words; a missing field, a path outside its value or a larger state is exit 3 | spec_gate records rows, distinct |
+| sequences `Seq(T, N)`, tuples, `Len Head Tail Append SubSeq \o`, `s[i]` | exact | N at most 12; a value past N is exit 3, never cut; `Head`/`Tail` of `<<>>` and out-of-range positions are exit 3 | spec_gate sequences rows, distinct |
+| `def NAME(p, ...) = EXPR` | exact | at most 32 defs of 4 parameters; arguments by name, as TLA+; recursion refused at load | spec_gate def rows |
+| `def NAME(p, ...) = EXPR` | exact | at most 32 defs of 4 parameters; by-name arguments, as TLA+; recursion refused at load | spec_gate def rows |
 | text that does not fit a buffer | refused | exit 3 | spec_gate truncate |
 | a primed variable read, an init reading an unset variable, a variable assigned twice, a redeclared bound name | refused | exit 3 | spec_gate primed, init_order, duplicate, quantifier |
 | memory safety | checked | ASan and UBSan over the spec gate | `make check-asan` |
