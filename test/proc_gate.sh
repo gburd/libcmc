@@ -1380,6 +1380,11 @@ if command -v python3 > /dev/null 2>&1; then
 	trace_proc "$HERE/examples/spec/paxos2-refine.model" paxos2-bug '"spec":{"action":null,"state":{"chosen":{"1":1,"2":1}}}' \
 		--refine "$HERE/examples/spec/paxos.cml" --bind "$HERE/examples/spec/paxos2.bind"
 	grep -q '^         spec: chosen=\[1:0,2:0\]$' "$OUT/trace.txt" || { echo "FAIL trace paxos2-bug: no spec line for the first world"; fail=1; }
+	# C2 with an action parameter, ending in a violated invariant: the
+	# ack refines ack(v=5), and the trace names it at the violation
+	printf 'module rp\nvar n : 0 .. 9\ninit n == 0\naction ack(v in 0 .. 9):\n  when n == 0\n  n%s = v\ninvariant none: n == 0\n' "'" > "$OUT/rp.cml"
+	printf '[map]\nn = "5 * (count r in replies : r.val == 5)"\n' > "$OUT/rp.bind"
+	trace_proc repl repl '"spec":{"action":"ack(v=5)","state":{"n":5}}' --refine "$OUT/rp.cml" --bind "$OUT/rp.bind" --refine-steps
 else
 	echo "skip trace json rows: no python3"
 fi

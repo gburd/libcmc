@@ -3016,7 +3016,8 @@ static long ty_count(int ti, char *err, size_t errcap){
  * out of memory. */
 static int vl_product(VList *l, int tag, int k, const long *key, VList **kid){
 	long idx[SP_MAPMAX+SP_MAXFLD]={0};
-	for(int j=0;j<k;j++) if(!kid[j]->n) return 0;
+	/* every type has a value: init lies in it, and sp_init_state() ran first */
+	for(int j=0;j<k;j++) if(!kid[j]->n) return 0;	/* GCOVR_EXCL_LINE */
 	for(;;){
 		size_t nw=3;
 		for(int j=0;j<k;j++) nw+=(key?1:0)+enc_len(kid[j]->w+kid[j]->off[idx[j]]);
@@ -3184,7 +3185,6 @@ int cmc_spec_inductive(const char *path, char **defs, int ndefs){
 	if(!succ || !st || !envs){ fprintf(stderr,"cmc: out of memory\n"); ret=3; }	/* GCOVR_EXCL_LINE */
 	for(int vi=0;vi<S.nvar && !ret;vi++)
 		if(vl_type(S.var[vi].ty,&vals[vi],err,sizeof err)){ fprintf(stderr,"cmc: %s: var %s: %s\n",path,S.var[vi].name,err); ret=3; }
-	for(int vi=0;vi<S.nvar && !ret;vi++) if(!vals[vi].n) total=0;
 	g_ind=1;
 	for(long n=0;n<total && !ret;n++){
 		ind_state(vals,idx,st);

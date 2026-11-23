@@ -976,8 +976,44 @@ expect "inductive: an unknown mark is an error"   3 "only mark is \[inductive\]"
 { cat "$I/escape.cml"; printf 'constraint c: x < 3\n'; } > "$OUT/indcon.cml"
 expect "inductive: under a constraint, refused"   3 "not supported" --spec "$OUT/indcon.cml" --check-inductive
 expect "inductive: no --trace-out"                3 "neither --trace-out" --spec "$I/escape.cml" --check-inductive --trace-out "$OUT/x.json"
+# the enumeration over each kind of type: a set-literal domain, a
+# function on the empty set, a record; and the products it refuses
+printf 'module kinds\nvar s : {0, 2}\nvar f : [{} -> 0 .. 1]\nvar r : [a : 0 .. 1, b : {5}]\ninit s == 0 and f == [i in {} -> 0] and r == [a |-> 0, b |-> 5]\naction go:\n  when s == 0\n  s%s = 2\ninvariant t [inductive]: r.b == 5\n' "'" > "$OUT/kinds.cml"
+expect "inductive: set, empty function, record"   0 "each of the 4 states" --spec "$OUT/kinds.cml" --check-inductive
+printf 'module bigs\nvar s : Seq(0 .. 999, 3)\ninit s == <<>>\ninvariant t [inductive]: Len(s) <= 3\n' > "$OUT/bigs.cml"
+expect "inductive: a sequence product too large"  3 "more than 1000000 states" --spec "$OUT/bigs.cml" --check-inductive
+printf 'module bigfn\nvar f : [0 .. 9 -> 0 .. 9]\ninit f == [i in 0 .. 9 -> 0]\ninvariant t [inductive]: TRUE\n' > "$OUT/bigfn.cml"
+expect "inductive: a function product too large"  3 "more than 1000000 states" --spec "$OUT/bigfn.cml" --check-inductive
+# a [TAG] action counts only under --define; an expression that fails
+# in an unreachable state of TypeOK is a model error, not a verdict
+printf 'module gated\nvar x : 0 .. 2\ninit x == 0\naction up [BUG]:\n  when x < 2\n  x%s = x + 1\ninvariant zero [inductive]: x == 0\n' "'" > "$OUT/gated.cml"
+expect "inductive: without --define, no BUG step" 0 "is inductive" --spec "$OUT/gated.cml" --check-inductive
+expect "inductive: with --define, the BUG step"   1 "a step of up leaves zero" --spec "$OUT/gated.cml" --check-inductive --define BUG
+printf 'module everr\nvar x : 0 .. 2\ninit x == 1\naction a:\n  when x == 1\n  x%s = 1\ninvariant d [inductive]: 2 / x >= 1\n' "'" > "$OUT/everr.cml"
+expect "inductive: an invariant that fails to evaluate" 3 "invariant evaluation error" --spec "$OUT/everr.cml" --check-inductive
+printf 'module acterr\nvar x : 0 .. 2\ninit x == 1\naction a:\n  when 2 / x >= 1\n  x%s = 1\ninvariant t [inductive]: x <= 2\n' "'" > "$OUT/acterr.cml"
+expect "inductive: an action that fails to evaluate" 3 "from a state of TypeOK" --spec "$OUT/acterr.cml" --check-inductive
+printf 'module inierr\nvar x : 0 .. 2\ninit x == 5\ninvariant t [inductive]: TRUE\n' > "$OUT/inierr.cml"
+expect "inductive: an init outside the types"     3 "init:" --spec "$OUT/inierr.cml" --check-inductive
+printf 'module inieval\nvar x : 0 .. 2\ninit x == 0\ninvariant t [inductive]: 1 / x == 1\n' > "$OUT/inieval.cml"
+expect "inductive: an init invariant error"       3 "invariant evaluation error" --spec "$OUT/inieval.cml" --check-inductive
+# the proof outline (TLC and Apalache read it in emit_gate and
+# apalache_gate): each marked invariant, the constants, defs, actions
+"$CMC" --emit-tla "$I/mutex_ind.cml" > "$OUT/mi.tla" 2>&1
+if grep -q '^THEOREM Inductive == Spec => \[\]IndInv$' "$OUT/mi.tla" && grep -q '^ASSUME ConstOK ==$' "$OUT/mi.tla" &&
+   grep -q 'BY ConstOK DEF Next, vars, try, enter, leave, IndInv, TypeOK, mutual_exclusion, lock_matches$' "$OUT/mi.tla" &&
+   grep -q '^THEOREM Spec => \[\]lock_matches$' "$OUT/mi.tla"; then echo "ok   emit: the TLAPS outline for mutex_ind"
+else echo "FAIL emit: the TLAPS outline for mutex_ind"; sed 's/^/     /' "$OUT/mi.tla" | tail -20; fail=1; fi
+printf 'module dq\ndef Lo = 0\nvar x : 0 .. 1\ninit x == Lo\ninvariant t [inductive]: x >= Lo\n' > "$OUT/dq.cml"
+"$CMC" --emit-tla "$OUT/dq.cml" > "$OUT/dq.tla" 2>&1
+if grep -q 'BY DEF Init, IndInv, TypeOK, t, Lo$' "$OUT/dq.tla" && ! grep -q ConstOK "$OUT/dq.tla"; then echo "ok   emit: the outline opens defs, and has no ASSUME without constants"
+else echo "FAIL emit: the outline with a def"; sed 's/^/     /' "$OUT/dq.tla" | tail -12; fail=1; fi
 printf 'module clash\nvar TypeOK : 0 .. 1\ninit TypeOK == 0\ninvariant t: TRUE\n' > "$OUT/clash.cml"
 expect "emit: a model name TypeOK is refused"     3 "TypeOK is a name the emitted TLA+ defines" --emit-tla "$OUT/clash.cml"
+printf 'module clash2\nvar x : 0 .. 1\ninit x == 0\naction PTL:\n  when x == 0\n  x%s = 1\ninvariant t: TRUE\n' "'" > "$OUT/clash2.cml"
+expect "emit: an action named PTL is refused"     3 "PTL is a name the emitted TLA+ defines" --emit-tla "$OUT/clash2.cml"
+printf 'module clash3\nconst Inductive = 1\nvar x : 0 .. 1\ninit x == 0\ninvariant t: TRUE\n' > "$OUT/clash3.cml"
+expect "emit: a constant named Inductive is refused" 3 "Inductive is a name" --emit-tla "$OUT/clash3.cml"
 
 [ $fail = 0 ] && echo "spec_gate: ok (abstract-model checker: verdicts, counts and depths match TLC)" || echo "spec_gate: FAILED"
 exit $fail
