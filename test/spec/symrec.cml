@@ -3,23 +3,26 @@
 # server; each request is a record naming its client, and the queue is a
 # bounded sequence.  last[c] records the last request client c had
 # served.  Permuting the client ids maps the ids inside the records,
-# the keys of last, and the ids in the served set together, so the 51
-# states fall to 13 orbits; spec_gate.sh pins both counts and the
-# verdict, which TLC agrees with on the emitted module without the
-# symmetry (51 states, depth 5).
+# the keys of last, and the ids in the served set together.  The
+# request numbers n are 5 .. 6, off the symmetry set, so that only
+# client ids are permuted (the symmetry is the model's obligation): the
+# 357 states fall to 179 orbits, the orbit count of TLC's state dump of
+# the emitted module under swapping the clients.  spec_gate.sh pins both
+# counts and the verdict, which TLC agrees with on the emitted module
+# without the symmetry (357 states).
 module symrec
 
 const N = 2
 
 symmetry 1 .. N
 
-var q : Seq([who : 0 .. N, n : 0 .. 1], 2)
-var last : [1 .. N -> 0 .. 1]
+var q : Seq([who : 0 .. N, n : 5 .. 6], 2)
+var last : [1 .. N -> 0 .. 6]
 var served : [0 .. 0 -> [ids : Seq(0 .. N, 2)]]
 
 init q == <<>> and last == [c in 1 .. N -> 0] and served == [z in 0 .. 0 -> [ids |-> <<>>]]
 
-action ask(c in 1 .. N, k in 0 .. 1):
+action ask(c in 1 .. N, k in 5 .. 6):
   when Len(q) < 2
   q' = Append(q, [who |-> c, n |-> k])
 

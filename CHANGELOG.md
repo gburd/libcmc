@@ -159,6 +159,13 @@ before):
   rejects.  A `count` inside brackets (`g[count i in S : E]`) ended at
   the bracket that encloses it; its body used to run past the `]`.
   test/spec/names.cml holds both, gated against TLC.
+- Under `symmetry`, every reached state is checked against its images
+  under the transpositions of the set: each must lie in the domains and
+  give every invariant and constraint the same value, or the run is exit
+  3.  test/spec/symrec.cml broke the obligation itself (its request
+  numbers 0 .. 1 overlapped the client ids 1 .. 2, so its 278 states
+  were no orbit count); its numbers are now 5 .. 6, and the gate pins
+  179, the orbit count of TLC's 357-state dump under swapping clients.
 
 ## 2.2.0 (2026-11-22)
 

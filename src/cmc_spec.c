@@ -1836,9 +1836,39 @@ static int print_trace(const QN *cur){
 
 /* Check the invariants in the state of `x`, newly generated, and report
  * a violation.  Returns 0 if they hold, else the exit status (1 or 3). */
+/* The part of the symmetry obligation a single state can show.  For
+ * each transposition of the symmetry set's first value with another
+ * (together they generate every permutation), the image of st must lie
+ * in the variables' domains, and every invariant and constraint must
+ * give it the value st gets.  Otherwise the reduction would fold st
+ * onto a state the model tells apart, and could hide a violation (a
+ * counter over 0 .. 2 under symmetry 1 .. 2 folds x = 2 onto x = 1).
+ * Returns 0, or -1 with the reason in err.  An asymmetric guard is not
+ * seen here; it stays the model's obligation, as in TLC. */
+static int sym_check(const State *st, char *err, size_t errcap){
+	Value a[SP_MAXVAR], b[SP_MAXVAR]; st_views(st,a);
+	char e[128]; size_t m=ar_mark(); int rc=0;
+	for(int t=1;t<g_symn && !rc;t++){
+		int perm[8]; for(int i=0;i<g_symn;i++) perm[i]=i;
+		perm[0]=t; perm[t]=0;
+		static State img; sym_apply(st,&img,perm); st_views(&img,b);
+		if(in_domains(b,e,sizeof e)){ snprintf(err,errcap,"the model is not symmetric under %.80s: swapping %ld and %ld gives a state outside it (%.40s)",S.symmetry,g_symel[0],g_symel[t],e); rc=-1; break; }
+		for(int k=0;k<S.ninv+S.ncon && !rc;k++){
+			const SpInv *I=k<S.ninv?&S.inv[k]:&S.con[k-S.ninv];
+			Env ea=env_new(a), eb=env_new(b); int ha=0, hb=0;
+			int oka=sp_eval_bool(I->expr,&ea,&ha,"an invariant",e,sizeof e);
+			int okb=sp_eval_bool(I->expr,&eb,&hb,"an invariant",e,sizeof e);
+			if(oka!=okb || ha!=hb){ snprintf(err,errcap,"the model is not symmetric under %.80s: %s %.40s tells a state from its image under swapping %ld and %ld",S.symmetry,k<S.ninv?"invariant":"constraint",I->name,g_symel[0],g_symel[t]); rc=-1; }
+		}
+	}
+	ar_release(m);
+	return rc;
+}
+
 static int check_new(const QN *x){
 	char err[256];
 	static State st; qn_state(x,&st);
+	if(g_symok && sym_check(&st,err,sizeof err)){ fprintf(stderr,"cmc: %s\n",err); return 3; }
 	int bad=sp_check(&st,err,sizeof err);
 	if(bad==-2){ fprintf(stderr,"cmc: invariant evaluation error: %s\n",err); return 3; }
 	if(bad<0) return 0;

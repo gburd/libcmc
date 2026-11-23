@@ -522,9 +522,18 @@ rs "a sequence past the limit"         "sequence too large" "Len(<<0,0,0,0,0,0,0
 rs "a record past its literal"         "expected |-> in record" "[a |-> 1, b] == r"
 # symmetry maps the ids inside records and sequences (and only there,
 # not field names or positions); without it the states are TLC's 357
-expect "symmetry reaches into records and sequences" 0 "278 distinct states found" --spec "$HERE/test/spec/symrec.cml"
+expect "symmetry reaches into records and sequences" 0 "179 distinct states found" --spec "$HERE/test/spec/symrec.cml"
 sed '/^symmetry/d' "$HERE/test/spec/symrec.cml" > "$OUT/symrec_off.cml"
 expect "the same model without symmetry: TLC's 357 states" 0 "357 distinct states found" --spec "$OUT/symrec_off.cml"
+# a model that is not symmetric under its symmetry set is refused where
+# a state shows it: a value of the set used as a counter (x = 2 folded
+# onto x = 1 and passed), or one held where its image leaves the domain
+printf 'module sb\nsymmetry 1 .. 2\nvar x : 0 .. 2\ninit x == 0\naction a:\n  when x < 2\n  x%s = x + 1\ninvariant not2: x != 2\n' "'" > "$OUT/symbreak.cml"
+expect "symmetry: an invariant that tells the values apart" 3 "not symmetric under 1 .. 2" --spec "$OUT/symbreak.cml" --no-deadlock
+printf 'module sd\nsymmetry 1 .. 2\nvar x : 0 .. 1\ninit x == 0\naction a:\n  x%s = 1\ninvariant ok: TRUE\n' "'" > "$OUT/symdom.cml"
+expect "symmetry: a value whose image leaves the domain" 3 "not symmetric under 1 .. 2" --spec "$OUT/symdom.cml" --no-deadlock
+sed 's/n : 5 .. 6/n : 0 .. 1/; s/0 .. 6\]/0 .. 1]/; s/k in 5 .. 6/k in 0 .. 1/' "$HERE/test/spec/symrec.cml" > "$OUT/symrec_old.cml"
+expect "symmetry: symrec with its numbers in the set" 3 "not symmetric under 1 .. N" --spec "$OUT/symrec_old.cml"
 # the encoding over random nested values: bytes equal exactly when the
 # values are, enc_eq agrees, and a permutation twice is the identity
 EF=$OUT/encfuzz

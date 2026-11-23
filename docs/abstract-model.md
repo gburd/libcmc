@@ -326,6 +326,14 @@ that changed it would be unsound.  A permutation maps every integer of
 the set wherever a value holds it: in sets, function keys and values,
 record fields and sequence elements (not field names or positions).
 
+cmc checks the part of the obligation one state can show: for each
+state it reaches, swapping the set's first value with each other one
+must give a state inside the declared domains on which every invariant
+and constraint has the same value.  A model that fails this (a counter
+`x : 0 .. 2` under `symmetry 1 .. 2`, or a value of the set used as a
+plain number) is exit 3.  An action whose guard tells the values apart
+is not seen by this check and remains the model's obligation.
+
 ## Liveness
 
 ```
