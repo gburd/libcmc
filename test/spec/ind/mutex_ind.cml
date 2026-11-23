@@ -1,0 +1,34 @@
+# test/spec/ind/mutex_ind.cml: the lock of test/spec/mutex.cml with
+# mutual exclusion claimed inductive.  Alone it holds in every reachable
+# state but is not inductive: from the unreachable state where process
+# 0 is critical and the lock is free, process 1 enters too.
+# lock_matches strengthens it (the lock is held exactly when a process
+# is critical), and the two together are inductive.  The gate checks
+# both claims, the weak one by unmarking lock_matches.
+
+module mutex_ind
+
+const N = 2                 # processes 0 .. N-1
+
+# pc[i]: 0 = idle, 1 = trying, 2 = critical
+var pc : [0 .. N-1 -> 0 .. 2]
+var held : 0 .. 1           # 1 = the lock is held
+
+init pc == [i in 0 .. N-1 -> 0] and held == 0
+
+action try(i in 0 .. N-1):
+  when pc[i] == 0
+  pc' = [pc except [i] = 1]
+
+action enter(i in 0 .. N-1):
+  when pc[i] == 1 and held == 0
+  pc' = [pc except [i] = 2]
+  held' = 1
+
+action leave(i in 0 .. N-1):
+  when pc[i] == 2
+  pc' = [pc except [i] = 0]
+  held' = 0
+
+invariant mutual_exclusion [inductive]: (count i in 0 .. N-1 : pc[i] == 2) <= 1
+invariant lock_matches [inductive]: held == (count i in 0 .. N-1 : pc[i] == 2)

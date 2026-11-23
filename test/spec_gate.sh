@@ -889,5 +889,36 @@ else
 	echo "FAIL apalache gate classifier"; sed 's/^/     /' "$OUT/apa-selftest.txt"; fail=1
 fi
 
+# proof hooks: --check-inductive enumerates every state of TypeOK, not
+# only the reachable ones, so it finds the counterexamples to induction
+# a reachability search cannot (each weak model passes cmc --spec), and
+# it refuses what it cannot enumerate rather than check part of it
+I="$HERE/test/spec/ind"
+echo "-- proof hooks: cmc --spec --check-inductive"
+expect "inductive: mutex with lock_matches"       0 "each of the 8 states" --spec "$I/mutex_ind.cml" --check-inductive
+sed 's/^invariant lock_matches \[inductive\]:/invariant lock_matches:/' "$I/mutex_ind.cml" > "$OUT/mutex_weak.cml"
+expect "inductive: mutex alone holds everywhere"  0 "No error has been found" --spec "$OUT/mutex_weak.cml"
+expect "inductive: but mutex alone is not"        1 "a step of enter leaves mutual_exclusion" --spec "$OUT/mutex_weak.cml" --check-inductive
+expect "inductive: the CTI names its parameters"  1 "1. enter(i=0)" --spec "$OUT/mutex_weak.cml" --check-inductive
+expect "inductive: a queue of records"            0 "each of the 13 states" --spec "$I/queue.cml" --check-inductive
+sed 's/^invariant bounded \[inductive\]:/invariant bounded:/' "$I/queue.cml" > "$OUT/queue_weak.cml"
+expect "inductive: increasing alone is not"       1 "leaves increasing" --spec "$OUT/queue_weak.cml" --check-inductive
+expect "inductive: escape holds everywhere"       0 "No error has been found" --spec "$I/escape.cml"
+expect "inductive: a step out of TypeOK is a CTI" 1 "a step of jump leaves TypeOK" --spec "$I/escape.cml" --check-inductive
+printf 'module badinit\nvar x : 0 .. 3\ninit x == 2\naction a:\n  when x < 3\n  x%s = x + 1\ninvariant low [inductive]: x < 2\n' "'" > "$OUT/badinit.cml"
+expect "inductive: an init outside the invariant" 1 "initial state does not satisfy low" --spec "$OUT/badinit.cml" --check-inductive
+expect "inductive: nothing marked is an error"    3 "no invariant is marked" --spec "$HERE/test/spec/counter.cml" --check-inductive
+printf 'module big\nvar a : 0 .. 999\nvar b : 0 .. 999\nvar c : 0 .. 1\ninit a == 0 and b == 0 and c == 0\ninvariant t [inductive]: c <= 1\n' > "$OUT/big.cml"
+expect "inductive: a TypeOK too large is refused" 3 "more than 1000000 states" --spec "$OUT/big.cml" --check-inductive
+printf 'module wide\nvar a : 0 .. 2000000\ninit a == 0\ninvariant t [inductive]: TRUE\n' > "$OUT/wide.cml"
+expect "inductive: a domain too wide is refused"  3 "has more than 1000000 values" --spec "$OUT/wide.cml" --check-inductive
+sed 's/\[inductive\]/[inductve]/' "$I/escape.cml" > "$OUT/mark.cml"
+expect "inductive: an unknown mark is an error"   3 "only mark is \[inductive\]" --spec "$OUT/mark.cml"
+{ cat "$I/escape.cml"; printf 'constraint c: x < 3\n'; } > "$OUT/indcon.cml"
+expect "inductive: under a constraint, refused"   3 "not supported" --spec "$OUT/indcon.cml" --check-inductive
+expect "inductive: no --trace-out"                3 "neither --trace-out" --spec "$I/escape.cml" --check-inductive --trace-out "$OUT/x.json"
+printf 'module clash\nvar TypeOK : 0 .. 1\ninit TypeOK == 0\ninvariant t: TRUE\n' > "$OUT/clash.cml"
+expect "emit: a model name TypeOK is refused"     3 "TypeOK is a name the emitted TLA+ defines" --emit-tla "$OUT/clash.cml"
+
 [ $fail = 0 ] && echo "spec_gate: ok (abstract-model checker: verdicts, counts and depths match TLC)" || echo "spec_gate: FAILED"
 exit $fail

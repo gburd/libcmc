@@ -159,6 +159,40 @@ printf '%s\n' "$rows" | while IFS='|' read -r dir cml mod inv want len def; do
 	check "$dir" "$cml" "$mod" "$inv" "$want" "$len" "$def"
 done
 
+# Proof hooks: Apalache's inductive check (--init=IndInv --inv=IndInv
+# --length=1, every state of IndInv and one step) on the IndInv that
+# cmc --emit-tla writes for the invariants marked [inductive], against
+# cmc --spec --check-inductive on the same model.  Both say inductive,
+# or both find a counterexample to induction.  Each weak row unmarks the
+# strengthening (WEAK names it), leaving an invariant that holds in
+# every reachable state but is not inductive.
+ind() {
+	cml=$1 mod=$2 want=$3 weak=$4
+	d="$OUT/ind-$mod"; mkdir -p "$d"
+	if [ -n "$weak" ]; then
+		sed "s/^invariant $weak \[inductive\]:/invariant $weak:/" "$HERE/test/spec/ind/$cml.cml" > "$d/$mod.cml"
+	else
+		cp "$HERE/test/spec/ind/$cml.cml" "$d/$mod.cml"
+	fi
+	"$CMC" --emit-tla "$d/$mod.cml" > "$d/$mod.tla" 2>&1
+	sed -i "s/MODULE $cml /MODULE $mod /" "$d/$mod.tla"
+	ci=; grep -q '^CInit ==' "$d/$mod.tla" && ci=--cinit=CInit
+	( cd "$d" && RUN "$MC" check --no-deadlock $ci --init=IndInv --inv=IndInv --length=1 --run-dir=run "$mod.tla" > out.txt 2>&1 )
+	"$CMC" --spec "$d/$mod.cml" --check-inductive > "$d/cmc.txt" 2>&1; rc=$?
+	ad=$(classify "$d/out.txt")
+	case $rc in 0) cd_=PASS ;; 1) cd_=VIOLATION ;; *) cd_="ERROR (exit $rc)" ;; esac
+	if [ "$ad" != "$want" ] || [ "$cd_" != "$want" ]; then
+		echo "FAIL inductive $mod [$want]: Apalache gave $ad, cmc --check-inductive $cd_"; echo x>"$OUT/fail"; return
+	fi
+	echo "ok   inductive $mod [$want]: Apalache and cmc --check-inductive agree"
+}
+echo "-- proof hooks: Apalache's inductive check agrees with cmc --check-inductive"
+ind mutex_ind mutex_ind PASS ""
+ind mutex_ind mutex_weak VIOLATION lock_matches
+ind queue queue PASS ""
+ind queue queue_weak VIOLATION bounded
+ind escape escape VIOLATION ""
+
 [ -f "$OUT/fail" ] && fail=1
 [ $fail = 0 ] && echo "apalache_gate: ok (generated TLA+ type-checks and agrees with cmc --spec in Apalache)" || echo "apalache_gate: FAILED"
 exit $fail

@@ -16,6 +16,14 @@
  * status: 0 no violation, 1 a violation, 2 incomplete, 3 a model error. */
 int cmc_spec_main(const char *path, char **defs, int ndefs, int deadlock_off, const char *trace_out, const char *trace_fmt);
 
+/* cmc --spec FILE --check-inductive: check that TypeOK and the
+ * invariants marked [inductive] hold at Init and are kept by every step
+ * from every state of the declared types that satisfies them, reachable
+ * or not.  Returns 0 inductive, 1 a counterexample to induction (or an
+ * initial state outside it), 3 a model error, or a type product too
+ * large to enumerate. */
+int cmc_spec_inductive(const char *path, char **defs, int ndefs);
+
 /* ---- refinement support (Milestone C) ------------------------------
  * The refinement checker runs an implementation and, at each reached
  * state, asks the abstract model whether the implementation's state --

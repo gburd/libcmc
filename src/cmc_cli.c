@@ -42,6 +42,7 @@ usage(void)
 			"         [--max-states N] [--time S] [--crashes N] [--drops N] [--timeouts N]\n"
 			"         [--trace-out FILE [--trace-format json]]\n"
 			"       cmc --spec FILE [--define TAG] [--trace-out FILE [--trace-format itf|json]]\n"
+			"       cmc --spec FILE --check-inductive [--define TAG]\n"
 			"       cmc --model NAME [--tlc-cfg FILE | --cfg k=v,...]\n"
 			"         [--inv NAME[,NAME]] [--prop NAME[,NAME]] [--all-props]\n"
 			"         [--bfs | --dfs DEPTH | --simulate [--seed N] [--walks K] [--depth D]\n"
@@ -473,7 +474,8 @@ spec_main(int argc, char **argv, const char *mode)
 	char	   *defs[16];
 	int			ndefs = 0;
 	int			nodl = 0;
-	bool		spec = !strcmp(mode, "--spec");
+	bool		spec = !strcmp(mode, "--spec"),
+				ind = false;
 
 	for (int j = 1; j < argc; j++)
 	{
@@ -484,6 +486,11 @@ spec_main(int argc, char **argv, const char *mode)
 		if (!strcmp(argv[j], "--no-deadlock"))
 		{
 			nodl = 1;
+			continue;
+		}
+		if (spec && !strcmp(argv[j], "--check-inductive"))
+		{
+			ind = true;
 			continue;
 		}
 		if (!def && !out && !fmt && strcmp(argv[j], mode))
@@ -511,6 +518,12 @@ spec_main(int argc, char **argv, const char *mode)
 	}
 	if (trace_check(&trace_fmt, trace_out, "itf"))
 		return 3;
+	if (ind)
+	{
+		/* an induction check has no behaviour to write, and no deadlock */
+		if (trace_out || nodl) { fprintf(stderr, "cmc: --check-inductive takes neither --trace-out nor --no-deadlock\n"); return 3; }
+		return cmc_spec_inductive(path, defs, ndefs);
+	}
 	return cmc_spec_main(path, defs, ndefs, nodl, trace_out, trace_fmt);
 }
 
