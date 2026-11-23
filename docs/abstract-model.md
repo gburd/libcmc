@@ -270,12 +270,16 @@ Apalache writes and its tools read (`itf-py`, `itf-rs`).  It is laid
 out as Apalache lays out a counterexample for the module `cmc
 --emit-tla` makes of the spec: the constants under `params` and in
 every state, each variable's type in `varTypes`, an integer as
-`{"#bigint": "N"}`, and a function as `{"#map": [[k, v], ...]}`.  Each
+`{"#bigint": "N"}`, a function as `{"#map": [[k, v], ...]}`, a
+record as an object of its fields in the order of their names, and a
+sequence as an array, nested as the value is; `varTypes` reads as
+Apalache writes it, e.g., `(Int -> Seq({ idx: Int, val: Int }))`.  Each
 state's `#meta` holds its index and, past the first, the action that
 led to it (Apalache leaves that out).  `json` writes a plain array, one
 object per state with its `index`, its `action` (`null` for the first)
-and its `vars`, an integer as a number and a function as an object
-keyed by its arguments.  A liveness violation has no path to write, and
+and its `vars`, an integer as a number, a function as an object keyed
+by its arguments, a record as an object of its fields and a sequence as
+an array.  A liveness violation has no path to write, and
 a pass writes no file.
 
 The spec gate checks that each file parses, holds the printed actions

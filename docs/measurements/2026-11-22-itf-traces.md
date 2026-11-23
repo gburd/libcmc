@@ -60,9 +60,32 @@ source: mutex.tla", reading the trace length from the specification
 file rather than from the trace. [measured; source:
 mod-tool/src/main/scala/at/forsyte/apalache/tla/tooling/opt/TraceeCmd.scala]
 
-## Not covered
+## Records, sequences and nested functions
 
-Records, tuples and sequences (`{"#tup": ...}`, ITF records as JSON
-objects, sequences as arrays) are not values `.cml` has yet; the writer
-handles integers and integer functions, and `trace_value()` in
-`src/cmc_spec.c` is where the new forms go.
+With records and sequences in `.cml` (pr/2.3-merge), cmc's ITF file
+for `test/spec/tracerec.cml` (a record whose fields are declared out of
+order, a sequence, a function of functions and a function of records
+holding a sequence) and for logrep with `--define BUG` was compared
+with Apalache 0.63.0's `violation.itf.json` for the same emitted
+module, on host b. [measured]
+
+- `varTypes` match Apalache's text exactly: `{ a: Int, zz: Int }` (a
+  record, its fields sorted by name and spaced inside the braces),
+  `Seq(Int)`, `(Int -> (Int -> Int))` (a function inside a function is
+  parenthesised again), `(Int -> { a: Int, b: Seq(Int) })`, and for
+  logrep `(Int -> Seq({ idx: Int, val: Int }))`.
+- Values: a record is a JSON object of its fields, sorted by name; a
+  sequence is a JSON array of its elements; a function is `#map`, at
+  any depth.  For tracerec both tools find the one 3-action
+  counterexample, and every state of cmc's file equals Apalache's once
+  `#meta` is set aside, including the order of a record's fields.
+- A tuple in `.cml` is a sequence, and every `.cml` variable is typed
+  with `Seq`, so Apalache writes it as an array; `{"#tup": ...}` does
+  not arise.
+
+`test/trace_check.py apalache` now parses each `varTypes` entry and
+checks that every value in both files is written as ITF writes a value
+of that type (a record's keys exactly its fields, in name order), not
+only the outer form.  Swapping a record's fields, or renaming one,
+fails it ("r is not written as Apalache writes a value of type { a:
+Int, zz: Int }"). [measured]

@@ -219,7 +219,8 @@ writes: an integer is
 .Ql {\(dq#bigint\(dq: \(dqN\(dq} ,
 a function is
 .Ql {\(dq#map\(dq: [[k, v], ...]} ,
-and each state's
+a record is an object of its fields in the order of their names, a
+sequence is an array, and each state's
 .Ql #meta
 names the action that led to it.
 .Cm json

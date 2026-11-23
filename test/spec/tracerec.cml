@@ -1,0 +1,27 @@
+# test/spec/tracerec.cml: one variable of each compound form, for the
+# --trace-out rows: a record whose fields are not in alphabetical order,
+# a sequence, a function of functions and a function of records holding
+# a sequence.  `step` reaches the violation of `small` in three actions.
+module tracerec
+
+const N = 1
+
+var r : [zz : 0 .. 3, a : 0 .. 1]
+var s : Seq(0 .. 2, 3)
+var g : [0 .. N -> [0 .. 1 -> 0 .. 1]]
+var t : [0 .. N -> [b : Seq(0 .. 1, 1), a : 0 .. 1]]
+
+init r == [zz |-> 0, a |-> 1] and s == <<>>
+init g == [i in 0 .. N -> [j in 0 .. 1 -> 0]]
+init t == [i in 0 .. N -> [b |-> <<>>, a |-> 0]]
+
+action step:
+  when r.zz < 2 or Len(s) < 3
+  r' = [r except !.zz = @ + 1]
+  s' = Append(s, r.zz)
+  g' = [g except ![1][0] = 1]
+  t' = [t except ![0].b = <<1>>, ![1].a = 1]
+
+deadlock = off
+
+invariant small: Len(s) < 3

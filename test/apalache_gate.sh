@@ -125,6 +125,7 @@ examples/spec|fastpaxos|fastpaxos|agreement|PASS|11|
 examples/spec|fastpaxos|fastpaxosb|agreement|VIOLATION|11|--define BUG
 examples/spec|logrep|logrep|durable|PASS|8|
 examples/spec|logrep|logrepb|durable|VIOLATION|5|--define BUG
+test/spec|tracerec|tracerec|small|VIOLATION|4|
 "
 check() {
 	dir=$1 cml=$2 mod=$3 inv=$4 want=$5 len=$6 def=$7

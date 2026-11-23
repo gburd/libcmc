@@ -1,0 +1,7 @@
+# test/spec/constrain_rec_c.cml: constrain_rec.cml under a state
+# constraint on the length of a sequence and a record field.
+
+module constrain_rec_c
+extends constrain_rec
+
+constraint short: Len(s) <= 1 or r.k == 1

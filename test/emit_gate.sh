@@ -102,6 +102,12 @@ check test/spec constrain_c constrain_c PASS
 check test/spec constrain_ac constrain_ac PASS
 check test/spec constrain_inv constrain_inv VIOLATION
 check test/spec constrain_acinv constrain_acinv VIOLATION
+# the same over a record and a sequence (test/spec/constrain_rec*.cml)
+for m in constrain_rec constrain_rec_c constrain_rec_ac; do
+	check test/spec $m $m DEADLOCK
+	check test/spec $m ${m}nd PASS --no-deadlock
+	check test/spec $m ${m}f PASS --define FLIP
+done
 
 # liveness: the generated TLA+ carries WF fairness and a temporal
 # PROPERTY; TLC must agree with cmc --spec (ticker holds; ticker+RESET

@@ -200,6 +200,13 @@ expect "emit-cfg: ACTION_CONSTRAINT"                 0 "ACTION_CONSTRAINT follow
 expect "emit-cfg: deadlock = off"                    0 "CHECK_DEADLOCK FALSE" --emit-cfg "$T/deadlock_off.cml"
 expect "emit-cfg: --no-deadlock"                     0 "CHECK_DEADLOCK FALSE" --emit-cfg "$T/deadlock.cml" --no-deadlock
 expect "emit-tla: the header names --no-deadlock when it is off" 0 "add --no-deadlock" --emit-tla "$T/deadlock_off.cml"
+# over a record and a sequence (emit_gate checks these against TLC)
+expect "deadlock: over a record and a sequence"      1 "is (6 actions)" --spec "$T/constrain_rec.cml"
+expect "deadlock: off, over a record and a sequence" 0 "26 distinct states found" --spec "$T/constrain_rec.cml" --no-deadlock
+expect "constraint: on Len(s) and a record field"    0 "10 distinct states found" --spec "$T/constrain_rec_c.cml" --no-deadlock
+expect "constraint: on Len(s), with flip"            0 "36 distinct states found" --spec "$T/constrain_rec_c.cml" --define FLIP
+expect "action constraint: on s' and r'.k"           0 "10 distinct states found" --spec "$T/constrain_rec_ac.cml" --no-deadlock
+expect "action constraint: on s' and r'.k, with flip" 0 "52 distinct states found" --spec "$T/constrain_rec_ac.cml" --define FLIP
 # refused: a constraint the checker cannot apply is an error, not a pass
 cbad() {	# cbad DESC NEEDLE BODY: a spec of module m with BODY is refused
 	printf 'module m\nvar x : 0 .. 1\ninit x == 0\naction a:\n  when x == 0\n  x%s = 1\n%b\n' "'" "$3" > "$OUT/cbad.cml"
@@ -845,6 +852,16 @@ trace_row itf  "$HERE/test/spec/mutex.cml" 4 --define BUG
 trace_row json "$HERE/test/spec/mutex.cml" 4 --define BUG
 trace_row itf  "$HERE/examples/spec/paxos.cml" 12 --define BUG
 trace_row json "$HERE/examples/spec/paxos.cml" 12 --define BUG
+# records, sequences and nested functions (test/spec/tracerec.cml), and
+# logrep's functions of sequences of records
+trace_row itf  "$HERE/test/spec/tracerec.cml" 3
+trace_row json "$HERE/test/spec/tracerec.cml" 3
+trace_row itf  "$HERE/examples/spec/logrep.cml" 5 --define BUG
+trace_row json "$HERE/examples/spec/logrep.cml" 5 --define BUG
+"$CMC" --spec "$HERE/test/spec/tracerec.cml" --trace-out "$OUT/t.itf" > /dev/null 2>&1
+expectp "trace: a record's fields sorted by name, as Apalache" 0 '"r":{"a":{"#bigint":"1"},"zz":{"#bigint":"3"}}' cat "$OUT/t.itf"
+expectp "trace: ITF varTypes of records, sequences, functions" 0 '"t":"(Int -> { a: Int, b: Seq(Int) })"' cat "$OUT/t.itf"
+expectp "trace: ITF varTypes of a function of functions" 0 '"g":"(Int -> (Int -> Int))"' cat "$OUT/t.itf"
 expect "trace: ITF is the default format" 1 '(itf, 5 states)' --spec "$HERE/test/spec/mutex.cml" --define BUG --trace-out "$OUT/t.itf"
 expect "trace: a format other than itf or json is an error" 3 "the formats are itf and json" --spec "$HERE/test/spec/mutex.cml" --trace-out "$OUT/t.x" --trace-format tla
 expect "trace: --trace-format without --trace-out is an error" 3 "needs --trace-out" --spec "$HERE/test/spec/mutex.cml" --trace-format json

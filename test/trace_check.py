@@ -36,15 +36,72 @@ def printed(out):
     return int(m.group(1)), acts
 
 
-def spec_value(v, itf):
-    """A trace value written the way cmc prints a state: 5 or [0:1,1:2]."""
-    if itf and "#bigint" in v:
-        return v["#bigint"]
-    if itf:
-        return "[" + ",".join(k["#bigint"] + ":" + x["#bigint"] for k, x in v["#map"]) + "]"
-    if isinstance(v, int):
-        return str(v)
-    return "[" + ",".join(k + ":" + str(x) for k, x in v.items()) + "]"
+def parse_printed(text):
+    """A value as cmc prints it (5, [0:1,1:2], [a |-> 1], <<1, 2>>) as a
+    Python value: an int, a dict keyed by int (a function) or by name (a
+    record), or a list (a sequence)."""
+    pos = 0
+
+    def value():
+        nonlocal pos
+        if text.startswith("<<", pos):
+            pos += 2
+            items = []
+            while not text.startswith(">>", pos):
+                items.append(value())
+                if text.startswith(", ", pos):
+                    pos += 2
+            pos += 2
+            return items
+        if text[pos] == "[":
+            pos += 1
+            items = {}
+            while text[pos] != "]":
+                m = re.compile(r"(-?\d+):|(\w+) \|-> ").match(text, pos)
+                if not m:
+                    fail("cannot read the printed value %r" % text)
+                pos = m.end()
+                items[int(m.group(1)) if m.group(1) else m.group(2)] = value()
+                if text[pos] == ",":
+                    pos += 2 if text.startswith(", ", pos) else 1
+            pos += 1
+            return items
+        m = re.compile(r"-?\d+").match(text, pos)
+        if not m:
+            fail("cannot read the printed value %r" % text)
+        pos = m.end()
+        return int(m.group())
+
+    v = value()
+    if pos != len(text):
+        fail("trailing text in the printed value %r" % text)
+    return v
+
+
+def trace_value(v, itf):
+    """A trace file's value as parse_printed() would read cmc's print of it."""
+    if itf and isinstance(v, dict) and "#bigint" in v:
+        return int(v["#bigint"])
+    if itf and isinstance(v, dict) and "#map" in v:
+        return {int(k["#bigint"]): trace_value(x, itf) for k, x in v["#map"]}
+    if isinstance(v, list):
+        return [trace_value(x, itf) for x in v]
+    if isinstance(v, dict):
+        return {int(k) if re.fullmatch(r"-?\d+", k) else k: trace_value(x, itf) for k, x in v.items()}
+    return v
+
+
+def printed_state(out, names):
+    """The variable values of cmc's printed final state, by name."""
+    lines = [x for x in out.splitlines() if x.startswith("  state: ")]
+    if not lines:
+        fail("no final state in the output")
+    line = lines[-1][len("  state:"):]
+    marks = [line.find(" %s=" % x) for x in names]
+    if any(m < 0 for m in marks) or marks != sorted(marks):
+        fail("the printed state %r does not list the variables %s" % (line, names))
+    ends = marks[1:] + [len(line)]
+    return {x: parse_printed(line[m + len(x) + 2:e]) for x, m, e in zip(names, marks, ends)}
 
 
 def check_spec(kind, out, tr):
@@ -67,9 +124,10 @@ def check_spec(kind, out, tr):
     if got != [None] + acts:
         fail("actions %s, cmc printed %s" % (got, acts))
     last = states[-1] if itf else states[-1]["vars"]
-    line = "  state:" + "".join(" %s=%s" % (x, spec_value(last[x], itf)) for x in names)
-    if line not in out.splitlines():
-        fail("final state %r is not the one cmc printed" % line)
+    want = printed_state(out, names)
+    for x in names:
+        if trace_value(last[x], itf) != want[x]:
+            fail("final %s %r is not the one cmc printed, %r" % (x, last[x], want[x]))
 
 
 def check_proc(out, tr):
@@ -90,34 +148,92 @@ def check_proc(out, tr):
         fail("final replies %r are not the ones cmc printed" % reps)
 
 
-def shape(v):
-    """A value's ITF form with the numbers taken out."""
-    if isinstance(v, dict) and "#map" in v:
-        return ["#map"] + sorted({json.dumps([shape(k), shape(x)]) for k, x in v["#map"]})
-    if isinstance(v, dict):
-        return sorted(v)
-    return type(v).__name__
+def parse_type(text):
+    """An ITF varTypes string (Int, (Int -> T), Seq(T), { a: T, ... }) as
+    a tree: "Int", ("fun", T), ("seq", T) or ("rec", {name: T})."""
+    toks = re.findall(r"->|\w+|[(){}:,]", text)
+    pos = 0
+
+    def take(want=None):
+        nonlocal pos
+        if pos >= len(toks) or (want and toks[pos] != want):
+            fail("cannot read the type %r" % text)
+        pos += 1
+        return toks[pos - 1]
+
+    def one():
+        t = take()
+        if t == "Int":
+            return "Int"
+        if t == "Seq":
+            take("(")
+            el = one()
+            take(")")
+            return ("seq", el)
+        if t == "(":
+            if take() != "Int":
+                fail("a function type with a key other than Int: %r" % text)
+            take("->")
+            rng = one()
+            take(")")
+            return ("fun", rng)
+        if t == "{":
+            fields = {}
+            while True:
+                name = take()
+                take(":")
+                fields[name] = one()
+                if take() == "}":
+                    return ("rec", fields)
+        fail("cannot read the type %r" % text)
+
+    ty = one()
+    if pos != len(toks):
+        fail("trailing text in the type %r" % text)
+    return ty
+
+
+def conforms(v, ty):
+    """Is v written as ITF writes a value of type ty?"""
+    if ty == "Int":
+        return isinstance(v, dict) and list(v) == ["#bigint"] and isinstance(v["#bigint"], str)
+    kind, sub = ty
+    if kind == "seq":
+        return isinstance(v, list) and all(conforms(x, sub) for x in v)
+    if kind == "fun":
+        return (isinstance(v, dict) and list(v) == ["#map"]
+                and all(len(p) == 2 and conforms(p[0], "Int") and conforms(p[1], sub)
+                        for p in v["#map"]))
+    return (isinstance(v, dict) and list(v) == sorted(sub)
+            and all(conforms(v[k], sub[k]) for k in sub))
 
 
 def same_shape(mine, theirs):
     """cmc's ITF has the structure of Apalache's for the same module: the
     same header, variables, parameters and types, as many states, and the
-    same keys and value forms in each state (the values may differ, as
-    each tool picks its own counterexample)."""
+    same keys in each state, every value written as ITF writes a value of
+    its type: a parameter an integer, a variable of its varTypes entry,
+    a record's fields in the order of their names.  The values may
+    differ, as each tool picks its own counterexample."""
     for key in ("vars", "params"):
         if sorted(mine.get(key, [])) != sorted(theirs.get(key, [])):
             fail("%s %s, Apalache wrote %s" % (key, mine.get(key), theirs.get(key)))
     for key in ("format", "varTypes"):
         if mine["#meta"].get(key) != theirs["#meta"].get(key):
             fail("#meta %s differs from Apalache's" % key)
+    types = {k: parse_type(t) for k, t in theirs["#meta"]["varTypes"].items()}
     if len(mine["states"]) != len(theirs["states"]):
         fail("%d states, Apalache wrote %d" % (len(mine["states"]), len(theirs["states"])))
     for a, b in zip(mine["states"], theirs["states"]):
         if a["#meta"]["index"] != b["#meta"]["index"] or sorted(a) != sorted(b):
             fail("state %d keys %s, Apalache wrote %s" % (a["#meta"]["index"], sorted(a), sorted(b)))
         for k in a:
-            if k != "#meta" and shape(a[k]) != shape(b[k]):
-                fail("state %d: %s has another form than Apalache's" % (a["#meta"]["index"], k))
+            if k == "#meta":
+                continue
+            ty = types.get(k, "Int")
+            if not conforms(a[k], ty) or not conforms(b[k], ty):
+                fail("state %d: %s is not written as Apalache writes a value of type %s"
+                     % (a["#meta"]["index"], k, theirs["#meta"]["varTypes"].get(k, "Int")))
 
 
 def main():

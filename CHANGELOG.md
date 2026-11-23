@@ -65,7 +65,13 @@ length stay distinct.  The new examples/spec/logrep.cml (log replication
 over records and sequences) and its hand-written TLA+ twin agree with
 TLC: 4439 distinct states at depth 16, and a 5-action counterexample for
 its planted bug.  examples/spec/raft.cml now keeps each server as a
-record, with the same 38 states.  Gates: spec_gate records/sequences rows
+record, with the same 38 states.  The deadlock check, `constraint` and
+`action_constraint` read records and sequences like any expression
+(test/spec/constrain_rec*.cml agree with TLC), and `--trace-out` writes
+them: in ITF a record is an object of its fields in name order and a
+sequence an array, with `varTypes` such as `(Int -> Seq({ idx: Int, val:
+Int }))`, as Apalache 0.63 writes them (apalache_gate tracerec and
+logrep rows compare the files).  Gates: spec_gate records/sequences rows
 and distinct, spec_calibrate logrep, emit_gate logrep, apalache_gate
 logrep.
 

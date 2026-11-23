@@ -1,0 +1,27 @@
+# test/spec/constrain_rec.cml: the deadlock check, a state constraint
+# and an action constraint over a record and a sequence.  push appends
+# to s and counts in r.n, pop drops the head, and flip ([FLIP]) toggles
+# r.k.  Without flip, the state with r.n = 3 and s empty deadlocks.
+# The variants (constrain_rec_c, constrain_rec_ac) add the constraints;
+# emit_gate checks each count and depth against TLC.
+
+module constrain_rec
+
+var r : [n : 0 .. 3, k : 0 .. 1]
+var s : Seq(0 .. 1, 3)
+
+init r == [n |-> 0, k |-> 0] and s == <<>>
+
+action push(v in 0 .. 1):
+  when r.n < 3 and Len(s) < 3
+  s' = Append(s, v)
+  r' = [r except !.n = @ + 1]
+
+action pop:
+  when Len(s) > 0
+  s' = Tail(s)
+
+action flip [FLIP]:
+  r' = [r except !.k = 1 - @]
+
+invariant bounded: Len(s) <= r.n

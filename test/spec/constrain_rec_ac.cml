@@ -1,0 +1,8 @@
+# test/spec/constrain_rec_ac.cml: constrain_rec.cml under an action
+# constraint that reads a primed sequence and a primed record field: a
+# push must append the value r.k holds after the step.
+
+module constrain_rec_ac
+extends constrain_rec
+
+action_constraint match: Len(s') <= Len(s) or s'[Len(s')] == r'.k
