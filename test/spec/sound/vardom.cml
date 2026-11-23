@@ -1,0 +1,11 @@
+module vardom
+# a domain that reads a variable: types are fixed before any state, so
+# it is refused at load (it read y as 0, and the emitted TypeOK differs)
+var y : 0 .. 3
+var x : y .. 3
+init x == 0 and y == 0
+action a:
+  when y < 3
+  y' = y + 1
+deadlock = off
+invariant t [inductive]: TRUE

@@ -294,7 +294,8 @@ whose conjuncts are all
 gives the variables their types, which the checker enforces on every
 state.
 One invariant does so: TypeOK if the configuration lists it, else the
-first of that form; every other invariant is checked as written.
+first of that form; every other invariant is checked as written, as is
+one whose T reads a variable.
 Expressions are the
 .Pa .cml
 set: integers, booleans,

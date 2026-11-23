@@ -695,7 +695,7 @@ bad "a function var outside its range"  "is outside its range"             "var 
 bad "a scalar var given a set"          "x is a set, not an integer"       "var x : 0 .. 1\ninit x == {0}\ninvariant i: TRUE"
 bad "a function var given an integer"   "is not a function on"             "var f : [0 .. 1 -> 0 .. 1]\ninit f == 0\ninvariant i: TRUE"
 bad "a domain of non-integer bounds"    "bounds of 0 .. TRUE are not integers" "var x : 0 .. TRUE\ninit x == 0\ninvariant i: TRUE"
-bad "a domain that is not a set"        "expected a set"                   "var x : x\ninit x == 0\ninvariant i: TRUE"
+bad "a domain that is not a set"        "expected a set"                   "const K = 1\nvar x : K\ninit x == 0\ninvariant i: TRUE"
 bad "a range domain with a broken bound" "unknown identifier"              "var x : 0 .. y\ninit x == 0\ninvariant i: TRUE"
 bad "a set domain with a broken member" "unknown identifier"               "var x : {0, y}\ninit x == 0\ninvariant i: TRUE"
 bad "a value outside a set domain"      "x = 1 is outside its domain {0, 2}" "var x : {0, 2}\ninit x == 1\ninvariant i: TRUE"
@@ -963,6 +963,15 @@ expect "trace: a failed write is an error"     3 "could not write" --spec "$HERE
 # a liveness violation prints its lasso, as TLC does, and writes it:
 # ITF marks the cycle with ADR-015's "loop", JSON repeats its first state
 expect "lasso: printed with the state the cycle goes back to" 1 "Back to state 3: <flip>" --spec "$HERE/test/spec/fair/lasso.cml"
+# a type is fixed before any state: a variable in one read as 0 (G2)
+VD=$HERE/test/spec/sound/vardom.cml
+expect "a var domain that reads a variable is refused" 3 "the type y .. 3: a variable's type and a const must be constant" --spec "$VD"
+expect "inductive: a var domain reading a variable"    3 "must be constant expressions" --spec "$VD" --check-inductive
+expect "emit-tla: a var domain reading a variable"     3 "must be constant expressions" --emit-tla "$VD"
+printf 'module kv\nvar y : 0 .. 1\nvar f : [0 .. y -> 0 .. 1]\ninit y == 0 and f == [i in 0 .. 0 -> 0]\ninvariant t: TRUE\n' > "$OUT/kv.cml"
+expect "a function key set that reads a variable is refused" 3 "the type 0 .. y: a variable" --spec "$OUT/kv.cml"
+printf 'module cv\nvar y : 0 .. 1\nconst K = y + 1\ninit y == 0\ninvariant t: TRUE\n' > "$OUT/cv.cml"
+expect "a const that reads a variable is refused" 3 "const K: bad value" --spec "$OUT/cv.cml"
 expect "lasso: a cycle that stutters is printed so" 1 "State 2: Stuttering" --spec "$HERE/test/spec/sound/dead.cml"
 expect "lasso: written as ITF with its loop" 1 '(itf, 4 states, loop at state 3)' --spec "$HERE/test/spec/fair/lasso.cml" --trace-out "$OUT/live.itf"
 expectp "lasso: ITF loop is the index of the cycle's first state" 0 '"loop":2}' cat "$OUT/live.itf"
@@ -1007,6 +1016,8 @@ expect "tla: logrep twin with BUG"            1 "is (5 actions)" --spec "$HERE/e
 expect "tla: TypeOK types, a tighter x \\in T is checked" 1 "Tight is violated" --spec "$HERE/test/spec/typeinv.tla" --config "$HERE/test/spec/typeinv_ok.cfg"
 expect "tla: the first types, a later x \\in T is checked" 1 "is (3 actions)" --spec "$HERE/test/spec/typeinv.tla" --config "$HERE/test/spec/typeinv_lt.cfg"
 expect "tla: a tighter first type stops (exit 3)" 3 "x = 3 is outside its domain 0 .. 2" --spec "$HERE/test/spec/typeinv.tla" --config "$HERE/test/spec/typeinv_tl.cfg"
+# a T that reads a variable is no type: checked as written (TLC: 1 action)
+expect "tla: an x \\in T reading a variable is checked" 1 "is (1 actions)" --spec "$HERE/test/spec/vardom.tla" --config "$HERE/test/spec/vardom.cfg"
 expect "tla: logrep's TypeOK is refused"      3 "logrep.tla:22: UNION is not supported" --spec "$HERE/examples/spec/logrep.tla" --config "$HERE/examples/spec/logrep_safe.cfg"
 expect "tla: paxos twin is refused (strings)" 3 "paxos.tla:35: a string literal" --spec "$HERE/examples/spec/paxos.tla" --config "$HERE/examples/spec/paxos_safe.cfg"
 expect "tla: zab twin is refused (\\X)"       3 "zab.tla:53: the set operator \\\\X" --spec "$HERE/examples/spec/zab.tla" --config "$HERE/examples/spec/zab_safe.cfg"

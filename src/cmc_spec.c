@@ -187,6 +187,7 @@ typedef struct Env {
 	const int *assigned;			/* init: which vars are set so far, or NULL (all) */
 	const Value *at;			/* inside an except value: what @ names */
 	int ndefvis;				/* the defs this expression may call: def[0 .. ndefvis) */
+	int novar;				/* a type or a const: reading a variable is an error */
 } Env;
 
 /* a fresh environment over the variable values var (NULL: none), in
@@ -587,7 +588,7 @@ static Value seq_cat(Pst *s, const Value *a, const Value *b){
  * nothing bound at the call site. */
 static Value sp_call(Pst *s, int d){
 	Value z={0}; const Def *D=&S.def[d];
-	Env ne=env_new(s->env->var); ne.obs=s->env->obs; ne.assigned=s->env->assigned; ne.ndefvis=d;
+	Env ne=env_new(s->env->var); ne.obs=s->env->obs; ne.assigned=s->env->assigned; ne.ndefvis=d; ne.novar=s->env->novar;
 	if(D->np){
 		if(!sp_expect(s,'(',"expected ( after an operator with parameters")) return z;
 		for(int i=0;i<D->np;i++){
@@ -731,6 +732,9 @@ static Value sp_atom(Pst *s){
 	 * constraint, which is evaluated over a step and reads x' from the
 	 * successor. */
 	int vi=var_index(id);
+	/* types are fixed before any state exists, so a variable here would
+	 * read as 0 while the emitted TLA+ reads its value */
+	if(vi>=0 && s->env->novar){ fail(s,"a variable's type and a const must be constant expressions, not read a variable"); return z; }
 	if(*s->p=='\''){
 		if(!s->env->nxt || vi<0){ fail(s,"a primed variable can only be assigned (x' = E), not read"); return z; }
 		s->p++;
@@ -977,7 +981,7 @@ static char *sp_trim(char *s){ while(*s&&isspace((unsigned char)*s))s++; char*e=
 /* evaluate a constant-only integer expression at parse time (for bounds
  * like N-1): reuse sp_eval with an env that has no variables */
 static long sp_const_eval(const char *expr, int *ok){
-	Env env=env_new(NULL);
+	Env env=env_new(NULL); env.novar=1;
 	Value v; char e[128];
 	if(!sp_eval(expr,&env,&v,e,sizeof e) || v.tag!=T_INT){ *ok=0; return 0; }
 	*ok=1; return v.i;
@@ -1090,6 +1094,23 @@ static int def_parse(char *t, const char *path, int ln){
 	S.ndefs++;
 	return 0;
 }
+/* Each variable's type is fixed before any state exists, so its sets
+ * (a domain, a function's key set) must be constant: a variable read
+ * there evaluated as 0, while the emitted TLA+ reads its value.  Parse
+ * each one unevaluated, with variables refused, at load. */
+static int types_check(const char *path){
+	for(int t=0;t<S.nty;t++){
+		const Ty *T=&S.ty[t];
+		if(T->kind!=TY_DOM && T->kind!=TY_FUN) continue;
+		Env env=env_new(NULL); env.novar=1;
+		Pst s={0}; s.p=T->dom; s.env=&env; s.ok=1; s.dead=1;
+		size_t m=ar_mark();
+		(void)sp_setspec(&s);
+		ar_release(m);
+		if(!s.ok){ fprintf(stderr,"cmc: %s: the type %s: %s\n",path,T->dom,s.err); return -1; }
+	}
+	return 0;
+}
 /* Parse each def's body once, unevaluated, with its parameters bound:
  * a name it cannot resolve (a later def, so itself too) and a syntax
  * error are load errors, never a surprise in the middle of a search */
@@ -1118,7 +1139,7 @@ static int sp_load(const char *path){
 	if(!S.modname[0]){ fprintf(stderr,"cmc: %s: no module declaration\n",path); return -1; }
 	if(S.nvar==0){ fprintf(stderr,"cmc: %s: no variables\n",path); return -1; }
 	if(!S.init[0]){ fprintf(stderr,"cmc: %s: no init\n",path); return -1; }
-	if(defs_check(path)) return -1;
+	if(defs_check(path) || types_check(path)) return -1;
 	if(S.ninv==0 && S.nprop==0){ fprintf(stderr,"cmc: %s: no invariant or property\n",path); return -1; }
 	/* a fair line names an action of the spec; on one that --define
 	 * leaves out of Next it is vacuous, as WF or SF of a disabled action */

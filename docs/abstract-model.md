@@ -67,7 +67,9 @@ SMT-encodable -- not full TLA+.
   (N a constant up to 12).  The bound keeps the state space finite: a
   value longer than N is a model error (exit 3), never cut short.
   The types nest, as in `var log : [0 .. 2 -> Seq([idx : 1 .. 2, val :
-  0 .. 1], 2)]`.
+  0 .. 1], 2)]`.  A type is fixed before any state, so its sets and
+  bounds are constant expressions: one that reads a variable (`var x :
+  y .. 3`) is refused at load, and so is a `const` that does.
 - `def NAME = EXPR` / `def NAME(p, ...) = EXPR` -- a named operator, as
   TLA+'s `NAME(p, ...) == EXPR`.  A use is the body with each parameter
   replaced by its argument, evaluated where the body uses it.  The body
@@ -357,7 +359,8 @@ literal or constant set of integers, `[S -> T]`, `[a : T, ...]`, or
 `{<<>>} \cup {<<e1>> : e1 \in T} \cup ...` up to k elements (`Seq(T,
 k)`).  One invariant gives the types: `TypeOK` if the `.cfg` lists it,
 else the first of that form.  Every other invariant, including another
-`x \in T` on the same variable, is checked as written.  The checker
+`x \in T` on the same variable, is checked as written, and so is one
+whose T reads a variable (`x \in y..5`), which is no type.  The checker
 enforces a variable's type on every state, so a
 value outside it is a model error (exit 3), where TLC reports the
 invariant violated (exit 1).

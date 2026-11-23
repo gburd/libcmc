@@ -1901,6 +1901,14 @@ static int decl_type(Buf *o, Node *t, const Env *e){
 	return 0;
 }
 
+/* does x (expanded) read a variable? */
+static int reads_var(Node *x, const Env *e){
+	expand_all(&x,&e);
+	if(x->k==X_ID && var_named(x,e)>=0) return 1;
+	for(int i=0;i<x->n;i++) if(x->a[i] && reads_var(x->a[i],e)) return 1;
+	return 0;
+}
+
 /* Is the invariant named n a type invariant?  If so, record each
  * variable's declared type and return 1. */
 static int type_invariant(const char *n){
@@ -1913,6 +1921,9 @@ static int type_invariant(const char *n){
 		if(c->k!=X_BIN || strcmp(c->op,"\\in")) return 0;
 		int vi=var_named(c->a[0],ce);
 		if(vi<0 || decl[vi]) return 0;
+		/* a type is fixed before any state: a T that reads a variable
+		 * is no type, and the invariant is checked as written */
+		if(reads_var(c->a[1],ce)) return 0;
 		Buf t={0};
 		if(!decl_type(&t,c->a[1],ce)) return 0;
 		decl[vi]=bstr(&t);

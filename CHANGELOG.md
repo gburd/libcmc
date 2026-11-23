@@ -53,6 +53,15 @@ of that form, and every other is checked as written.  Gate: spec_gate
 and spec_calibrate typeinv rows (test/spec/typeinv.tla, TLC's verdict
 and trace).
 
+A variable's type that read a variable (`var x : y .. 3`, or a TypeOK
+conjunct `x \in y..5`) evaluated it as 0, while the emitted TLA+ read
+its value: a false pass, and `--check-inductive` reported inductive a
+TypeOK that TLC and Apalache find a CTI for.  A `.cml` type or `const`
+that reads a variable is now refused at load (exit 3), and the reader
+checks such an `x \in T` as an ordinary invariant, as TLC does.  Gate:
+spec_gate vardom rows (test/spec/sound/vardom.cml), spec_calibrate
+vardom row (test/spec/vardom.tla, TLC's verdict and trace).
+
 `.cml` gains `if C then A else B`, TLA+'s `IF`: only the branch taken
 is evaluated.  `cmc --emit-tla` writes it as `IF THEN ELSE`
 (test/spec/ifexpr.cml agrees with TLC: 11 distinct states, depth 7).
