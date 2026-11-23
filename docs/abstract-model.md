@@ -110,6 +110,10 @@ quantifiers `all V in SET : E`, `some V in SET : E`; `count V in SET
 : E` (cardinality); and `if C then A else B`, TLA+'s `IF`, which
 evaluates only the branch it takes and whose `else` branch extends as
 far right as it can.
+An arithmetic result of 2^40 or more in magnitude is an overflow, a
+model error (exit 3), as TLC's past 2^31 is.  TLA+'s integers are
+unbounded, but 2^40 and up are the reader's model values, which no
+integer may equal.
 
 Precedence is TLA+'s, and the mixes TLA+ refuses are refused: `/` or
 `mod` next to another `*`, `/` or `mod` (`x mod 3 * 2`, `x * 2 / 2`),

@@ -833,6 +833,11 @@ static Value sp_setspec(Pst *s){
  * parentheses (sp_add()).  Read with C's rules, `x mod 3 * 2` meant
  * (x mod 3) * 2 to cmc and x % 6 to TLC.
  */
+/* An integer result is bounded by 2^40, where the TLA+ reader's model
+ * values start (cmc_tla.c TL_MV), so no computed integer equals one.
+ * TLC stops far below, at 2^31, so no model it checks loses a value. */
+#define SP_INTLIM (1L<<40)
+static int ovf(int c, const long *r){ return c || *r>=SP_INTLIM || *r<=-SP_INTLIM; }
 static Value sp_mul(Pst *s){
 	Value a=sp_post(s);
 	int nop=0, odd=0, lm=0;	/* operators read; one was / or mod; the last was mod */
@@ -841,7 +846,7 @@ static Value sp_mul(Pst *s){
 		if(!ismul && !isdiv && !ismod) break;
 		if(nop && (odd || !ismul)){ fail(s,"/ or mod next to * / mod needs parentheses, as in TLA+"); return a; }
 		nop++; odd|=!ismul; lm=ismod;
-		if(ismul){ s->p++; Value b=sp_post(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(__builtin_mul_overflow(a.i,b.i,&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
+		if(ismul){ s->p++; Value b=sp_post(s); long r; if(!need(s,&a,T_INT,"*") || !need(s,&b,T_INT,"*")) return a; if(ovf(__builtin_mul_overflow(a.i,b.i,&r),&r) && efail(s,"integer overflow in *")) return a; a=vint(r); }
 		else if(isdiv){ s->p++; Value b=sp_post(s); if(!need(s,&a,T_INT,"/") || !need(s,&b,T_INT,"/")) return a; if(b.i==0 && efail(s,"divide by zero")) return a; if((a.i<0||b.i<0) && efail(s,"/ of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i/b.i:0); }
 		else { Value b=sp_post(s); if(!need(s,&a,T_INT,"mod") || !need(s,&b,T_INT,"mod")) return a; if(b.i==0 && efail(s,"mod by zero")) return a; if((a.i<0||b.i<0) && efail(s,"mod of a negative number is not supported")) return a; a=vint(b.i>0&&a.i>=0?a.i%b.i:0); }
 	}
@@ -855,8 +860,8 @@ static Value sp_add(Pst *s){
 	for(;;){ sp_skip(s);
 		int isplus=*s->p=='+', isminus=*s->p=='-'&&s->p[1]!='>';
 		if(isplus||isminus) nop++;
-		if(isplus){ s->p++; Value b=sp_mul(s); mods|=s->lastmod; long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(__builtin_add_overflow(a.i,b.i,&r) && efail(s,"integer overflow in +")) return a; a=vint(r); }
-		else if(isminus){ s->p++; Value b=sp_mul(s); mods|=s->lastmod; long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(__builtin_sub_overflow(a.i,b.i,&r) && efail(s,"integer overflow in -")) return a; a=vint(r); }
+		if(isplus){ s->p++; Value b=sp_mul(s); mods|=s->lastmod; long r; if(!need(s,&a,T_INT,"+") || !need(s,&b,T_INT,"+")) return a; if(ovf(__builtin_add_overflow(a.i,b.i,&r),&r) && efail(s,"integer overflow in +")) return a; a=vint(r); }
+		else if(isminus){ s->p++; Value b=sp_mul(s); mods|=s->lastmod; long r; if(!need(s,&a,T_INT,"-") || !need(s,&b,T_INT,"-")) return a; if(ovf(__builtin_sub_overflow(a.i,b.i,&r),&r) && efail(s,"integer overflow in -")) return a; a=vint(r); }
 		else if(s->p[0]=='\\' && s->p[1]=='o' && !isalnum((unsigned char)s->p[2])){ s->p+=2; Value b=sp_mul(s); if(!need(s,&a,T_SEQ,"\\o") || !need(s,&b,T_SEQ,"\\o")) return a; if(!s->dead) a=seq_cat(s,&a,&b); }
 		else break;
 		if(nop && mods){ fail(s,"mod next to + or - needs parentheses, as in TLA+"); return a; }

@@ -177,6 +177,8 @@ a value outside its variable's type, a sequence past its bound
 included, is a model error (exit 3), never cut.
 A type's sets are constant expressions; one that reads a variable is
 refused.
+An arithmetic result of 2^40 or more in magnitude is an overflow
+(exit 3).
 .Li def NAME(p, ...) = EXPR
 declares a named operator, expanded where it is used; a def may use
 only the defs before it, so recursion is refused.

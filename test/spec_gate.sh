@@ -420,6 +420,10 @@ typed "a negative mod" "mod of a negative number" "(0 - 1) mod 2 == 1"
 typed "an overflowing product" "integer overflow in \\*" "4611686018427387904 * 2 == 0"
 typed "an overflowing sum" "integer overflow in +" "9223372036854775807 + 1 == 0"
 typed "an overflowing difference" "integer overflow in -" "(0 - 9223372036854775807) - 2 == 0"
+# results stop below 2^40, where the reader's model values start
+typed "a product at 2^40" "integer overflow in \\*" "1048576 * 1048576 == 0"
+typed "a sum at 2^40" "integer overflow in +" "1099511627775 + 1 == 0"
+typed "a difference at -2^40" "integer overflow in -" "(0 - 1099511627775) - 1 == 0"
 typed "a primed variable read" "primed variable" "x' == 0"
 typed "a function literal without ->" "expected -> in function literal" "[i in {0, 1} - 1] == f"
 typed "an empty-domain literal that shadows a var" "redeclares" "[x in {} -> 0] == f"
@@ -1117,6 +1121,9 @@ tla "order on a model value is refused" 3 "m.tla:9: < on an integer or a model v
 tla "\\\\in Nat of a model value is refused" 3 "in Nat of a model value" "Next == \\\\E p \\\\in P : x' = p /\\\\ UNCHANGED f\n$S\nInv == x \\\\in Nat" "$MVC"
 tla "@ of a model value is refused" 3 "m.tla:7: + on an integer or a model value" "Next == \\\\E i \\\\in 0..N, p \\\\in P : f' = [f EXCEPT ![i] = p] /\\\\ x' = [f EXCEPT ![i] = @ + 1][i]\n$S\nInv == TRUE" "$MVC"
 tla "an integer past TLC's is refused" 3 "past TLC's integers" "$INC\nNext == Inc\n$S\nInv == x # 1099511627776" "$MVC"
+# a computed 2^40 + 1 equalled the second model value (TLC: overflow)
+tla "a computed 2^40 is an overflow" 3 "integer overflow in \\*" "Next == \\\\E p \\\\in P : x' = p /\\\\ UNCHANGED f\n$S\nBig == 1024 * 1024 * 1024 * 1024\nInv == x # Big + 1" "$MVC"
+tla "an implication on a computed 2^40" 3 "integer overflow in \\*" "Next == \\\\E p \\\\in P : x' = p /\\\\ UNCHANGED f\n$S\nBig == 1024 * 1024 * 1024 * 1024\nInv == x = Big => x = 0" "$MVC"
 tla "a function keyed by model values, SYMMETRY" 0 "10 distinct states found" "Init2 == x = 0 /\\\\ f = [p \\\\in P |-> 0]\nNext == \\\\E p \\\\in P : f[p] < 2 /\\\\ f' = [f EXCEPT ![p] = @ + 1] /\\\\ UNCHANGED x\nSpec == Init2 /\\\\ [][Next]_vars\nSym == Permutations(P)\nInv == \\\\A p \\\\in P : f[p] <= 2" "SPECIFICATION Spec\nCONSTANT N = 2\nCONSTANT P = {p1, p2, p3}\nINVARIANT Inv\nSYMMETRY Sym\nCHECK_DEADLOCK FALSE"
 expect "tla: ... and TLC's depth 7" 0 "search is 7" --spec "$OUT/m.tla" --config "$OUT/m.cfg"
 CONSTS=

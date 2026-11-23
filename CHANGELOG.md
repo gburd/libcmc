@@ -62,6 +62,12 @@ checks such an `x \in T` as an ordinary invariant, as TLC does.  Gate:
 spec_gate vardom rows (test/spec/sound/vardom.cml), spec_calibrate
 vardom row (test/spec/vardom.tla, TLC's verdict and trace).
 
+A computed integer of 2^40 + k equalled the k-th model value, so
+`x # Big + 1` with `Big == 1024 * 1024 * 1024 * 1024` was violated in a
+state where TLA+ says it holds (TLC stops: overflow).  An arithmetic
+result of 2^40 or more in magnitude is now an overflow, exit 3.  Gate:
+spec_gate "at 2^40" and "computed 2^40" rows.
+
 `.cml` gains `if C then A else B`, TLA+'s `IF`: only the branch taken
 is evaluated.  `cmc --emit-tla` writes it as `IF THEN ELSE`
 (test/spec/ifexpr.cml agrees with TLC: 11 distinct states, depth 7).
