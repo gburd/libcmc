@@ -94,9 +94,10 @@ each checked against single-worker TLC 2.19 on the emitted module
 - `cmc --spec --coverage` prints each action's distinct:generated
   counts, as TLC's `-coverage`, and how many states enable it, with a
   warning for an action no explored state enables.  TLC counts the
-  successors of a guard with an existential once per witness, so its
-  generated count can be larger (Paxos phase2a, ZAB commit); the
-  distinct counts match.
+  successors of a guard with an existential once per witness, and of
+  a guard with a disjunction once per true disjunct, so its generated
+  count can be larger (Paxos phase2a, ZAB commit); the distinct counts
+  match.
 - A liveness violation prints its lasso as TLC does: the states from
   the initial one, then `Back to state N: <action>` or `State N:
   Stuttering`.  `--trace-out` writes it, in ITF with ADR-015's `loop`

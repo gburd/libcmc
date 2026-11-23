@@ -378,6 +378,10 @@ prints for it,
 and the number of explored states that enable it.
 An action that no explored state enables is named in a warning: it is
 vacuous in the model.
+The distinct counts match TLC's.
+The generated counts can differ where a guard has an existential or a
+disjunction: TLC produces a successor per witness and per true
+disjunct, cmc one per successor.
 .It Fl -no-deadlock
 With
 .Fl -spec ,

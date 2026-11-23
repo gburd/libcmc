@@ -597,10 +597,10 @@ already seen included), and how many explored states enable it.  An
 action no explored state enables is named in a warning, since a model
 in which it never fires checks nothing about it.  The counts match
 TLC's on the same model (see `test/spec_calibrate.sh`), with one
-difference: TLC counts the successors of an action that has an
-existential quantifier in its guard once per witness of the
-quantifier, so its "generated" can be larger; cmc counts each
-successor once.  The distinct count, the one that shows vacuity, is
+difference: TLC counts the successors of an action whose guard has an
+existential quantifier once per witness of the quantifier, and one
+whose guard has a disjunction once per true disjunct, so its
+"generated" can be larger; cmc counts each successor once.  The distinct count, the one that shows vacuity, is
 the same.
 
 ## Exit status
