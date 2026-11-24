@@ -22,6 +22,8 @@
 .Nm cmc_nreplies ,
 .Nm cmc_reply ,
 .Nm cmc_requests ,
+.Nm cmc_clock ,
+.Nm cmc_now ,
 .Nm cmc_why ,
 .Nm cmc_world_init ,
 .Nm cmc_enabled ,
@@ -74,6 +76,10 @@
 .Fn cmc_reply "const CmcWorld *w" "int i" "int *node" "uint32_t *arg"
 .Ft int
 .Fn cmc_requests "const CmcWorld *w" "int node"
+.Ft uint64_t
+.Fn cmc_clock "const CmcWorld *w" "int node"
+.Ft uint64_t
+.Fn cmc_now "const CmcWorld *w"
 .Ft void
 .Fn cmc_why "CmcWhy *why" "const char *fmt" "..."
 .Ss Lower level
@@ -157,6 +163,7 @@ typedef struct CmcCore {
 	void	(*describe_action)(const void *cfg, CmcAction a,
 		    FILE *f);			/* calibration only */
 	int	(*clients)(const void *cfg, int node);	/* optional */
+	int	(*crashable)(const void *cfg, int node);	/* optional */
 } CmcCore;
 .Ed
 .Pp
@@ -198,6 +205,12 @@ must supply
 .Fn clients ,
 if set, says which nodes take client requests; it reads the settings,
 never the state.
+.Fn crashable ,
+if set, says which nodes may crash, also from the settings alone:
+.Dv CMC_A_CRASH
+is never offered for a node it excludes.
+.Dv NULL
+means every node may crash.
 .Fn describe
 and
 .Fn describe_msg
@@ -221,6 +234,8 @@ typedef struct CmcEvent {
 	uint32_t arg;		/* TIMER, WAKE: the id; CLIENT: request number */
 	CmcAction action;	/* ACTION (calibration only) */
 	const uint8_t *body;	/* RECV: the message; FLUSHED: the record */
+	uint32_t arg2;		/* TIMER, WAKE: the argument */
+	uint64_t now;		/* this node's clock */
 } CmcEvent;
 .Ed
 .Pp
@@ -231,7 +246,9 @@ A message from
 .It Dv CMC_EV_TIMER
 Timer
 .Fa arg
-fired.
+fired;
+.Fa arg2
+is the argument it was armed with.
 .It Dv CMC_EV_FLUSHED
 The persist record in
 .Fa body
@@ -239,7 +256,9 @@ is now durable.
 .It Dv CMC_EV_WAKE
 Waiter
 .Fa arg
-was woken.
+was woken;
+.Fa arg2
+is the argument of the wake.
 .It Dv CMC_EV_CLIENT
 A client request,
 .Fa arg
@@ -269,10 +288,35 @@ to
 .It Dv CMC_OUT_SET_TIMER
 Arm timer
 .Fa arg ,
-0 to 15.
+0 to 255, with argument
+.Fa arg2 ,
+and duration
+.Fa dur .
+The pair names the timer: arming it again while armed restarts it, and
+the same id with another argument is another timer.
+A timer with
+.Fa dur
+0 is untimed and may fire at any point.
+With
+.Fa dur
+> 0 it fires when the node's clock reaches
+.Fa now
++
+.Fa dur ,
+and only when that is the node's earliest deadline; firing moves the
+clocks
+.Pq Xr cmc 7 .
+Only
+.Dv CMC_OUT_SET_TIMER
+may carry a duration.
+At most
+.Fa timer_cap
+timers are armed on a node at once.
 .It Dv CMC_OUT_CANCEL_TIMER
 Disarm timer
-.Fa arg .
+.Fa arg
+with argument
+.Fa arg2 .
 .It Dv CMC_OUT_PERSIST
 Queue
 .Fa body
@@ -280,7 +324,11 @@ as a disk write.
 .It Dv CMC_OUT_WAKE
 Queue a wake of waiter
 .Fa arg ,
-0 to 7.
+0 to 255, with argument
+.Fa arg2 .
+As for timers, the pair names the wake, and at most
+.Fa wake_cap
+are pending on a node at once.
 .It Dv CMC_OUT_REPLY
 Answer a client with
 .Fa arg .
@@ -365,6 +413,11 @@ read the ghost log of client replies, in the order they were emitted.
 .Fn cmc_requests
 returns the number of client requests delivered to a node, counted by
 the environment rather than by the core.
+.Fn cmc_clock
+returns a node's clock and
+.Fn cmc_now
+the reference time, in the core's time unit; both are 0 for a
+calibration core and until a timed timer fires.
 Properties may read core state; the engine never calls them to decide
 which actions are possible.
 .Ss Version
@@ -450,6 +503,9 @@ typedef struct CmcOptions {
 	const char *replay_in;	/* CMC_REPLAY: the file */
 	int	client_budget, drop_budget, dup_budget, crash_budget;
 	int	net_cap, persist_cap, reply_cap;
+	int	timer_cap, wake_cap;	/* per node */
+	int	drift;		/* clock drift, per thousand, 0 to 500 */
+	uint64_t max_time;	/* 0: none; past it is incomplete */
 	CmcNet	net;		/* CMC_NET_FIFO or CMC_NET_BAG */
 	int	live_steps;	/* bound for eventually-properties */
 	FILE	*out;		/* progress output; NULL: stdout */
@@ -640,9 +696,13 @@ cc -std=c11 -Ilibcmc/include mine.c mine_core.o \e
 .It Dv CMC_MAX_ACTIONS
 2048 possible actions per state.
 .It Dv CMC_MAX_TIMERS
-16 timers per node.
+16, the default
+.Fa timer_cap :
+armed timers per node.
 .It Dv CMC_MAX_WAKES
-8 waiters per node.
+8, the default
+.Fa wake_cap :
+pending wakes per node.
 .It Properties
 64 of each kind in one run;
 .Fn cmc_run_new

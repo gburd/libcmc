@@ -221,10 +221,12 @@ A **world** is the concatenation of:
 | part | contents |
 |---|---|
 | node states | `nnodes` x `state_size` bytes; the first `durable_size` of each are durable |
-| env header | remaining budgets (drops, dups, crashes); per node: clients left, armed timers (u16), pending-persist count, pending wakes (u8), pending connection resets (u8) |
+| env header | remaining budgets (drops, dups, crashes); per node: clients left, armed-timer count, pending-wake count, pending-persist count, pending connection resets (u8); then the reference time and each node's clock (u64) |
 | network | `net_cap` entries `{dst, src, len, body, count}` |
 | persists | `persist_cap` FIFO entries per node, `{len, body}` |
 | replies | the ghost client log, `reply_cap` entries in emission order |
+| timers | `timer_cap` entries per node, `{id, arg2, deadline}`, sorted by `(id, arg2)`, one per pair; deadline 0 = untimed |
+| wakes | `wake_cap` entries per node, `{id, arg2}`, sorted, one per pair |
 
 Every part is canonical: sorted where order carries no meaning, with
 unused entries zeroed.  The world is zero-padded to 8 bytes.  The bytes
@@ -249,11 +251,11 @@ environment part of the world:
 | `DELIVER` | a message is in the network (FIFO: only a channel's head) |
 | `DROP` | drop budget left (FIFO: resets the connection, and both ends get `CONN_RESET`) |
 | `DUP` | dup budget left; bag mode only |
-| `FIRE(n, t)` | node n armed timer t (`SET_TIMER`, not yet cancelled or fired) |
+| `FIRE(n, t, a, c)` | node n armed timer t with argument a (`SET_TIMER`, not yet cancelled or fired); the action carries both, so the same id with two arguments is two actions.  A timed timer also needs its deadline to be n's earliest, and c names the drift variant (see Time) |
 | `FLUSH(n)` | node n has a pending persist; the oldest completes first |
-| `WAKE(n, w)` | node n emitted `WAKE(w)` |
+| `WAKE(n, w, a)` | node n emitted `WAKE(w)` with argument a |
 | `CLIENT(n)` | node n has client budget left (and `clients(cfg, n)` allows it) |
-| `CRASH(n, j)` | crash budget left; j = 0..k of n's k pending persists reach disk first |
+| `CRASH(n, j)` | crash budget left (and `crashable(cfg, n)` allows it); j = 0..k of n's k pending persists reach disk first |
 | `RESET(n, p)` | a crash or drop left node n a pending `CONN_RESET` from peer p |
 
 Applying an action makes one `step()` call on one node with the matching
@@ -274,6 +276,42 @@ wakes and pending persists, empties every channel to and from n, marks
 drops only the messages n sent itself, which never left the process, and
 marks no resets.  Branching over
 j covers a write that reached disk before its completion was observed.
+
+## Time
+
+The environment holds a reference time and a clock per node, all u64
+in the core's own unit and 0 at the start.  Every event carries the
+node's clock in `CmcEvent.now`, so `step()` stays pure; properties read
+`cmc_clock(w, node)` and `cmc_now(w)`.
+
+`SET_TIMER` with `dur` 0 arms an untimed timer, which fires at any
+point, as before 2.4.  With `dur` > 0 the deadline is the node's clock
+plus `dur`, and the timer fires only when it is the node's earliest
+timed deadline (ties fire in either order).  Firing moves that node's
+clock by D to the deadline, and the reference time by D.  The other
+clocks move by D too, or, with `--drift R` (per thousand, up to 500),
+one other node j's clock moves at the slowest (D(1000 - R)/1000, rounded
+up) or fastest (1000D/(1000 - R)) rate the drift allows: the variants c
+= 1 + 2j and c = 2 + 2j of the `FIRE` action.  A fire whose clock moves
+would carry another node past its own earliest deadline is not offered,
+since that deadline comes first.  These are process mode's semantics
+(`drift_advance()` and `expire_ok()` in `src/cmc_proc.c`): rates in
+between, and two clocks off the common rate at once, are not explored.
+
+Only timed fires move time.  `DELIVER`, `CLIENT`, `FLUSH`, `WAKE`,
+`RESET` and `CRASH` take no time, as in process mode, so a message can
+arrive no later than the next deadline, and a core cannot measure how
+long a delivery took.  Wakes take no duration.
+
+Clocks only grow, so a model that arms timers with durations has
+infinitely many states unless something else ends it.  `--max-time T`
+is the horizon: a world whose reference time passed T is not expanded,
+and a run that left one unexpanded ends INCOMPLETE (exit 2), never
+PASS.  Without `--max-time`, such a model must stop arming timers on its
+own (the lease core in `test/test_cmc.c` does) or the run ends at
+`--max-states`.  Declared time fields (plan item 2b), which store times
+relative to the reference clock, are what will remove the need for a
+horizon.
 
 ## Network
 

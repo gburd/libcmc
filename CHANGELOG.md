@@ -5,6 +5,32 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- `CmcCore.crashable(cfg, node)`, like `clients()`: from the settings
+  only, it says which nodes may crash; `CRASH` is not offered for a
+  node it excludes.  NULL keeps every node crashable (API addition).
+- Timers and wakes carry an argument: `CmcOutput.arg2` on `SET_TIMER`,
+  `CANCEL_TIMER` and `WAKE`, returned in `CmcEvent.arg2`.  The pair
+  (id, arg2) names a pending timer or wake, so one id with two
+  arguments is two events, and ids run to 255.  The world keeps them in
+  sorted tables, `--timer-cap` and `--wake-cap` entries per node
+  (`CmcOptions.timer_cap`, `wake_cap`; defaults 16 and 8, as before).
+  `CMC_A_FIRE` and `CMC_A_WAKE` carry arg2 in the low 32 bits.  A core
+  that leaves arg2 zero sees no change: the toy, HC and pg_chain counts
+  are identical.  Replay files record the caps on a `caps` line; a file
+  without one replays with the defaults (API addition; the world layout
+  changes).
+- Time in the library engine: a clock per node and a reference time in
+  the world, `CmcEvent.now` (the node's clock), `cmc_clock()` and
+  `cmc_now()` for properties, and `CmcOutput.dur` on `SET_TIMER`: 0 is
+  untimed, as before; > 0 fires when the node's clock reaches now +
+  dur, in deadline order per node.  `--drift R` (`CmcOptions.drift`)
+  lets one other clock run at the slowest or fastest rate R per
+  thousand allows when a deadline fires, as process mode does;
+  `CMC_A_FIRE`'s c byte names the variant.  `--max-time T`
+  (`CmcOptions.max_time`) is a horizon: worlds past it are not
+  expanded and the run is INCOMPLETE.  Messages, clients, flushes and
+  wakes take no time.  Replay files record the drift on a `time` line
+  (API addition).
 - The in-process engine's BFS (`cmc --model`, `cmc_check()`) keeps a
   32-byte record per state (fingerprint, parent record number, action)
   in 256 shards whose index grows without a second copy, instead of a
