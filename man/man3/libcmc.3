@@ -176,6 +176,8 @@ typedef struct CmcCore {
 		    FILE *f);			/* calibration only */
 	int	(*clients)(const void *cfg, int node);	/* optional */
 	int	(*crashable)(const void *cfg, int node);	/* optional */
+	int	(*time_fields)(const void *cfg, int node, size_t *off,
+		    int max);			/* optional */
 } CmcCore;
 .Ed
 .Pp
@@ -223,6 +225,37 @@ if set, says which nodes may crash, also from the settings alone:
 is never offered for a node it excludes.
 .Dv NULL
 means every node may crash.
+.Pp
+.Fn time_fields ,
+if set, stores in
+.Fa off
+the offsets of the u64 times a node keeps in its state (readings of its
+own clock, such as a lease's end), at most
+.Fa max
+of them
+.Pq Dv CMC_MAX_TIME_FIELDS , 16 ,
+inside the volatile part, and returns how many; it reads the settings,
+never the state.
+A core that sets it must run with
+.Fa time_bound :
+the engine then stores each node's times relative to its clock and
+saturates past times older than the bound, so worlds that differ only
+in when things happened merge.
+The core's obligation is that
+.Fn step
+depends on time only through
+.Fa ev->now
+and its declared fields, would behave the same with all of them moved
+by one constant, compares a past time only with constants up to the
+bound, and sends no time in a message or a persist record.
+.Fa time_bound
+is refused for a model with a history variable, whose bytes the engine
+could not move with the clocks.
+.Fa time_check
+tests the obligation on every step the search takes; see
+.Sx Time fields
+in
+.Xr cmc 7 .
 .Fn describe
 and
 .Fn describe_msg
@@ -572,6 +605,9 @@ typedef struct CmcOptions {
 	int	timer_cap, wake_cap;	/* per node */
 	int	drift;		/* clock drift, per thousand, 0 to 500 */
 	uint64_t max_time;	/* 0: none; past it is incomplete */
+	uint64_t time_bound;	/* 0: off; the largest time difference
+				    the core compares against */
+	bool	time_check;	/* step again with times shifted */
 	int	req_cap;	/* request log slots, at most 64 */
 	CmcNet	net;		/* CMC_NET_FIFO or CMC_NET_BAG */
 	int	live_steps;	/* bound for eventually-properties */

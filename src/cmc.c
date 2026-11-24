@@ -65,6 +65,10 @@
  * away, so no sum or scale_t() product wraps */
 #define CLK_MAX (UINT64_MAX >> 2)
 #define WAK_ENT TKEY
+/* --time-bound's range, and the shift --time-check applies: past any
+ * age a bound can name, so a shifted saturated time stays saturated */
+#define TB_MAX ((uint64_t) 1 << 39)
+#define TC_SHIFT ((uint64_t) 1 << 40)
 
 typedef struct Ent
 {
@@ -174,6 +178,12 @@ struct CmcRun
 			   *detst,			/* determinism gate: state copy */
 			   *qw;				/* quiescence probe world */
 	CmcOut	   *deto;			/* determinism gate: outputs */
+	/* declared time fields (time_fields()) and the --time-check buffers */
+	int			ntf[CMC_MAX_NODES];
+	size_t		tf[CMC_MAX_NODES][CMC_MAX_TIME_FIELDS];
+	uint8_t    *tcst,			/* the shifted copy of the stepped state */
+			   *tcpost;			/* the main step's post state, canonical */
+	CmcOut	   *tco;			/* the shifted step's outputs */
 	/* bounded liveness (CMC_EVENTUALLY): fair-schedule buffers and a memo
 	 * of states known to reach the goal (Ent.depth = fair steps to it) */
 	Table		live;
@@ -1082,6 +1092,12 @@ scratch_alloc(CmcRun *r)
 	r->detst = xmalloc(r->ss + 1);
 	r->deto = xmalloc(sizeof(CmcOut));
 	r->qw = xmalloc(r->ws);
+	if (r->o.time_check)
+	{
+		r->tcst = xmalloc(r->ss + 1);
+		r->tcpost = xmalloc(r->ss + 1);
+		r->tco = xmalloc(sizeof(CmcOut));
+	}
 	if (r->m->history)
 		r->hpre = xmalloc(r->ws + r->m->history_size);
 	r->fw = xmalloc(r->ws);
@@ -1101,6 +1117,9 @@ scratch_free(CmcRun *r)
 	free(r->dur);
 	free(r->detst);
 	free(r->deto);
+	free(r->tcst);
+	free(r->tcpost);
+	free(r->tco);
 	free(r->qw);
 	free(r->fw);
 	free(r->fw0);
@@ -1119,6 +1138,62 @@ run_reject(CmcRun *r, char *err, size_t errlen, const char *msg)
 	snprintf(err, errlen, "%s", msg);
 	cmc_run_free(r);
 	return NULL;
+}
+
+static int	world_init(CmcRun *r, uint8_t *w);
+static int	canon_world(CmcRun *r, uint8_t *w);
+
+/*
+ * Checks the time-bound options and reads each node's time fields.  A
+ * field must lie inside the volatile part of the state: a durable time
+ * would come back from a persist record in the frame it was written in.
+ */
+static int
+time_setup(CmcRun *r, char *err, size_t errlen)
+{
+	const char *bad = NULL;
+
+	if ((r->o.time_bound || r->o.time_check) && r->direct)
+		bad = "time_bound and time_check need actor mode";
+	else if (r->o.time_check && !r->o.time_bound)
+		bad = "time_check needs time_bound";
+	else if (r->core->time_fields && !r->o.time_bound)
+		bad = "a core with time_fields needs time_bound (--time-bound B): the largest"
+			" time difference it compares against";
+	else if (r->o.time_bound >= TB_MAX)
+		bad = "time_bound must be below 2^39";
+	else if (r->o.time_bound && r->o.max_time)
+		bad = "max_time has no meaning under time_bound (the reference time is not kept)";
+	else if (r->o.time_bound && r->m->history_size)
+		bad = "a history variable cannot be kept under time_bound: the engine cannot"
+			" move a time stored in it with the clocks";
+	for (int n = 0; !bad && r->core->time_fields && n < r->nn; n++)
+	{
+		int			k = r->core->time_fields(r->cfg, n, r->tf[n], CMC_MAX_TIME_FIELDS);
+
+		if (k < 0 || k > CMC_MAX_TIME_FIELDS)
+			bad = "time_fields returned a count outside 0..CMC_MAX_TIME_FIELDS";
+		for (int i = 0; !bad && i < k; i++)
+		{
+			if (r->tf[n][i] < r->core->durable_size || r->tf[n][i] > r->ss || r->ss - r->tf[n][i] < 8)
+				bad = "a time field outside the volatile part of the state";
+			for (int j = 0; !bad && j < i; j++)
+				if (r->tf[n][i] < r->tf[n][j] + 8 && r->tf[n][j] < r->tf[n][i] + 8)
+					bad = "two time fields overlap";
+		}
+		r->ntf[n] = bad ? 0 : k;
+	}
+	if (bad)
+	{
+		snprintf(err, errlen, "%s", bad);
+		return -1;
+	}
+	if (r->o.time_bound && world_init(r, r->qw) != 0)
+	{
+		snprintf(err, errlen, "initial world: %s", r->err);
+		return -1;
+	}
+	return 0;
 }
 
 /*
@@ -1286,6 +1361,11 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 		return run_reject(r, err, errlen, "CMC_EVENTUALLY needs actor mode");
 	if ((r->o.drift || r->o.max_time) && r->direct)
 		return run_reject(r, err, errlen, "drift and max_time need actor mode");
+	if (time_setup(r, err, errlen) != 0)
+	{
+		cmc_run_free(r);
+		return NULL;
+	}
 	if (r->core->durable_size && !r->core->apply_persist)
 		return run_reject(r, err, errlen,
 						  "durable_size > 0 needs apply_persist (the engine owns durable)");
@@ -1317,8 +1397,9 @@ cmc_result_free(CmcResult *res)
 /* ------------------------------------------------------------------ */
 /* init, enabled actions, apply */
 
-void
-cmc_world_init(CmcRun *r, uint8_t *w)
+/* the initial world; -1 with r->err if it has no canonical form */
+static int
+world_init(CmcRun *r, uint8_t *w)
 {
 	memset(w, 0, r->ws);
 	for (int n = 0; n < r->nn; n++)
@@ -1332,6 +1413,14 @@ cmc_world_init(CmcRun *r, uint8_t *w)
 			if (!r->core->clients || r->core->clients(r->cfg, n))
 				CLIENTS(r, w, n) = (uint8_t) r->o.client_budget;
 	}
+	return r->o.time_bound ? canon_world(r, w) : 0;
+}
+
+void
+cmc_world_init(CmcRun *r, uint8_t *w)
+{
+	/* cmc_run_new() refused a run whose initial world fails */
+	(void) world_init(r, w);
 }
 
 /* FIFO: is net entry i the first of its (dst, src) channel? */
@@ -1469,6 +1558,79 @@ static inline bool
 past_horizon(const CmcRun *r, const uint8_t *w)
 {
 	return r->o.max_time && get64(CLK(r, w)) > r->o.max_time;
+}
+
+/*
+ * Time-bound canonical form (docs/DESIGN.md, Time).  With --time-bound B
+ * each node's times are stored in that node's own frame, where its clock
+ * reads K = B + 2: its timed deadlines and declared time fields move with
+ * its clock.  A future time is kept exact, since it comes nearer as the
+ * clock moves.  A past time older than B is stored as 1, which reads as
+ * exactly B + 1 old: a core that compares a time only with now, against
+ * constants up to B, cannot tell such ages apart.  A field holding 0 is
+ * left 0 (unset), and no event carries a now below K, so a core can never
+ * store a real time 0.  The reference time is stored as 0.
+ */
+#define TB_K(r)			((r)->o.time_bound + 2)
+
+/* node n's declared time fields in state st, on node clock reading c, to
+ * the frame where the clock reads K; false if a time would pass the
+ * clock's range */
+static bool
+canon_state(const CmcRun *r, int n, uint8_t *st, uint64_t c)
+{
+	uint64_t	B = r->o.time_bound,
+				K = TB_K(r);
+
+	for (int i = 0; i < r->ntf[n]; i++)
+	{
+		uint8_t    *p = st + r->tf[n][i];
+		uint64_t	f = get64(p);
+
+		if (f == 0)
+			continue;
+		if (f >= c)
+		{
+			if (f - c > CLK_MAX - K)
+				return false;
+			put64(p, K + (f - c));
+		}
+		else
+			put64(p, c - f > B ? 1 : K - (c - f));
+	}
+	return true;
+}
+
+/* the whole world to its canonical form; -1 with r->err if a time would
+ * pass the clock's range */
+static int
+canon_world(CmcRun *r, uint8_t *w)
+{
+	uint64_t	K = TB_K(r);
+
+	for (int n = 0; n < r->nn; n++)
+	{
+		uint64_t	c = clk_get(r, w, n);
+
+		if (!canon_state(r, n, w + (size_t) n * r->ss, c))
+		{
+			snprintf(r->err, sizeof(r->err),
+					 "node %d: a time field past the clock's range (2^62 - 1)", n);
+			return -1;
+		}
+		for (int i = 0; i < NTMR(r, w, n); i++)
+		{
+			uint8_t    *p = TMR(r, w, n, i) + TKEY;
+			uint64_t	dl = get64(p);
+
+			/* expire_ok() keeps every clock at or before its deadlines */
+			if (dl)
+				put64(p, K + (dl - c));
+		}
+		put64(CLK(r, w) + 8 * (size_t) (n + 1), K);
+	}
+	put64(CLK(r, w), 0);
+	return 0;
 }
 
 /* may node n crash?  From cfg only, like clients() */
@@ -1851,7 +2013,8 @@ out_equal(const CmcOut *a, const CmcOut *b)
 				   *y = &b->o[i];
 
 		if (x->kind != y->kind || x->dst != y->dst || x->len != y->len ||
-			x->arg != y->arg || x->arg2 != y->arg2 || x->req != y->req ||
+			x->arg != y->arg || x->arg2 != y->arg2 || x->dur != y->dur ||
+			x->req != y->req ||
 			x->len > CMC_MSG_MAX ||
 			memcmp(x->body, y->body, x->len) != 0)
 			return false;
@@ -1873,6 +2036,9 @@ event_name(int kind)
  * (if on), the output cap and the durable rule: step() never changes the
  * durable bytes, on any event, FLUSHED included (docs/research/02 B4).
  */
+static int	time_check(CmcRun *r, int n, const uint8_t *st, const CmcEvent *ev,
+					   CmcOut *out);
+
 static int
 core_step(CmcRun *r, uint8_t *w, int n, const CmcEvent *ev, CmcOut *out)
 {
@@ -1881,6 +2047,8 @@ core_step(CmcRun *r, uint8_t *w, int n, const CmcEvent *ev, CmcOut *out)
 
 	if (ds)
 		memcpy(r->dur, st, ds);
+	if (r->o.time_check)
+		memcpy(r->tcst, st, r->ss);
 	if (r->o.det)
 	{
 		CmcOut	   *o2 = r->deto;
@@ -1923,6 +2091,51 @@ core_step(CmcRun *r, uint8_t *w, int n, const CmcEvent *ev, CmcOut *out)
 		snprintf(r->err, sizeof(r->err),
 				 "durable rule: node %d step changed durable state on %s"
 				 " (only apply_persist may)", n, event_name(ev->kind));
+		return -1;
+	}
+	return r->o.time_check ? time_check(r, n, st, ev, out) : 0;
+}
+
+/*
+ * --time-check: runs the step again on r->tcst (the state before it) with
+ * every time shifted TC_SHIFT later: ev->now and each declared time field
+ * that is set and not saturated.  Saturated field i becomes 1 + i, so the
+ * old times are now far older than B + 1, and no longer equal to each
+ * other.  A core that keeps the rule in cmc(7), TIME, gives
+ * the same outputs and the same post state in canonical form.  This
+ * catches a core that reads a time it did not declare, compares a past
+ * time with a constant above B, or relies on absolute values.
+ */
+static int
+time_check(CmcRun *r, int n, const uint8_t *st, const CmcEvent *ev, CmcOut *out)
+{
+	CmcEvent	e2 = *ev;
+	bool		ok1,
+				ok2;
+
+	for (int i = 0; i < r->ntf[n]; i++)
+	{
+		uint8_t    *p = r->tcst + r->tf[n][i];
+
+		if (get64(p) > 1)
+			put64(p, get64(p) + TC_SHIFT);
+		else if (get64(p) == 1)
+			put64(p, 1 + (uint64_t) i);
+	}
+	e2.now += TC_SHIFT;
+	r->tco->n = 0;
+	r->tco->overflow = 0;
+	r->core->step(r->cfg, n, r->tcst, &e2, r->tco);
+	memcpy(r->tcpost, st, r->ss);
+	ok1 = canon_state(r, n, r->tcpost, ev->now);
+	ok2 = canon_state(r, n, r->tcst, e2.now);
+	if (!out_equal(out, r->tco) || ok1 != ok2 || memcmp(r->tcpost, r->tcst, r->ss) != 0)
+	{
+		snprintf(r->err, sizeof(r->err),
+				 "time check: node %d step on %s gave different %s with its times"
+				 " shifted (an undeclared time field, an absolute time, or a past time"
+				 " compared past --time-bound)", n, event_name(ev->kind),
+				 out_equal(out, r->tco) ? "state" : "outputs");
 		return -1;
 	}
 	return 0;
@@ -2202,9 +2415,9 @@ apply_step(CmcRun *r, uint8_t *w, CmcAction a)
 			goto bad;
 	}
 	ev.now = clk_get(r, w, n);
-	if (core_step(r, w, n, &ev, &out) != 0)
+	if (core_step(r, w, n, &ev, &out) != 0 || process_outputs(r, w, n, &out) != 0)
 		return -1;
-	return process_outputs(r, w, n, &out);
+	return r->o.time_bound ? canon_world(r, w) : 0;
 
 bad:
 	snprintf(r->err, sizeof(r->err), "action %016" PRIx64 " is not enabled", a);
@@ -2719,8 +2932,9 @@ describe_world(CmcRun *r, const uint8_t *w, FILE *f)
 		describe_tab(WAK(r, w, n, 0), NWAK(r, w, n), WAK_ENT, f);
 		fprintf(f, " persists=%u resets=%#x", NPERS(r, w, n), RESETS(r, w, n));
 	}
-	/* the clocks, once time has moved (an untimed model prints none) */
-	if (get64(CLK(r, w)))
+	/* the clocks, once time has moved (an untimed model prints none), or
+	 * in their canonical frame under --time-bound */
+	if (get64(CLK(r, w)) || r->o.time_bound)
 	{
 		fprintf(f, "\n  time: now=%" PRIu64, get64(CLK(r, w)));
 		for (int n = 0; n < r->nn; n++)
@@ -2781,8 +2995,8 @@ cmc_write_replay(CmcRun *r, const char *path, const CmcAction *acts, int n)
 				r->o.crash_budget, r->o.net_cap, r->o.persist_cap, r->o.reply_cap,
 				r->o.net == CMC_NET_BAG ? "bag" : "fifo", r->o.live_steps);
 	if (!r->direct)
-		fprintf(f, "caps timer=%d wake=%d\ntime drift=%d\n", r->o.timer_cap, r->o.wake_cap,
-				r->o.drift);
+		fprintf(f, "caps timer=%d wake=%d\ntime drift=%d bound=%" PRIu64 "\n", r->o.timer_cap,
+				r->o.wake_cap, r->o.drift, r->o.time_bound);
 	for (int i = 0; i < n; i++)
 	{
 		if (r->fair_from && i + 1 == r->fair_from)
@@ -3848,6 +4062,7 @@ replay_check_header(CmcRun *r, FILE *f, char *why, size_t whylen)
 	fo.timer_cap = CMC_MAX_TIMERS;
 	fo.wake_cap = CMC_MAX_WAKES;
 	fo.drift = 0;
+	fo.time_bound = 0;
 	char		err[256];
 	long		pos;
 
@@ -3894,11 +4109,15 @@ replay_check_header(CmcRun *r, FILE *f, char *why, size_t whylen)
 		}
 		else if (!strncmp(line, "time ", 5))
 		{
-			if (sscanf(line, "time drift=%d", &fo.drift) != 1)
+			unsigned long long tb = 0;
+
+			/* bound= is absent in a file from before --time-bound */
+			if (sscanf(line, "time drift=%d bound=%llu", &fo.drift, &tb) < 1)
 			{
 				snprintf(why, whylen, "bad time line in replay file");
 				return -1;
 			}
+			fo.time_bound = tb;
 		}
 		else if (!strncmp(line, "caps ", 5))
 		{
@@ -3936,16 +4155,17 @@ replay_check_header(CmcRun *r, FILE *f, char *why, size_t whylen)
 		 fo.net_cap != r->o.net_cap || fo.persist_cap != r->o.persist_cap ||
 		 fo.reply_cap != r->o.reply_cap || fo.net != r->o.net ||
 		 fo.timer_cap != r->o.timer_cap || fo.wake_cap != r->o.wake_cap ||
-		 fo.drift != r->o.drift ||
+		 fo.drift != r->o.drift || fo.time_bound != r->o.time_bound ||
 		 (r->nev && fo.live_steps != r->o.live_steps)))
 	{
 		snprintf(why, whylen, "replay file recorded with different environment bounds"
 				 " (client=%d drop=%d dup=%d crash=%d net-cap=%d persist-cap=%d"
-				 " reply-cap=%d net=%s live-steps=%d timer-cap=%d wake-cap=%d drift=%d)",
+				 " reply-cap=%d net=%s live-steps=%d timer-cap=%d wake-cap=%d drift=%d"
+				 " time-bound=%" PRIu64 ")",
 				 fo.client_budget, fo.drop_budget, fo.dup_budget, fo.crash_budget,
 				 fo.net_cap, fo.persist_cap, fo.reply_cap,
 				 fo.net == CMC_NET_BAG ? "bag" : "fifo", fo.live_steps,
-				 fo.timer_cap, fo.wake_cap, fo.drift);
+				 fo.timer_cap, fo.wake_cap, fo.drift, fo.time_bound);
 		return -1;
 	}
 	return 0;

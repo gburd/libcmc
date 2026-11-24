@@ -81,6 +81,7 @@
 .Op Fl -wake-cap Ar n
 .Op Fl -drift Ar r
 .Op Fl -max-time Ar t
+.Op Fl -time-bound Ar b Op Fl -time-check
 .Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
@@ -801,6 +802,38 @@ is not expanded, and a run that reached one ends INCOMPLETE, never with
 a pass.
 Messages, client requests, flushes and wakes take no time; only a timed
 timer moves the clocks.
+.It Fl -time-bound Ar b
+For
+.Fl -model ,
+store every world with each node's clock at
+.Ar b
++ 2, its deadlines and declared time fields moved with it, and past
+times older than
+.Ar b
+saturated, so that worlds differing only in when things happened are
+one state and the search ends without a horizon
+.Po
+.Sx Time fields
+in
+.Xr cmc 7
+.Pc .
+.Ar b
+must be at least every constant the core compares a past time against;
+cmc cannot check that from outside, see
+.Fl -time-check .
+Required by a core that declares
+.Fn time_fields ;
+1 to 2^39 \- 1; not with
+.Fl -max-time ,
+nor for a model with a history variable.
+.It Fl -time-check
+With
+.Fl -time-bound ,
+run every step a second time with the node's times shifted, and report
+an engine violation unless the outputs and the post state agree up to
+the shift.
+It catches an undeclared time field, a core that reads absolute time,
+and a bound below the core's constants, on the steps the search takes.
 A model that arms timed timers needs this, unless it stops arming them
 itself or the run is to end at
 .Fl -max-states .

@@ -16,6 +16,12 @@ extern const CmcModel toy_bug3_model;
 
 static int	failures;
 
+/* one worker in memory against several (and a queue budget): same result */
+static void same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
+						int workers, uint64_t queue_mem);
+static void same_search_cfg(const CmcModel *m, const char *cfg, const char *const *props,
+							const CmcOptions *base, int workers, uint64_t queue_mem);
+
 #define CHECK(c) do { if (!(c)) { \
 	fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
 
@@ -591,6 +597,8 @@ mkc(const CmcModel *m, CmcSearch s, const char *cfg, const char *const *props, C
 	return r;
 }
 
+static uint64_t last_distinct;	/* of the last verdict_of() run */
+
 static CmcVerdict
 verdict_of(const CmcModel *m, CmcOptions *o, const char *const *props, char *prop, size_t plen,
 		   char *why, size_t wlen, int *depth)
@@ -614,6 +622,7 @@ verdict_of(const CmcModel *m, CmcOptions *o, const char *const *props, char *pro
 		snprintf(why, wlen, "%s", res.why);
 	if (depth)
 		*depth = res.depth;
+	last_distinct = res.distinct;
 	cmc_result_free(&res);
 	cmc_run_free(r);
 	return v;
@@ -1155,13 +1164,29 @@ test_timer_args(void)
 typedef struct LD
 {
 	uint64_t	t_send,
-				valid_until;
+				valid_until,
+				first;			/* ld_renew: node 0's first request */
 	uint8_t		serving,		/* node 0 */
 				again,			/* node 1: the lease is free again */
-				pad[6];
+				granted,		/* node 1: a grant not yet free (ld_renew) */
+				pending,		/* node 1: a request waits for it */
+				vet,			/* node 0: first is LD_VET old */
+				pad[3];
 } LD;
 
-static int	ld_bug;
+/*
+ * ld_renew: node 0 asks again whenever its lease ends, forever, and node
+ * 1 grants a request that arrives while a grant is out once that one is
+ * free.  The clocks then grow without bound, and only --time-bound makes
+ * the space finite.  Node 0 also records when it first asked, and once
+ * that is LD_VET old on its clock becomes a veteran: a time it compares
+ * against a constant larger than the lease, and keeps forever.
+ */
+#define LD_VET 3000
+
+static int	ld_bug,
+			ld_renew,
+			ld_vet_off;			/* no veteran: first is never compared */
 
 static void
 ld_timer(CmcOut *out, uint64_t dur)
@@ -1188,29 +1213,50 @@ ld_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
 
 	(void) cfg;
 	out->n = 0;
-	if (node == 0 && ev->kind == CMC_EV_CLIENT)
+	if (node == 0 && ld_renew && !ld_vet_off && s->first && !s->vet &&
+		ev->now - s->first >= LD_VET)
+		s->vet = 1;
+	if (node == 0 && (ev->kind == CMC_EV_CLIENT || (ld_renew && ev->kind == CMC_EV_TIMER)))
 	{
+		if (ld_renew && !s->first)
+			s->first = ev->now;
+		if (ld_renew)
+			s->serving = 0;
 		s->t_send = ev->now;
 		ld_send(out, 1, 'Q');
 	}
 	else if (node == 0 && ev->kind == CMC_EV_RECV)
 	{
 		s->valid_until = s->t_send + (uint64_t) LD_L * (ld_bug ? 1000 : 1000 - LD_RHO) / 1000;
-		/* a grant that arrives after the lease ended is never served */
+		/* a grant that arrives after the lease ended is never served;
+		 * ld_renew asks again */
 		if (ev->now >= s->valid_until)
+		{
+			if (ld_renew)
+			{
+				s->t_send = ev->now;
+				ld_send(out, 1, 'Q');
+			}
 			return;
+		}
 		s->serving = 1;
 		ld_timer(out, s->valid_until - ev->now);
 	}
 	else if (node == 0 && ev->kind == CMC_EV_TIMER)
 		s->serving = 0;
-	else if (node == 1 && ev->kind == CMC_EV_RECV)
+	else if (node == 1 && ev->kind == CMC_EV_RECV && s->granted)
+		s->pending = 1;
+	else if (node == 1 && (ev->kind == CMC_EV_RECV || (ev->kind == CMC_EV_TIMER && s->pending)))
 	{
 		ld_send(out, 0, 'G');
 		ld_timer(out, LD_L + 1);
+		s->granted = (uint8_t) ld_renew;
+		s->pending = 0;
+		if (ld_renew)
+			s->again = 0;
 	}
 	else if (node == 1 && ev->kind == CMC_EV_TIMER)
-		s->again = 1;
+		s->again = 1, s->granted = 0;
 }
 
 static void
@@ -1274,6 +1320,40 @@ static const CmcCore ld_core = {
 };
 static const CmcModel ld_model = {"lease", &ld_core, ld_props, 3, 0};
 
+/* node 0's times; ld_tf_skip leaves one undeclared (1 + its index) */
+static int	ld_tf_skip;
+
+static int
+ld_time_fields(const void *cfg, int node, size_t *off, int max)
+{
+	size_t		all[3] = {offsetof(LD, t_send), offsetof(LD, valid_until), offsetof(LD, first)};
+	int			k = 0;
+
+	(void) cfg;
+	for (int i = 0; i < 3 && node == 0 && k < max; i++)
+		if (ld_tf_skip != i + 1)
+			off[k++] = all[i];
+	return k;
+}
+
+static bool
+ld_veteran(const CmcWorld *w, CmcWhy *why)
+{
+	(void) why;
+	return ((const LD *) cmc_node(w, 0))->vet;
+}
+
+/* the renewing lease with its times declared; Freed reads cmc_now(),
+ * which a time-bound world does not keep, so Veteran stands in for it */
+static const CmcProp ldr_props[] = {CMC_INVARIANT(OneHolder, ld_one_holder),
+	CMC_INVARIANT(ServesOnOwnClock, ld_on_clock), CMC_WITNESS_PROP(Veteran, ld_veteran)};
+static const CmcCore ldr_core = {
+	.name = "lease-renew", .state_size = sizeof(LD), .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = two, .init = ld_init,
+	.step = ld_step, .clients = ld_clients, .time_fields = ld_time_fields,
+};
+static const CmcModel ldr_model = {"lease-renew", &ldr_core, ldr_props, 3, 0};
+
 static void
 test_lease_drift(void)
 {
@@ -1325,6 +1405,234 @@ test_lease_drift(void)
 	o.search = CMC_SIMULATE;
 	o.walks = 20;
 	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_INCOMPLETE);
+}
+
+/*
+ * --time-bound on the renewing lease: without a horizon the clocks grow
+ * forever, and with the bound the search ends, with the verdicts of the
+ * lease above.  --time-check catches a time field left undeclared and a
+ * bound below the veteran age the core compares against.
+ */
+static void
+test_time_bound(void)
+{
+	CmcOptions	o;
+	char		prop[64],
+				why[512];
+	int			depth;
+	uint64_t	n1,
+				n2;
+
+	ld_renew = 1;
+	cmc_options_default(&o);
+	o.max_states = 200000;
+	o.drift = 50;
+	/* a core with time fields must name its bound */
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_ERROR);
+	/* the lease core without time fields never ends */
+	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_INCOMPLETE &&
+		  strstr(why, "max_states"));
+	o.time_bound = LD_VET;
+	o.time_check = true;
+	o.det = true;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	/* a larger bound than the core needs is sound, only bigger (at drift
+	 * 0: under drift each round multiplies the ages first can have) */
+	o.drift = 0;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	n1 = last_distinct;
+	/* workers fingerprint the canonical form too, and run the time check
+	 * in their own buffers: the same search, passing and caught */
+	same_search(&ldr_model, NULL, &o, 4, 0);
+	ld_bug = 1;
+	o.drift = 50;
+	same_search(&ldr_model, NULL, &o, 4, 0);
+	ld_bug = 0;
+	ld_tf_skip = 1;
+	same_search(&ldr_model, NULL, &o, 4, 0);
+	ld_tf_skip = 0;
+	o.drift = 0;
+	o.time_bound = 2 * LD_VET;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	n2 = last_distinct;
+	CHECK(n1 > 0 && n2 > n1);
+	o.drift = 50;
+	/* no margin, slow holder: caught; drift 200 beats the margin */
+	o.time_bound = LD_VET;
+	ld_bug = 1;
+	CHECK(verdict_of(&ldr_model, &o, NULL, prop, sizeof(prop), NULL, 0, NULL)
+		  == CMC_VIOLATION && !strcmp(prop, "OneHolder"));
+	o.drift = 0;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	ld_bug = 0;
+	o.drift = 200;
+	CHECK(verdict_of(&ldr_model, &o, NULL, prop, sizeof(prop), NULL, 0, &depth)
+		  == CMC_VIOLATION && !strcmp(prop, "OneHolder"));
+	/* the time check: each field left undeclared, and a bound below the
+	 * veteran age */
+	o.drift = 50;
+	for (ld_tf_skip = 1; ld_tf_skip <= 3; ld_tf_skip++)
+		CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, why, sizeof(why), NULL)
+			  == CMC_VIOLATION && strstr(why, "time check: node 0"));
+	ld_tf_skip = 0;
+	o.time_bound = LD_VET - 2;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, why, sizeof(why), NULL)
+		  == CMC_VIOLATION && strstr(why, "time check: node 0"));
+	/* a bound below the age at which the grant computes valid_until
+	 * from t_send: arithmetic on a saturated time */
+	o.time_bound = 50;
+	o.drift = 0;
+	ld_vet_off = 1;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, why, sizeof(why), NULL)
+		  == CMC_VIOLATION && strstr(why, "time check: node 0 step on RECV"));
+	ld_vet_off = 0;
+	/* DFS and simulation canonicalize the same way: DFS reaches BFS's
+	 * states, though its paths never end, so it cannot pass */
+	o.time_bound = LD_VET;
+	o.search = CMC_DFS;
+	o.max_depth = 60;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_INCOMPLETE &&
+		  last_distinct == n1);
+	o.search = CMC_SIMULATE;
+	o.walks = 50;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	ld_renew = 0;
+}
+
+/* time fields as tf_off[0..tf_n - 1]; a state of 32 bytes, 8 durable,
+ * whose init writes tf_init to byte 8 */
+static size_t tf_off[3];
+static int	tf_n;
+static uint64_t tf_init;
+
+static int
+tf_fields(const void *cfg, int node, size_t *off, int max)
+{
+	(void) cfg;
+	(void) node;
+	for (int i = 0; i < tf_n && i < max; i++)
+		off[i] = tf_off[i];
+	return tf_n;
+}
+
+static void
+tf_initf(const void *cfg, int node, void *sv)
+{
+	(void) cfg;
+	(void) node;
+	memset(sv, 0, 32);
+	memcpy((uint8_t *) sv + 8, &tf_init, 8);
+}
+
+static void
+tf_apply(const void *cfg, int node, void *d, const uint8_t *body, uint16_t len)
+{
+	(void) cfg;
+	(void) node;
+	(void) d;
+	(void) body;
+	(void) len;
+}
+
+static const CmcModel cap_model;
+
+/* stores a time far in the future on CLIENT */
+static void
+tf_far_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	uint64_t	far = UINT64_MAX >> 1;
+
+	(void) cfg;
+	(void) node;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+		memcpy((uint8_t *) sv + 8, &far, 8);
+}
+
+static void
+tf_hist(const CmcWorld *pre, CmcAction a, const CmcWorld *post, uint8_t *ghost)
+{
+	(void) pre;
+	(void) a;
+	(void) post;
+	(void) ghost;
+}
+
+/* time-bound refusals: bad declarations, bad option mixes, times that
+ * leave the clock's range */
+static void
+test_time_bound_refusals(void)
+{
+	CmcCore		c = {.name = "tf", .state_size = 32, .durable_size = 8, .cfg_size = 4,
+		.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = nd_nnodes,
+		.init = tf_initf, .step = tf_far_step, .apply_persist = tf_apply,
+	.time_fields = tf_fields};
+	CmcModel	m = {"tf", &c, nd_props, 1, 0};
+	CmcOptions	o;
+	char		err[256];
+	CmcRun	   *r;
+	struct
+	{
+		int			n;
+		size_t		a,
+					b;
+		uint64_t	bound;
+		bool		check;
+		uint64_t	max_time;
+		const char *msg;
+	}			bad[] = {
+		{1, 8, 0, 0, false, 0, "needs time_bound"},
+		{-1, 8, 0, 9, false, 0, "outside 0..CMC_MAX_TIME_FIELDS"},
+		{CMC_MAX_TIME_FIELDS + 1, 8, 0, 9, false, 0, "outside 0..CMC_MAX_TIME_FIELDS"},
+		{1, 0, 0, 9, false, 0, "outside the volatile part"},
+		{1, 25, 0, 9, false, 0, "outside the volatile part"},
+		{1, 40, 0, 9, false, 0, "outside the volatile part"},
+		{2, 8, 12, 9, false, 0, "overlap"},
+		{0, 8, 0, 0, true, 0, "time_check needs time_bound"},
+		{0, 8, 0, (uint64_t) 1 << 39, false, 0, "below 2^39"},
+		{0, 8, 0, 9, false, 100, "max_time has no meaning"},
+	};
+
+	for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+	{
+		cmc_options_default(&o);
+		o.quiet = true;
+		tf_n = bad[i].n;
+		tf_off[0] = bad[i].a;
+		tf_off[1] = bad[i].b;
+		o.time_bound = bad[i].bound;
+		o.time_check = bad[i].check;
+		o.max_time = bad[i].max_time;
+		r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+		CHECK(!r && strstr(err, bad[i].msg));
+		if (r || !strstr(err, bad[i].msg))
+			fprintf(stderr, "  row %zu: %s\n", i, err);
+		cmc_run_free(r);
+	}
+	/* an initial time past the clock's range */
+	cmc_options_default(&o);
+	o.quiet = true;
+	o.time_bound = 9;
+	tf_n = 1;
+	tf_off[0] = 8;
+	tf_init = UINT64_MAX >> 1;
+	r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+	CHECK(!r && strstr(err, "initial world: node 0: a time field past"));
+	/* the same time stored by a step is an engine violation */
+	tf_init = 0;
+	CHECK(verdict_of(&m, &o, NULL, NULL, 0, err, sizeof(err), NULL) == CMC_VIOLATION &&
+		  strstr(err, "node 0: a time field past"));
+	tf_n = 0;
+	/* a direct-mode run takes no time options */
+	o.time_bound = 5;
+	r = cmc_run_new(&cap_model, "", NULL, &o, err, sizeof(err));
+	CHECK(!r && strstr(err, "need actor mode"));
+	/* nor does a model with a history variable, whose bytes the engine
+	 * cannot move with the clocks */
+	m.history_size = 8;
+	m.history = tf_hist;
+	r = cmc_run_new(&m, "", NULL, &o, err, sizeof(err));
+	CHECK(!r && strstr(err, "history variable cannot be kept under time_bound"));
 }
 
 /* Deadline order on one node.  On CLIENT node 0 arms timer 1 for 30,
@@ -2284,7 +2592,7 @@ gate_out_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *o
 }
 
 /* a step whose one output differs on a repeat in field gate_field: its
- * kind, destination, length, argument or body */
+ * kind, destination, length, argument, body or duration */
 static int	gate_field;
 
 static void
@@ -2309,6 +2617,8 @@ gate_body_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *
 		o->arg = (uint32_t) odd;
 	else if (gate_field == 4)
 		o->body[0] = (uint8_t) odd;
+	else if (gate_field == 5)
+		o->dur = (uint64_t) odd;
 }
 
 /* an apply_persist that changes volatile byte 4 */
@@ -2397,7 +2707,7 @@ test_core_rules(void)
 		  strstr(why, "different outputs on a repeat"));
 	c.step = gate_body_step;
 	c.nnodes = two;
-	for (gate_field = 0; gate_field < 5; gate_field++)
+	for (gate_field = 0; gate_field < 6; gate_field++)
 		CHECK(verdict_of(&m, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
 			  strstr(why, "different outputs on a repeat"));
 	/* under the gate, a body too long is refused without being compared
@@ -2869,9 +3179,6 @@ test_search_limits(void)
  * counts, the depth, the witness depths, the coverage and the very same
  * counterexample (the first in BFS order). */
 
-static void same_search_cfg(const CmcModel *m, const char *cfg, const char *const *props,
-							const CmcOptions *base, int workers, uint64_t queue_mem);
-
 static void
 same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
 			int workers, uint64_t queue_mem)
@@ -3057,6 +3364,7 @@ static const CmcModelEntry cli_models[] = {
 	{"cap", &cap_model},
 	{"mute", &mute_model},
 	{"lease", &ld_model},
+	{"lease-renew", &ldr_model},
 };
 
 /* p (512 bytes) = the path of a file under $CMC_BUILD */
@@ -3334,6 +3642,21 @@ test_cli_runs(void)
 		"--drift", "501");
 	CLI(3, "--max-time needs a number from 1", "--model", "lease", "--all-props",
 		"--max-time", "0");
+	/* --time-bound: the renewing lease ends, its trace prints clocks in
+	 * the canonical frame, and the replay needs the same bound */
+	ld_renew = 1;
+	CLI(0, "No error has been found", "--model", "lease-renew", "--all-props", "--drift",
+		"50", "--time-bound", "3000", "--time-check");
+	CLI(3, "needs time_bound", "--model", "lease-renew", "--all-props");
+	CLI(3, "--time-bound needs a number from 1", "--model", "lease-renew", "--all-props",
+		"--time-bound", "0");
+	ld_bug = 1;
+	CLI(1, "time: now=0 n0=3002 n1=3002", "--model", "lease-renew", "--inv", "OneHolder",
+		"--drift", "50", "--time-bound", "3000", "--trace-out", rp);
+	CLI(1, "Invariant OneHolder is violated", "--replay", rp, "--inv", "OneHolder");
+	CLI(3, "time-bound=3000", "--replay", rp, "--inv", "OneHolder", "--time-bound", "3001");
+	ld_bug = 0;
+	ld_renew = 0;
 	cli_write(rp, "# cmc replay v2\nmodel lease\ncfg\nenv client=1 drop=0 dup=0 crash=0"
 			  " net=8 persist=2 reply=8 mode=fifo live=1000\ntime x\n");
 	CLI(3, "bad time line", "--replay", rp, "--inv", "OneHolder");
@@ -3868,6 +4191,8 @@ main(void)
 	test_crashable();
 	test_timer_args();
 	test_lease_drift();
+	test_time_bound();
+	test_time_bound_refusals();
 	test_deadline_order();
 	test_m1_large_durable();
 	test_m3_output_overflow();

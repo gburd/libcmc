@@ -11,7 +11,8 @@
 #   make check-hc-bugs       planted HC port bugs must fail calibration
 #   make check-spec-calibration  the .cml twins and the TLA+ reader against
 #                            TLC (needs nix or the pinned java)
-#   make check-pgchain       pg_chain's cores, its gate's fast rows, 8 workers
+#   make check-pgchain       pg_chain's gate on test/pgchain: exact counts
+#                            and planted bugs (about 7.5 minutes)
 #   make check-all           all of the above
 #   make coverage            every gate of make check on a gcc --coverage
 #                            build; fails below 90% of functions or of
@@ -136,6 +137,16 @@ $(B)/pgchain_mc-bug%: $(PGC_SRC) $(LIB)
 check-pgchain-hist: $(B)/pgchain_mc $(B)/pgchain_mc-bug107 $(B)/pgchain_mc-bug110
 	$(PGC)/hist-gate.sh $(B)
 
+# the fast rows of pg_chain's own gate (test/pgchain/mc-bug-gate.sh): its
+# exact distinct-state counts, its witnesses, and every planted bug
+# caught.  About 7.5 minutes (one row at a time), so not part of make
+# check; CI runs it in its own weekly job.  PGCHAIN_MC_SLOW=1 adds the slow rows.
+# Every run uses 8 BFS workers, which must change nothing.
+PGC_BUGS = 1 2 3 4 5 6 7 8 9 10 101 102 103 104 105 106 107 108 109 110
+check-pgchain: $(B)/pgchain_mc $(PGC_BUGS:%=$(B)/pgchain_mc-bug%)
+	MC_B=$(B) PGCHAIN_MC_OUT=$(CMC_SCRATCH)/pgchain PGCHAIN_MC_EXTRA="--workers 8" \
+		bash $(PGC)/mc-bug-gate.sh
+
 # every shipped example runs and gives its expected verdict: the C
 # process-mode examples (examples/*/) built and checked by proc_gate,
 # and the abstract .cml models (examples/spec/) by spec_gate.  This is a
@@ -178,13 +189,6 @@ check-asan:
 	$(MAKE) B=$(ASAN_B) CFLAGS="$(ASAN_FLAGS)" $(ASAN_B)/cmc
 	CFLAGS="$(ASAN_FLAGS)" test/spec_gate.sh $(ASAN_B)
 	test/tla_gate.sh $(ASAN_B)
-
-# the fast rows of pg_chain's own gate, with its exact counts, run with 8
-# BFS workers, which must change nothing
-PGC_BUGS = 1 2 3 4 5 6 7 8 9 10 101 102 103 104 105 106 107 108 109 110
-check-pgchain: $(B)/pgchain_mc $(PGC_BUGS:%=$(B)/pgchain_mc-bug%)
-	MC_B=$(B) PGCHAIN_MC_OUT=$(CMC_SCRATCH)/pgchain PGCHAIN_MC_EXTRA="--workers 8" \
-		$(PGC)/mc-bug-gate.sh
 
 check-calibration: $(B)/cmc
 	calib/hc/calibrate.sh $(B)/cmc all

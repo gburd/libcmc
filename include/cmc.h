@@ -43,6 +43,7 @@
 #define CMC_MAX_ACTIONS	2048	/* enabled actions per state */
 #define CMC_MAX_TIMERS	16		/* default timer_cap: armed timers per node */
 #define CMC_MAX_WAKES	8		/* default wake_cap: pending wakes per node */
+#define CMC_MAX_TIME_FIELDS 16	/* time_fields() per node */
 
 /* An action, packed so the fingerprint table can store it.  The top byte
  * is the kind: env kinds below, or a core-defined kind in direct mode. */
@@ -199,6 +200,13 @@ typedef struct CmcCore
 	/* optional: may this node crash (from cfg, never state)?  NULL = every
 	 * node may.  CMC_A_CRASH is never offered for a node it excludes. */
 	int			(*crashable) (const void *cfg, int node);
+	/* optional: the offsets in node's state of the u64 times it stores
+	 * (absolute readings of its own clock, such as a lease's end), at most
+	 * max of them, from cfg only.  Returns how many.  Non-NULL needs
+	 * CmcOptions.time_bound; then step() must depend on times only through
+	 * their differences from ev->now, and not at all on a past time older
+	 * than time_bound (cmc(7), Time fields). */
+	int			(*time_fields) (const void *cfg, int node, size_t *off, int max);
 } CmcCore;
 
 /* ---- what properties see ------------------------------------------- */
@@ -334,6 +342,12 @@ typedef struct CmcOptions
 	int			drift;			/* clock drift, per thousand (0..500) */
 	uint64_t	max_time;		/* 0 = none; a world whose reference time
 								 * passed it is not expanded, INCOMPLETE */
+	uint64_t	time_bound;		/* 0 = off; else B: worlds are stored with
+								 * each node's clock at B + 2, its deadlines
+								 * and time fields shifted with it, and past
+								 * times older than B saturated (cmc(7)) */
+	bool		time_check;		/* --time-check: every step again with the
+								 * node's times shifted; needs time_bound */
 	int			req_cap;		/* request log slots (nodes taking clients
 								 * x client budget must fit), at most 64 */
 	CmcNet		net;

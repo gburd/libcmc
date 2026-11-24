@@ -310,10 +310,76 @@ infinitely many states unless something else ends it.  `--max-time T`
 is the horizon: a world whose reference time passed T is not expanded,
 and a run that left one unexpanded ends INCOMPLETE (exit 2), never
 PASS.  Without `--max-time`, such a model must stop arming timers on its
-own (the lease core in `test/test_cmc.c` does) or the run ends at
-`--max-states`.  Declared time fields (plan item 2b), which store times
-relative to the reference clock, are what will remove the need for a
-horizon.
+own or the run ends at `--max-states`.
+
+### Time fields and `--time-bound`
+
+A core that keeps times in its state (a lease's end, when a request was
+sent) names their offsets with `CmcCore.time_fields(cfg, node, off,
+max)`: u64 readings of that node's own clock, from cfg only, in the
+volatile part of the state.  A core that declares them must run with
+`--time-bound B` (`CmcOptions.time_bound`), and then every world is
+stored in canonical form, so worlds that differ only in when things
+happened are one state and the search ends without a horizon.
+
+The canonical form is per node, since under drift two clocks drift
+apart without bound and no shared frame would stay finite.  With K = B +
+2, after every step and in the initial world:
+
+- each node's clock is stored as K, and the reference time as 0;
+- each timed deadline dl becomes K + (dl - c), where c is its node's
+  clock (a deadline is never behind its clock: `expire_ok()`);
+- each declared field f that is not 0 becomes K + (f - c) when f >= c
+  (a future time, kept exact, since it comes nearer as the clock moves),
+  K - (c - f) when f is in the past by at most B, and 1 when it is older
+  than B.  0 stays 0, so a core can use it for "unset": no event carries
+  a now below K, so a core never stores a real time 0.
+
+This is the extrapolation of timed automata (Alur and Dill's region
+construction, with the clock ceiling B): if every comparison the core
+makes on a past time is against a constant of at most B, two ages above
+B behave the same, so the saturated value loses nothing.  A future time
+is a deadline-like value and is not clamped.  Both shifting and
+saturating are exact under the obligation below, so a verdict and a
+counterexample under `--time-bound` are those of the unbounded system,
+and distinct-state counts are of the quotient.
+
+**The obligation**, like the state hook's in process mode: the engine
+cannot see the constants a core compares times against, so it is the
+user's to state.  `step()` must depend on time only through `ev->now`
+and its declared fields, and must behave the same if all of them move
+by one constant (differences, never absolute values); a past time older
+than B must matter only as "older than B" (every age it is compared
+against, and every sum such as `t_send + L` that is compared with now,
+stays within B); and no time may leave the node in a message or a
+persist record, which the engine cannot shift.  Properties see the
+canonical world: `cmc_clock()` reads K and `cmc_now()` 0, so a property
+that needs time reads a declared field relative to `cmc_clock()` of the
+same node.  A trace prints the canonical clocks.
+
+**The check.**  `--time-check` (`CmcOptions.time_check`) runs every step
+a second time on a copy of the state with `ev->now` and every set,
+unsaturated field moved 2^40 later, and each saturated field set to 1 +
+its index (far older than B, and no two equal).  The outputs (with each
+timer's `dur`) must match, and the two post states must match in
+canonical form.  This catches an undeclared time field (its value does
+not move with the clock), a core that reads an absolute time, a bound
+below a constant the core compares an old time against, and arithmetic
+on a saturated value.  Like `--det` it checks the steps the search
+takes, not every step the core could take.
+
+`--time-bound` takes 1 to 2^39 - 1, refuses `--max-time` (the reference
+time is not kept), refuses a model with a history variable
+(`CmcModel.history_size`: a time `history()` stored there could not be
+moved with the clocks, and a stored `cmc_clock()` reading would read the
+constant K), and needs actor mode; `--time-check` needs
+`--time-bound`.  A replay file records the bound on its `time` line.
+`test_time_bound` in `test/test_cmc.c` is the gate: a renewing lease
+whose clocks grow forever ends with `--time-bound` and gives the lease's
+verdicts (holds at drift 50 and 0, caught with no margin and at drift
+200); `--time-check` catches each field left undeclared, a bound below
+the core's veteran age and one below its lease arithmetic; and the
+engine with the clamp removed never finishes the same search.
 
 ## Network
 

@@ -31,6 +31,22 @@ change the API in `include/cmc.h`; this file says when it does.
   expanded and the run is INCOMPLETE.  Messages, clients, flushes and
   wakes take no time.  Replay files record the drift on a `time` line
   (API addition).
+- Declared time fields: `CmcCore.time_fields(cfg, node, off, max)`
+  names the u64 times a node keeps in its state, and `--time-bound B`
+  (`CmcOptions.time_bound`, required with it) stores every world with
+  each node's clock at B + 2, its deadlines and fields moved with it,
+  and past times older than B saturated, so a model whose clocks grow
+  forever has finitely many states and needs no `--max-time`.  The
+  core's obligation (cmc(7), Time fields): times only through
+  differences with `ev->now`, past times compared only against
+  constants up to B, no times in messages.  `--time-check`
+  (`CmcOptions.time_check`) runs each step again with the times shifted
+  and reports a core that breaks it.  A model with a history variable
+  is refused under `--time-bound`, since its bytes cannot be moved with
+  the clocks.  Replay files record the bound on the `time` line (API
+  addition).
+- `--det` now also compares each output's `dur`: a core whose timer
+  duration differed on a repeat passed the gate.
 - The request log (docs/plans/2.4-library-engine.md item 4).  A model
   that sets `CmcModel.requests` keeps, per client request, whether it was
   answered, the answer, and which requests were answered before it was
@@ -49,6 +65,9 @@ change the API in `include/cmc.h`; this file says when it does.
   invariant (the first value chosen at a slot stays safe in every later
   state) catches pg_chain's Paxos bugs 107 and 110 (`make
   check-pgchain-hist`).  API: additive.
+- `make check-pgchain` builds `test/pgchain` and its planted bugs and
+  runs the fast rows of pg_chain's gate (about 7.5 minutes); CI runs it
+  in a weekly `pgchain` job, which a release also runs.
 - The in-process engine's BFS (`cmc --model`, `cmc_check()`) keeps a
   32-byte record per state (fingerprint, parent record number, action)
   in 256 shards whose index grows without a second copy, instead of a
@@ -63,9 +82,8 @@ change the API in `include/cmc.h`; this file says when it does.
   reentrant.
 - `--queue-mem MB` (`CmcOptions.queue_mem`): BFS queue chunks beyond the
   budget spill to files in `$CMC_SCRATCH` or `$TMPDIR`.
-- `make check-pgchain` runs the fast rows of pg_chain's gate
-  (test/pgchain) with 8 workers; `PGCHAIN_MC_EXTRA` adds options to the
-  gate's runs.
+- `make check-pgchain` runs with 8 BFS workers; `PGCHAIN_MC_EXTRA` adds
+  options to the gate's runs.
 
 ## 2.3.1 (2026-11-24)
 
