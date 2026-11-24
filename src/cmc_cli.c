@@ -52,7 +52,7 @@ usage(void)
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
 			"         [--timer-cap N] [--wake-cap N] [--drift R] [--max-time T]\n"
-			"         [--req-cap N]\n"
+			"         [--time-bound B [--time-check]] [--req-cap N]\n"
 			"         [--net fifo|bag] [--live-steps K]\n"
 			"         [--symmetry on|off] [--sym-check]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
@@ -355,9 +355,13 @@ replay_defaults(const char *path, const CmcModel **m, char *cfg, size_t cfglen,
 		{
 			CmcOptions	fo = *o;
 
-			if (sscanf(s, "time drift=%d", &fo.drift) != 1)
+			unsigned long long tb = 0;
+
+			if (sscanf(s, "time drift=%d bound=%llu", &fo.drift, &tb) < 1)
 				continue;
+			fo.time_bound = tb;
 			TAKE(11, drift);
+			TAKE(12, time_bound);
 #undef TAKE
 		}
 		else if (!strncmp(s, "act ", 4))
@@ -641,7 +645,7 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 	bool		all = false,
 				list = false,
 				cfg_given = false,
-				set[12] = {false};
+				set[13] = {false};
 	CmcRun	   *r;
 	CmcResult	res;
 
@@ -758,6 +762,10 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			o.drift = (int) num_arg(a, ARG(), 0, 500), set[11] = true;
 		else if (!strcmp(a, "--max-time"))
 			o.max_time = num_arg(a, ARG(), 1, UINT64_MAX);
+		else if (!strcmp(a, "--time-bound"))
+			o.time_bound = num_arg(a, ARG(), 1, ((uint64_t) 1 << 39) - 1), set[12] = true;
+		else if (!strcmp(a, "--time-check"))
+			o.time_check = true;
 		else if (!strcmp(a, "--req-cap"))
 			o.req_cap = (int) num_arg(a, ARG(), 0, 64);
 		else if (!strcmp(a, "--net"))

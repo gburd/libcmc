@@ -11,6 +11,8 @@
 #   make check-hc-bugs       planted HC port bugs must fail calibration
 #   make check-spec-calibration  the .cml twins and the TLA+ reader against
 #                            TLC (needs nix or the pinned java)
+#   make check-pgchain       pg_chain's gate on test/pgchain: exact counts
+#                            and planted bugs (about 7.5 minutes)
 #   make check-all           all of the above
 #   make coverage            every gate of make check on a gcc --coverage
 #                            build; fails below 90% of functions or of
@@ -53,7 +55,8 @@ ASAN_B ?= build-asan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples check-examples-slow check-asan check-pgchain-hist check-pgchain-sym \
+        check-examples check-examples-slow check-asan check-pgchain-hist check-pgchain \
+        check-pgchain-sym \
         codeberg-release \
         install docs-site clean
 
@@ -135,10 +138,18 @@ $(B)/pgchain_mc-bug%: $(PGC_SRC) $(LIB)
 check-pgchain-hist: $(B)/pgchain_mc $(B)/pgchain_mc-bug107 $(B)/pgchain_mc-bug110
 	$(PGC)/hist-gate.sh $(B)
 
+# the fast rows of pg_chain's own gate (test/pgchain/mc-bug-gate.sh): its
+# exact distinct-state counts, its witnesses, and every planted bug
+# caught.  About 7.5 minutes (one row at a time), so not part of make
+# check; CI runs it in its own weekly job.  PGCHAIN_MC_SLOW=1 adds the slow rows.
+PGC_BUGS = 1 2 3 4 5 6 7 8 9 10 101 102 103 104 105 106 107 108 109 110
+check-pgchain: $(B)/pgchain_mc $(PGC_BUGS:%=$(B)/pgchain_mc-bug%)
+	MC_B=$(B) PGCHAIN_MC_OUT=$(CMC_SCRATCH)/pgchain bash $(PGC)/mc-bug-gate.sh
+
 # symmetry reduction on pg_chain's Paxos: every gate row and planted bug
 # with --symmetry on (about five minutes)
 PX_BUGS = 101 102 103 104 105 106 107 108 109 110
-check-pgchain-sym: $(B)/pgchain_mc $(addprefix $(B)/pgchain_mc-bug,$(PX_BUGS))
+check-pgchain-sym: $(B)/pgchain_mc $(PX_BUGS:%=$(B)/pgchain_mc-bug%)
 	$(PGC)/sym-gate.sh $(B)
 
 # every shipped example runs and gives its expected verdict: the C
@@ -216,7 +227,7 @@ check-emit-apalache: $(B)/cmc
 	test/apalache_gate.sh $(B)/cmc
 
 check-all: check-unit check-msan check-asan check-calibration check-hc-bugs check-examples-slow \
-	check-spec-calibration
+	check-spec-calibration check-pgchain
 
 install: $(LIB) $(B)/cmc $(PRELOAD)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \

@@ -123,6 +123,20 @@ jobs:
       - name: make check-examples-slow
         run: make check-examples-slow
 
+  pgchain:
+    # pg_chain's cores (test/pgchain) against the exact counts and the
+    # planted bugs of pg_chain's own gate.  Too slow for every push; on
+    # the calibration's triggers, so a tag cannot ship without it.
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check-pgchain
+        run: make check-pgchain
+
   bridge:
     # The TLA+ bridge: every .cml model's emitted module through TLC and
     # through Apalache, with the verdict cmc --spec gives.  On the same
