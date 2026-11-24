@@ -82,6 +82,7 @@
 .Op Fl -drift Ar r
 .Op Fl -max-time Ar t
 .Op Fl -time-bound Ar b Op Fl -time-check
+.Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
 .Nm
@@ -821,7 +822,8 @@ cmc cannot check that from outside, see
 Required by a core that declares
 .Fn time_fields ;
 1 to 2^39 \- 1; not with
-.Fl -max-time .
+.Fl -max-time ,
+nor for a model with a history variable.
 .It Fl -time-check
 With
 .Fl -time-bound ,
@@ -833,6 +835,13 @@ and a bound below the core's constants, on the steps the search takes.
 A model that arms timed timers needs this, unless it stops arming them
 itself or the run is to end at
 .Fl -max-states .
+.It Fl -req-cap Ar n
+Slots in the request log of a model that keeps one
+.Pq see Xr libcmc 3 :
+one per node that takes clients times
+.Fl -clients .
+A log that does not fit is an error before the search starts.
+Default 8, at most 64.
 .It Fl -net Cm fifo | bag
 .Cm fifo ,
 the default, has one ordered channel per pair of nodes, as TCP does, and

@@ -24,6 +24,10 @@
 .Nm cmc_requests ,
 .Nm cmc_clock ,
 .Nm cmc_now ,
+.Nm cmc_nrequests ,
+.Nm cmc_request ,
+.Nm cmc_precedes ,
+.Nm cmc_history ,
 .Nm cmc_why ,
 .Nm cmc_world_init ,
 .Nm cmc_enabled ,
@@ -80,6 +84,14 @@
 .Fn cmc_clock "const CmcWorld *w" "int node"
 .Ft uint64_t
 .Fn cmc_now "const CmcWorld *w"
+.Ft int
+.Fn cmc_nrequests "const CmcWorld *w"
+.Ft void
+.Fn cmc_request "const CmcWorld *w" "int i" "int *node" "int *num" "bool *answered" "uint32_t *answer"
+.Ft bool
+.Fn cmc_precedes "const CmcWorld *w" "int i" "int j"
+.Ft "const uint8_t *"
+.Fn cmc_history "const CmcWorld *w"
 .Ft void
 .Fn cmc_why "CmcWhy *why" "const char *fmt" "..."
 .Ss Lower level
@@ -236,6 +248,9 @@ depends on time only through
 and its declared fields, would behave the same with all of them moved
 by one constant, compares a past time only with constants up to the
 bound, and sends no time in a message or a persist record.
+.Fa time_bound
+is refused for a model with a history variable, whose bytes the engine
+could not move with the clocks.
 .Fa time_check
 tests the obligation on every step the search takes; see
 .Sx Time fields
@@ -363,6 +378,17 @@ are pending on a node at once.
 Answer a client with
 .Fa arg .
 The engine appends the reply to the ghost log that properties read.
+With the request log on
+.Pq Fa requests No in the model ,
+.Fa req
+names the request the reply answers: 1 plus the request's number at
+this node, the
+.Fa arg
+of its
+.Dv CMC_EV_CLIENT .
+0 names none, and the reply goes to the ghost log only.
+A reply that names a request never invoked, answers one twice, or
+names one when the model keeps no log is an engine violation.
 .El
 .Pp
 A core never writes
@@ -448,6 +474,45 @@ returns a node's clock and
 .Fn cmc_now
 the reference time, in the core's time unit; both are 0 for a
 calibration core and until a timed timer fires.
+.Pp
+With
+.Fa requests
+set in the model, the world also holds the request log.
+.Fn cmc_nrequests
+returns the number of requests invoked so far; request
+.Fa i
+runs from 0, ordered by node and then by request number.
+.Fn cmc_request
+returns its node, its number at that node, whether a reply has named it,
+and that reply's
+.Fa arg .
+.Fn cmc_precedes
+is true when request
+.Fa i
+was answered before request
+.Fa j
+was invoked: the real-time order a linearizability check needs.
+A reply in the step that invokes a request does not precede it.
+The log records this order and no step numbers, so two paths to the
+same log still merge.
+Calling these on a model without the log, or with
+.Fa i
+out of range, prints the reason and exits with status 3: a property
+that read an empty log would pass for the wrong reason.
+.Pp
+.Fn cmc_history
+returns the model's history bytes
+.Pq Fa history_size No of them , No or NULL if it has none .
+They start at zero, and after every step the engine calls the model's
+.Fn history
+with the worlds before and after it and the bytes to update, which
+start as the bytes before the step.
+They are part of the world: the fingerprint covers them, so two paths
+that reach the same core states with different histories are two
+states.
+Cores never see them, so a history variable cannot change behaviour.
+.Fn history
+must be deterministic; under the determinism gate it runs twice.
 Properties may read core state; the engine never calls them to decide
 which actions are possible.
 .Ss Version
@@ -470,6 +535,10 @@ typedef struct CmcModel {
 	const CmcProp *props;
 	int	nprops;
 	int	nalways;	/* the first nalways props are always checked */
+	bool	requests;	/* keep the request log */
+	size_t	history_size;	/* bytes of history variables */
+	void	(*history)(const CmcWorld *pre, CmcAction a,
+			   const CmcWorld *post, uint8_t *ghost);
 } CmcModel;
 
 typedef struct CmcModelEntry {
@@ -539,6 +608,7 @@ typedef struct CmcOptions {
 	uint64_t time_bound;	/* 0: off; the largest time difference
 				    the core compares against */
 	bool	time_check;	/* step again with times shifted */
+	int	req_cap;	/* request log slots, at most 64 */
 	CmcNet	net;		/* CMC_NET_FIFO or CMC_NET_BAG */
 	int	live_steps;	/* bound for eventually-properties */
 	FILE	*out;		/* progress output; NULL: stdout */

@@ -227,6 +227,8 @@ A **world** is the concatenation of:
 | replies | the ghost client log, `reply_cap` entries in emission order |
 | timers | `timer_cap` entries per node, `{id, arg2, deadline}`, sorted by `(id, arg2)`, one per pair; deadline 0 = untimed |
 | wakes | `wake_cap` entries per node, `{id, arg2}`, sorted, one per pair |
+| requests | `CmcModel.requests` only: one slot per (node taking clients, request number), `{answered, answer, precedes}`; the precedence bits say which requests were answered before this one was invoked |
+| history | `CmcModel.history_size` bytes, updated by `CmcModel.history()` after each step |
 
 Every part is canonical: sorted where order carries no meaning, with
 unused entries zeroed.  The world is zero-padded to 8 bytes.  The bytes
@@ -367,7 +369,10 @@ on a saturated value.  Like `--det` it checks the steps the search
 takes, not every step the core could take.
 
 `--time-bound` takes 1 to 2^39 - 1, refuses `--max-time` (the reference
-time is not kept), and needs actor mode; `--time-check` needs
+time is not kept), refuses a model with a history variable
+(`CmcModel.history_size`: a time `history()` stored there could not be
+moved with the clocks, and a stored `cmc_clock()` reading would read the
+constant K), and needs actor mode; `--time-check` needs
 `--time-bound`.  A replay file records the bound on its `time` line.
 `test_time_bound` in `test/test_cmc.c` is the gate: a renewing lease
 whose clocks grow forever ends with `--time-bound` and gives the lease's
@@ -480,7 +485,8 @@ need first:
 2. Partitions: a `LINKS` action over link sets, including asymmetric ones.
 3. An `APPLY` completion like `FLUSH`, lost on crash.
 4. Several cores per node, sharing a crash.
-5. A ghost history of client requests, not only replies.
+5. A ghost history of client requests, not only replies (2.4: the
+   request log and history variables).
 6. Symmetry reduction (a `permute` callback; a run counts only if the same
    counterexamples appear with it on and off) and an on-disk BFS queue.
 7. Parallel BFS over a sharded table.  After that, if search is still the

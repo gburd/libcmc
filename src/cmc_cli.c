@@ -52,7 +52,8 @@ usage(void)
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
 			"         [--timer-cap N] [--wake-cap N] [--drift R] [--max-time T]\n"
-			"         [--time-bound B [--time-check]] [--net fifo|bag] [--live-steps K]\n"
+			"         [--time-bound B [--time-check]] [--req-cap N]\n"
+			"         [--net fifo|bag] [--live-steps K]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
 			"         [--define TAG ...] [--no-deadlock]\n"
 			"       cmc --spec | --emit-cml FILE.tla [--config FILE.cfg] [--no-deadlock]\n"
@@ -764,6 +765,8 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			o.time_bound = num_arg(a, ARG(), 1, ((uint64_t) 1 << 39) - 1), set[12] = true;
 		else if (!strcmp(a, "--time-check"))
 			o.time_check = true;
+		else if (!strcmp(a, "--req-cap"))
+			o.req_cap = (int) num_arg(a, ARG(), 0, 64);
 		else if (!strcmp(a, "--net"))
 		{
 			const char *v = ARG();

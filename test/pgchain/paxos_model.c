@@ -658,3 +658,55 @@ const CmcModel paxos_model = {
 	.nprops = sizeof(props) / sizeof(props[0]),
 	.nalways = 0,
 };
+
+/*
+ * libcmc's copy only (not in pg_chain): ChosenStable as an invariant over
+ * a history variable (libcmc 2.4, CmcModel.history).  The ghost holds,
+ * per slot, the first value ever chosen there; HistChosen requires it to
+ * stay safe in every later state, not only one step after the choice,
+ * which is the shortcut chosen_stable() names.
+ */
+static void
+chosen_history(const CmcWorld *pre, CmcAction act, const CmcWorld *post, uint8_t *ghost)
+{
+	(void) pre;
+	(void) act;
+	for (int k = 0; k < cfg_of(post)->slots; k++)
+	{
+		int			v = chosen_now(post, k, NULL);
+
+		if (!ghost[k] && v > 0)
+			ghost[k] = (uint8_t) v;
+	}
+}
+
+static bool
+hist_chosen(const CmcWorld *w, CmcWhy *why)
+{
+	const uint8_t *g = cmc_history(w);
+
+	for (int k = 0; k < cfg_of(w)->slots; k++)
+		if (g[k] && !safe_value(w, k, g[k]))
+		{
+			cmc_why(why, "slot %d: %d was chosen in an earlier state and is no longer safe",
+					k, g[k]);
+			return false;
+		}
+	return true;
+}
+
+static const CmcProp hist_props[] = {
+	CMC_INVARIANT(HistChosen, hist_chosen),
+	CMC_ACTION_PROPERTY(ChosenStable, chosen_stable),
+	CMC_WITNESS_PROP(ReachChosen, reach_chosen),
+};
+
+const CmcModel paxos_hist_model = {
+	.name = "paxos_hist",
+	.core = &core,
+	.props = hist_props,
+	.nprops = sizeof(hist_props) / sizeof(hist_props[0]),
+	.nalways = 0,
+	.history_size = PX_MAX_SLOTS,
+	.history = chosen_history,
+};
