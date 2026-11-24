@@ -43,7 +43,13 @@ and holds every source file to 90% function and branch coverage (see
 the [2.1 plan](docs/plans/2.1-boundaries.md)); 2.2.0 lets a crash fall
 between any two effectful calls and adds per-node clocks, a modelled
 file system and the socket calls a libpq client makes (see the
-[2.2 plan](docs/plans/2.2-in-place.md)).  A pass covers only the instance and the
+[2.2 plan](docs/plans/2.2-in-place.md)); 2.3.0 gives the abstract
+checker what a TLA+ user expects: TLC's deadlock check and constraints,
+records, sequences and definitions, strong and per-action fairness,
+ITF traces, a reader for TLA+ modules and TLC configurations, and proof
+hooks for TLAPS and Apalache (see the
+[2.3 plan](docs/plans/2.3-tla-users.md) and the
+[guide for TLA+ users](docs/guide/04-from-tla.md)).  A pass covers only the instance and the
 budgets searched, and only the behaviour
 [docs/qualification.md](docs/qualification.md) lists as modelled; a
 construct outside it is refused, not passed.  Use cmc as one input
@@ -107,7 +113,7 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 2.2.0.  `cmc --model-file`
+Release 2.3.0.  `cmc --model-file`
 checks the shipped binary as it runs, under seccomp, with the network,
 timeouts, crashes, connection resets, partitions and short writes as
 search decisions.  Blocking and non-blocking sockets,

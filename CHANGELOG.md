@@ -5,6 +5,26 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 2.3.0 (2026-11-24)
+
+Gives `cmc --spec` what a TLA+ user brings to it
+(docs/plans/2.3-tla-users.md): TLC's deadlock check, state and action
+constraints, records, bounded sequences and `def` operators, `IF`,
+per-action and strong fairness, `[][A]_vars` properties, action
+coverage, lasso counterexamples, ITF and JSON trace files, a reader for
+TLA+ modules and TLC configurations (`cmc --spec FILE.tla --config
+FILE.cfg`), spec terms in refinement traces, and proof hooks
+(`[inductive]` invariants, `--check-inductive`, an emitted TLAPS
+outline).  Each is checked against single-worker TLC on the same model,
+and every emitted module is parsed by SANY.  docs/guide/04-from-tla.md
+takes Lamport's TCommit from TLA+ to a C implementation.  Three reviews
+found loader, emitter and reader inputs read to a different model than
+TLC checks (some also in 2.2.0: a second `when` replaced the first, a
+domain containing `f[i]` read as an action tag, a duplicate `const`
+ignored); each is fixed or refused with a test.  Results change for the
+same input: the deadlock check is on by default, as in TLC, so a model
+whose terminal states are intended needs `deadlock = off`.
+
 Fixed: a state-level `--refine` violation found by breadth-first search
 left the nodes of the reached world running after cmc exited.  That path
 reported without killing them first, and the replay that prints the
