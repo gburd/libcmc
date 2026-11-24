@@ -603,6 +603,21 @@ whose guard has a disjunction once per true disjunct, so its
 "generated" can be larger; cmc counts each successor once.  The distinct count, the one that shows vacuity, is
 the same.
 
+## History in the library engine
+
+A `.cml` model writes a history variable as an ordinary variable that
+its actions update.  The library engine (`cmc.h`, in-process cores) has
+the same two tools as of 2.4, outside the cores so the cores stay the
+code that ships.  `CmcModel.history_size` and `CmcModel.history()` keep
+bytes in the world that the model updates after each step and
+properties read with `cmc_history()`; "once chosen, a value stays
+chosen" becomes an invariant over them.  `CmcModel.requests` keeps a
+request log: each client request, its answer (a `CMC_OUT_REPLY` names
+it in `req`), and the real-time precedence between requests, read with
+`cmc_request()` and `cmc_precedes()`.  Both are part of the state, so
+they can only add distinct states; with neither set, the counts are
+those of 2.3.  See libcmc(3).
+
 ## One worker
 
 `cmc --spec` searches with one thread and keeps its queue in memory.

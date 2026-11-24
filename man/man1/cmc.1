@@ -81,6 +81,7 @@
 .Op Fl -wake-cap Ar n
 .Op Fl -drift Ar r
 .Op Fl -max-time Ar t
+.Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
 .Op Fl -workers Ar n
@@ -803,6 +804,13 @@ timer moves the clocks.
 A model that arms timed timers needs this, unless it stops arming them
 itself or the run is to end at
 .Fl -max-states .
+.It Fl -req-cap Ar n
+Slots in the request log of a model that keeps one
+.Pq see Xr libcmc 3 :
+one per node that takes clients times
+.Fl -clients .
+A log that does not fit is an error before the search starts.
+Default 8, at most 64.
 .It Fl -net Cm fifo | bag
 .Cm fifo ,
 the default, has one ordered channel per pair of nodes, as TCP does, and

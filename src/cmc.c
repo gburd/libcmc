@@ -23,6 +23,12 @@
  *   wakes           nn x wake_cap entries {id, arg2 (u32 big-endian)}.
  *                   Both sorted by (id, arg2), one entry per pair, unused
  *                   entries zero
+ *   requests        (CmcModel.requests only) one REQ_ENT slot per (node that
+ *                   takes clients, request number < client_budget), in that
+ *                   order: {answered, answer[4], prec[8]}; prec bit k = slot
+ *                   k was answered before this one was invoked.  A slot is
+ *                   invoked iff its number < the node's CLIENT events so far
+ *   history         CmcModel.history_size bytes (the model's ghost)
  * padded with zeros to a multiple of 8.  Every part is canonical, so the
  * bytes are the encoding.  Direct mode (calibration cores) has one state
  * blob and no environment.
@@ -49,6 +55,8 @@
 #define MSG_ENT (MSG_KEY + 1)
 #define PERS_ENT (1 + CMC_MSG_MAX)
 #define REP_ENT 5
+#define REQ_ENT 13
+#define REQ_MAX 64
 #define HDR_FIXED 8
 #define HDR_NODE 6
 #define TKEY 5					/* timer and wake key: id, arg2 big-endian */
@@ -142,7 +150,12 @@ struct CmcRun
 				off_reps,
 				off_tmr,
 				off_wak,
+				off_req,
+				off_hist,
 				ws;
+	int			nreq;			/* request log slots, 0 = no log */
+	int			req_base[CMC_MAX_NODES];	/* node's first slot, -1 = none */
+	uint8_t    *hpre;			/* history: the world before a step */
 	const CmcProp *inv[CMC_MAX_PROPS],
 			   *actp[CMC_MAX_PROPS],
 			   *wit[CMC_MAX_PROPS],
@@ -853,6 +866,100 @@ cmc_reply(const CmcWorld *w, int i, int *node, uint32_t *arg)
 }
 
 /* ------------------------------------------------------------------ */
+/* the request log and the history bytes (properties' view) */
+
+#define REQ(r, w, k)	((w) + (r)->off_req + (size_t) (k) * REQ_ENT)
+
+/*
+ * A property that asks for the request log on a run that keeps none
+ * would see no requests and pass; that is a model bug, so stop.
+ */
+static void
+need_log(const CmcRun *r, const char *fn)
+{
+	if (r->m->requests)
+		return;
+	fprintf(stderr, "cmc: %s() needs the request log: set CmcModel.requests"
+			" in model %s\n", fn, r->m->name);
+	exit(3);
+}
+
+/* slot k's node and request number */
+static void
+req_slot(const CmcRun *r, int k, int *node, int *num)
+{
+	int			n = r->nn - 1;
+
+	while (r->req_base[n] < 0 || r->req_base[n] > k)
+		n--;
+	*node = n;
+	*num = k - r->req_base[n];
+}
+
+static bool
+req_invoked(const CmcRun *r, const uint8_t *w, int k)
+{
+	int			n,
+				num;
+
+	req_slot(r, k, &n, &num);
+	return num < r->o.client_budget - CLIENTS(r, w, n);
+}
+
+int
+cmc_nrequests(const CmcWorld *w)
+{
+	int			c = 0;
+
+	need_log(w->run, "cmc_nrequests");
+	for (int k = 0; k < w->run->nreq; k++)
+		c += req_invoked(w->run, w->bytes, k);
+	return c;
+}
+
+/* the slot of the i-th invoked request, or -1 */
+static int
+req_index(const CmcWorld *w, int i, const char *fn)
+{
+	int			left = i;
+
+	need_log(w->run, fn);
+	for (int k = 0; k < w->run->nreq; k++)
+		if (req_invoked(w->run, w->bytes, k) && left-- == 0)
+			return k;
+	fprintf(stderr, "cmc: %s(): no request %d (see cmc_nrequests())\n", fn, i);
+	exit(3);
+}
+
+void
+cmc_request(const CmcWorld *w, int i, int *node, int *num, bool *answered,
+			uint32_t *answer)
+{
+	int			k = req_index(w, i, "cmc_request");
+	const uint8_t *e = REQ(w->run, w->bytes, k);
+
+	req_slot(w->run, k, node, num);
+	*answered = e[0] != 0;
+	*answer = (uint32_t) e[1] | ((uint32_t) e[2] << 8) |
+		((uint32_t) e[3] << 16) | ((uint32_t) e[4] << 24);
+}
+
+bool
+cmc_precedes(const CmcWorld *w, int i, int j)
+{
+	int			ki = req_index(w, i, "cmc_precedes"),
+				kj = req_index(w, j, "cmc_precedes");
+
+	return (REQ(w->run, w->bytes, kj)[5 + ki / 8] >> (ki % 8)) & 1;
+}
+
+const uint8_t *
+cmc_history(const CmcWorld *w)
+{
+	return w->run->m->history_size ? w->bytes + w->run->off_hist : NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /* run setup */
 
 void
@@ -868,6 +975,7 @@ cmc_options_default(CmcOptions *o)
 	o->reply_cap = 8;
 	o->timer_cap = CMC_MAX_TIMERS;
 	o->wake_cap = CMC_MAX_WAKES;
+	o->req_cap = 8;
 	o->net = CMC_NET_FIFO;
 	o->live_steps = 1000;
 	o->progress_s = 0;
@@ -974,6 +1082,8 @@ scratch_alloc(CmcRun *r)
 	r->detst = xmalloc(r->ss + 1);
 	r->deto = xmalloc(sizeof(CmcOut));
 	r->qw = xmalloc(r->ws);
+	if (r->m->history)
+		r->hpre = xmalloc(r->ws + r->m->history_size);
 	r->fw = xmalloc(r->ws);
 	r->fw0 = xmalloc(r->ws);
 	r->fwr = xmalloc(r->ws);
@@ -1000,6 +1110,7 @@ scratch_free(CmcRun *r)
 	free(r->ffp);
 	free(r->dfp);
 	free(r->fstep);
+	free(r->hpre);
 }
 
 static CmcRun *
@@ -1008,6 +1119,55 @@ run_reject(CmcRun *r, char *err, size_t errlen, const char *msg)
 	snprintf(err, errlen, "%s", msg);
 	cmc_run_free(r);
 	return NULL;
+}
+
+/*
+ * Lays out the request log and the history bytes after the environment
+ * (the last two regions of the layout comment).  Called with r->ws at the
+ * end of the environment, before padding.  Returns 0, or -1 with the
+ * reason in err: a log that would not fit --req-cap is refused here, so
+ * a run never drops a request.
+ */
+static int
+layout_history(CmcRun *r, char *err, size_t errlen)
+{
+	const CmcModel *m = r->m;
+
+	if (r->o.req_cap < 0 || r->o.req_cap > REQ_MAX)
+	{
+		snprintf(err, errlen, "--req-cap must be in 0..%d", REQ_MAX);
+		return -1;
+	}
+	if ((m->history_size == 0) != (m->history == NULL))
+	{
+		snprintf(err, errlen, "model %s: history_size and history() go together", m->name);
+		return -1;
+	}
+	if (m->requests && r->direct)
+	{
+		snprintf(err, errlen, "the request log needs actor mode");
+		return -1;
+	}
+	for (int n = 0; n < r->nn; n++)
+	{
+		r->req_base[n] = -1;
+		if (m->requests && (!r->core->clients || r->core->clients(r->cfg, n)))
+		{
+			r->req_base[n] = r->nreq;
+			r->nreq += r->o.client_budget;
+		}
+	}
+	if (r->nreq > r->o.req_cap)
+	{
+		snprintf(err, errlen, "the request log needs %d slots (nodes taking clients x"
+				 " --clients) and --req-cap is %d (raise it, at most %d)",
+				 r->nreq, r->o.req_cap, REQ_MAX);
+		return -1;
+	}
+	r->off_req = r->ws;
+	r->off_hist = r->off_req + (size_t) r->nreq * REQ_ENT;
+	r->ws = r->off_hist + m->history_size;
+	return 0;
 }
 
 CmcRun *
@@ -1087,6 +1247,11 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 		r->off_tmr = r->off_reps + (size_t) r->o.reply_cap * REP_ENT;
 		r->off_wak = r->off_tmr + (size_t) r->nn * r->o.timer_cap * TMR_ENT;
 		r->ws = r->off_wak + (size_t) r->nn * r->o.wake_cap * WAK_ENT;
+	}
+	if (layout_history(r, err, errlen) != 0)
+	{
+		cmc_run_free(r);
+		return NULL;
 	}
 	r->ws = (r->ws + 7) & ~(size_t) 7;
 	scratch_alloc(r);
@@ -1491,6 +1656,55 @@ conn_reset(CmcRun *r, uint8_t *w, int a, int b, bool notify_a)
 	RESETS(r, w, b) |= (uint8_t) (1u << a);
 }
 
+/*
+ * Request k is invoked now: every request answered so far precedes it.
+ * Its own answer can come in this very step, after it was invoked, so the
+ * row is filled before the core runs.
+ */
+static void
+req_open(CmcRun *r, uint8_t *w, int k)
+{
+	uint8_t    *row = REQ(r, w, k) + 5;
+
+	for (int j = 0; j < r->nreq; j++)
+		if (REQ(r, w, j)[0])
+			row[j / 8] |= (uint8_t) (1u << (j % 8));
+}
+
+/* A REPLY from node n names request o->req - 1 at n: record its answer. */
+static int
+req_answer(CmcRun *r, uint8_t *w, int n, const CmcOutput *o)
+{
+	uint32_t	num = o->req - 1;
+	uint8_t    *e;
+
+	if (!r->nreq || r->req_base[n] < 0)
+	{
+		snprintf(r->err, sizeof(r->err), "node %d's REPLY names request %u, and %s", n, num,
+				 r->m->requests ? "the node takes no clients" :
+				 "the model keeps no request log (CmcModel.requests)");
+		return -1;
+	}
+	if (num >= (uint32_t) (r->o.client_budget - CLIENTS(r, w, n)))
+	{
+		snprintf(r->err, sizeof(r->err), "node %d's REPLY names request %u, never invoked",
+				 n, num);
+		return -1;
+	}
+	e = REQ(r, w, r->req_base[n] + (int) num);
+	if (e[0])
+	{
+		snprintf(r->err, sizeof(r->err), "node %d answered request %u twice", n, num);
+		return -1;
+	}
+	e[0] = 1;
+	e[1] = (uint8_t) o->arg;
+	e[2] = (uint8_t) (o->arg >> 8);
+	e[3] = (uint8_t) (o->arg >> 16);
+	e[4] = (uint8_t) (o->arg >> 24);
+	return 0;
+}
+
 static int
 process_outputs(CmcRun *r, uint8_t *w, int n, const CmcOut *out)
 {
@@ -1607,6 +1821,8 @@ process_outputs(CmcRun *r, uint8_t *w, int n, const CmcOut *out)
 								 r->o.reply_cap);
 						return -1;
 					}
+					if (o->req && req_answer(r, w, n, o) != 0)
+						return -1;
 					e = REP(r, w, NREP(r, w));
 					e[0] = (uint8_t) n;
 					e[1] = (uint8_t) o->arg;
@@ -1635,7 +1851,8 @@ out_equal(const CmcOut *a, const CmcOut *b)
 				   *y = &b->o[i];
 
 		if (x->kind != y->kind || x->dst != y->dst || x->len != y->len ||
-			x->arg != y->arg || x->arg2 != y->arg2 || x->len > CMC_MSG_MAX ||
+			x->arg != y->arg || x->arg2 != y->arg2 || x->req != y->req ||
+			x->len > CMC_MSG_MAX ||
 			memcmp(x->body, y->body, x->len) != 0)
 			return false;
 	}
@@ -1745,9 +1962,46 @@ persist_apply(CmcRun *r, uint8_t *w, int n, const uint8_t *body, uint16_t len)
 	return 0;
 }
 
-/* Applies action a to w in place.  Returns 0, or -1 with r->err set. */
+static int	apply_step(CmcRun *r, uint8_t *w, CmcAction a);
+
+/*
+ * Applies action a to w in place.  Returns 0, or -1 with r->err set.  With
+ * a history variable, the model's history() then updates the ghost bytes
+ * from the worlds before and after the step; under the determinism gate
+ * it runs twice and must agree.
+ */
 int
 cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
+{
+	const CmcModel *m = r->m;
+	uint8_t    *ghost = w + r->off_hist;
+	uint8_t    *again = r->hpre + r->ws;
+	CmcWorld	pre = {r, r->hpre},
+				post = {r, w};
+
+	if (!m->history)
+		return apply_step(r, w, a);
+	memcpy(r->hpre, w, r->ws);
+	if (apply_step(r, w, a) != 0)
+		return -1;
+	m->history(&pre, a, &post, ghost);
+	if (r->o.det)
+	{
+		memcpy(again, ghost, m->history_size);
+		memcpy(ghost, r->hpre + r->off_hist, m->history_size);
+		m->history(&pre, a, &post, ghost);
+		if (memcmp(again, ghost, m->history_size) != 0)
+		{
+			snprintf(r->err, sizeof(r->err),
+					 "determinism gate: history() gave different bytes on a repeat");
+			return -1;
+		}
+	}
+	return 0;
+}
+
+static int
+apply_step(CmcRun *r, uint8_t *w, CmcAction a)
 {
 	CmcOut		out;
 	CmcEvent		ev;
@@ -1894,6 +2148,8 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 			ev.kind = CMC_EV_CLIENT;
 			ev.arg = (uint32_t) (r->o.client_budget - CLIENTS(r, w, n));
 			CLIENTS(r, w, n)--;
+			if (r->nreq)
+				req_open(r, w, r->req_base[n] + (int) ev.arg);
 			break;
 		case CMC_A_CRASH:
 			{
@@ -2400,6 +2656,37 @@ describe_tab(const uint8_t *t, int n, size_t es, FILE *f)
 	fprintf(f, "}");
 }
 
+/* the request log: each invoked request, its answer, what precedes it */
+static void
+describe_requests(CmcRun *r, const uint8_t *w, FILE *f)
+{
+	CmcWorld	W = {r, w};
+	int			nr;
+
+	if (!r->nreq)
+		return;
+	nr = cmc_nrequests(&W);
+	fprintf(f, "  requests:");
+	for (int i = 0; i < nr; i++)
+	{
+		int			nd,
+					num;
+		bool		ans;
+		uint32_t	arg;
+
+		cmc_request(&W, i, &nd, &num, &ans, &arg);
+		fprintf(f, " [%d] n%d#%d ", i, nd, num);
+		if (ans)
+			fprintf(f, "=%u", arg);
+		else
+			fprintf(f, "open");
+		for (int j = 0; j < nr; j++)
+			if (cmc_precedes(&W, j, i))
+				fprintf(f, " after[%d]", j);
+	}
+	fprintf(f, "\n");
+}
+
 static void
 describe_world(CmcRun *r, const uint8_t *w, FILE *f)
 {
@@ -2450,6 +2737,7 @@ describe_world(CmcRun *r, const uint8_t *w, FILE *f)
 		fprintf(f, " (n%d,%u)", nd, arg);
 	}
 	fprintf(f, "\n");
+	describe_requests(r, w, f);
 }
 
 void

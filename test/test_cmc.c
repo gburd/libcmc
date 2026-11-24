@@ -2869,9 +2869,19 @@ test_search_limits(void)
  * counts, the depth, the witness depths, the coverage and the very same
  * counterexample (the first in BFS order). */
 
+static void same_search_cfg(const CmcModel *m, const char *cfg, const char *const *props,
+							const CmcOptions *base, int workers, uint64_t queue_mem);
+
 static void
 same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
 			int workers, uint64_t queue_mem)
+{
+	same_search_cfg(m, "", props, base, workers, queue_mem);
+}
+
+static void
+same_search_cfg(const CmcModel *m, const char *cfg, const char *const *props,
+				const CmcOptions *base, int workers, uint64_t queue_mem)
 {
 	CmcOptions	o1 = *base,
 				o2 = *base;
@@ -2882,8 +2892,8 @@ same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
 
 	o2.workers = workers;
 	o2.queue_mem = queue_mem;
-	r1 = mkc(m, CMC_BFS, "", props, &o1);
-	r2 = mkc(m, CMC_BFS, "", props, &o2);
+	r1 = mkc(m, CMC_BFS, cfg, props, &o1);
+	r2 = mkc(m, CMC_BFS, cfg, props, &o2);
 	cmc_check(r1, &a);
 	cmc_check(r2, &b);
 	if (getenv("CMC_VERBOSE"))
@@ -3433,6 +3443,403 @@ test_cli_front_ends(void)
 
 /* CMC_VERSION is MAJOR.MINOR.PATCH: the release workflows and the flake
  * read it, and the tag must be v followed by it */
+/* ---- the request log and linearizability (2.4) ------------------------ */
+
+/*
+ * A register over two nodes: node 0 takes writes (request r writes r + 1),
+ * node 1 takes reads and answers its copy.  Node 0 sends the value to
+ * node 1; the correct core answers the write only when node 1 acks it,
+ * lin_stale_step answers at once, so a read invoked after the write's
+ * answer can still return the old value.
+ */
+static void
+lin_step_common(int node, uint8_t *s, const CmcEvent *ev, CmcOut *out, bool stale)
+{
+	CmcOutput  *o;
+
+	if (node == 0 && ev->kind == CMC_EV_CLIENT)
+	{
+		s[0] = (uint8_t) (ev->arg + 1);
+		s[1] = (uint8_t) ev->arg;
+		o = cmc_out_push(out, CMC_OUT_SEND);
+		o->dst = 1;
+		o->len = 1;
+		o->body[0] = s[0];
+		if (stale)
+		{
+			o = cmc_out_push(out, CMC_OUT_REPLY);
+			o->arg = s[0];
+			o->req = ev->arg + 1;
+		}
+	}
+	else if (node == 1 && ev->kind == CMC_EV_RECV)
+	{
+		s[0] = ev->body[0];
+		o = cmc_out_push(out, CMC_OUT_SEND);
+		o->dst = 0;
+		o->len = 1;
+		o->body[0] = s[0];
+	}
+	else if (node == 0 && ev->kind == CMC_EV_RECV && !stale && ev->body[0] == s[0])
+	{
+		o = cmc_out_push(out, CMC_OUT_REPLY);
+		o->arg = s[0];
+		o->req = (uint32_t) s[1] + 1;
+	}
+	else if (node == 1 && ev->kind == CMC_EV_CLIENT)
+	{
+		o = cmc_out_push(out, CMC_OUT_REPLY);
+		o->arg = s[0];
+		o->req = ev->arg + 1;
+	}
+}
+
+static void
+lin_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	lin_step_common(node, sv, ev, out, false);
+}
+
+static void
+lin_stale_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	lin_step_common(node, sv, ev, out, true);
+}
+
+/*
+ * Linearizable reads of a register whose writes only grow: a read that
+ * was invoked after a write was answered returns at least that write.
+ */
+static bool
+lin_reads(const CmcWorld *w, CmcWhy *why)
+{
+	int			nr = cmc_nrequests(w);
+
+	for (int i = 0; i < nr; i++)
+		for (int j = 0; j < nr; j++)
+		{
+			int			ni,
+						nj,
+						ri,
+						rj;
+			bool		ai,
+						aj;
+			uint32_t	vi,
+						vj;
+
+			cmc_request(w, i, &ni, &ri, &ai, &vi);
+			cmc_request(w, j, &nj, &rj, &aj, &vj);
+			if (ni == 0 && nj == 1 && aj && cmc_precedes(w, i, j) && vj < vi)
+			{
+				cmc_why(why, "write %d answered %u, then read %d returned %u", ri, vi, rj, vj);
+				return false;
+			}
+		}
+	return true;
+}
+
+static const CmcProp lin_props[] = {CMC_INVARIANT(LinReads, lin_reads)};
+static const CmcCore lin_core = {
+	.name = "lin", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = two, .init = zero8, .step = lin_step,
+};
+static const CmcCore lin_stale_core = {
+	.name = "lin_stale", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = two, .init = zero8, .step = lin_stale_step,
+};
+static const CmcModel lin_model = {"lin", &lin_core, lin_props, 1, 0, .requests = true};
+static const CmcModel lin_stale_model = {
+	"lin_stale", &lin_stale_core, lin_props, 1, 0, .requests = true,
+};
+
+/*
+ * Reply rules of the request log, by cfg mode: 1 names a request never
+ * invoked, 2 answers one request twice, 3 replies from node 1, which
+ * takes no clients.
+ */
+static int
+rq_cfg_set(void *cfg, const char *k, const char *v)
+{
+	if (strcmp(k, "mode") || v[0] < '1' || v[0] > '3' || v[1])
+		return -1;
+	((uint8_t *) cfg)[0] = (uint8_t) (v[0] - '0');
+	return 0;
+}
+
+static void
+rq_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	int			mode = ((const uint8_t *) cfg)[0];
+
+	(void) sv;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		cmc_out_push(out, CMC_OUT_REPLY)->req = mode == 1 ? 5 : ev->arg + 1;
+		if (mode == 2)
+			cmc_out_push(out, CMC_OUT_REPLY)->req = ev->arg + 1;
+		if (mode == 3)
+			cmc_out_push(out, CMC_OUT_SEND)->dst = 1;
+	}
+	else if (node == 1 && ev->kind == CMC_EV_RECV)
+		cmc_out_push(out, CMC_OUT_REPLY)->req = 1;
+}
+
+static const CmcCore rq_core = {
+	.name = "rq", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = rq_cfg_set, .nnodes = two, .init = zero8, .step = rq_step,
+	.clients = first_only,
+};
+static const CmcModel rq_model = {"rq", &rq_core, nd_props, 1, 0, .requests = true};
+static const CmcModel rq_nolog_model = {"rq_nolog", &rq_core, nd_props, 1, 0};
+static const CmcModel lin_nolog_model = {"lin_nolog", &lin_core, lin_props, 1, 0};
+
+/* the verdict and reason of model m under cfg, BFS, default bounds */
+static CmcVerdict
+cfg_verdict(const CmcModel *m, const char *cfg, CmcOptions *o, char *why, size_t wlen,
+			uint64_t *distinct)
+{
+	CmcRun	   *r = mkc(m, CMC_BFS, cfg, NULL, o);
+	CmcResult	res;
+	CmcVerdict	v;
+
+	if (!r)
+		return CMC_ERROR;
+	cmc_check(r, &res);
+	v = res.verdict;
+	snprintf(why, wlen, "%s", res.why);
+	if (distinct)
+		*distinct = res.distinct;
+	cmc_result_free(&res);
+	cmc_run_free(r);
+	return v;
+}
+
+/* ---- history variables (2.4) ------------------------------------------ */
+
+/*
+ * One node: a CLIENT chooses (s[0] = 1) and arms timer 0.  In the buggy
+ * core the timer un-chooses.  A state invariant cannot tell "never
+ * chosen" from "chosen, then lost"; the history byte can.
+ */
+static void
+hist_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	uint8_t    *s = sv;
+
+	(void) node;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		s[0] = 1;
+		cmc_out_push(out, CMC_OUT_SET_TIMER)->arg = 0;
+	}
+	else if (ev->kind == CMC_EV_TIMER && ((const uint8_t *) cfg)[0])
+		s[0] = 0;
+}
+
+static int
+hist_cfg_set(void *cfg, const char *k, const char *v)
+{
+	if (strcmp(k, "bug") || strcmp(v, "1"))
+		return -1;
+	((uint8_t *) cfg)[0] = 1;
+	return 0;
+}
+
+static void
+hist_update(const CmcWorld *pre, CmcAction a, const CmcWorld *post, uint8_t *ghost)
+{
+	(void) a;
+	ghost[0] = (uint8_t) (cmc_history(pre)[0] | ((const uint8_t *) cmc_node(post, 0))[0]);
+}
+
+static int	hist_calls;
+
+static void
+hist_nondet(const CmcWorld *pre, CmcAction a, const CmcWorld *post, uint8_t *ghost)
+{
+	(void) pre;
+	(void) a;
+	(void) post;
+	ghost[0] = (uint8_t) (++hist_calls & 1);
+}
+
+static bool
+stays_chosen(const CmcWorld *w, CmcWhy *why)
+{
+	if (cmc_history(w)[0] && !((const uint8_t *) cmc_node(w, 0))[0])
+	{
+		cmc_why(why, "chosen once, not chosen now");
+		return false;
+	}
+	return true;
+}
+
+static const CmcProp hist_props[] = {CMC_INVARIANT(StaysChosen, stays_chosen)};
+static const CmcCore hist_core = {
+	.name = "hist", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = hist_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = hist_step,
+};
+static const CmcModel hist_model = {
+	"hist", &hist_core, hist_props, 1, 0, .history_size = 1, .history = hist_update,
+};
+static const CmcModel hist_nondet_model = {
+	"hist_nondet", &hist_core, nd_props, 1, 0, .history_size = 1, .history = hist_nondet,
+};
+
+/* a call that must end the process with status 3 (a model bug) */
+static void
+expect_exit3(const CmcModel *m)
+{
+	pid_t		pid;
+	int			st = 0;
+
+	fflush(NULL);
+	pid = fork();
+	if (pid == 0)
+	{
+		CmcOptions	o;
+		char		why[512];
+
+		cmc_options_default(&o);
+		o.client_budget = 1;
+		if (!freopen("/dev/null", "w", stderr))
+			exit(1);
+		cfg_verdict(m, "", &o, why, sizeof(why), NULL);
+		exit(0);
+	}
+	CHECK(pid > 0 && waitpid(pid, &st, 0) == pid);
+	CHECK(WIFEXITED(st) && WEXITSTATUS(st) == 3);
+}
+
+static void
+test_request_log(void)
+{
+	CmcOptions	o;
+	char		why[512],
+				err[256];
+	uint64_t	nd = 0;
+	CmcRun	   *r;
+	CmcResult	res;
+	char	   *text = NULL;
+	size_t		tlen = 0;
+	FILE	   *f;
+
+	/* a correct register passes; a stale read after an answered write is caught */
+	cmc_options_default(&o);
+	o.client_budget = 2;
+	CHECK(cfg_verdict(&lin_model, "", &o, why, sizeof(why), &nd) == CMC_PASS && nd > 1);
+	cmc_options_default(&o);
+	o.client_budget = 2;
+	CHECK(cfg_verdict(&lin_stale_model, "", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "then read"));
+	/* the log is the same with four workers, trace included */
+	same_search_cfg(&lin_stale_model, "", NULL, &o, 4, 0);
+	same_search_cfg(&lin_model, "", NULL, &o, 4, 0);
+	/* the trace shows the log: answers and the precedence */
+	cmc_options_default(&o);
+	o.client_budget = 1;
+	r = mkc(&lin_stale_model, CMC_BFS, "", NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_VIOLATION && res.trace_len == 3);
+	f = open_memstream(&text, &tlen);
+	cmc_print_trace(r, res.trace, res.trace_len - 1, f);
+	fclose(f);
+	CHECK(strstr(text, "requests: [0] n0#0 =1 [1] n1#0 =0 after[0]") != NULL);
+	free(text);
+	cmc_result_free(&res);
+	cmc_run_free(r);
+
+	/* reply rules: each is an engine error, never a silent drop */
+	cmc_options_default(&o);
+	CHECK(cfg_verdict(&rq_model, "mode=1", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "never invoked"));
+	CHECK(cfg_verdict(&rq_model, "mode=2", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "twice"));
+	CHECK(cfg_verdict(&rq_model, "mode=3", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "takes no clients"));
+	CHECK(cfg_verdict(&rq_nolog_model, "mode=2", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "keeps no request log"));
+	/* a property reading a log the model does not keep stops the run */
+	expect_exit3(&lin_nolog_model);
+
+	/* the log must fit --req-cap: 2 nodes x 5 clients > 8 */
+	cmc_options_default(&o);
+	o.client_budget = 5;
+	o.quiet = true;
+	CHECK(!cmc_run_new(&lin_model, "", NULL, &o, err, sizeof(err)) &&
+		  strstr(err, "needs 10 slots"));
+	o.req_cap = 10;
+	r = cmc_run_new(&lin_model, "", NULL, &o, err, sizeof(err));
+	CHECK(r != NULL);
+	cmc_run_free(r);
+	o.req_cap = 65;
+	CHECK(!cmc_run_new(&lin_model, "", NULL, &o, err, sizeof(err)) &&
+		  strstr(err, "--req-cap must be"));
+	cmc_options_default(&o);
+	o.quiet = true;
+	CHECK(!cmc_run_new(&(CmcModel) {"cal", &cap_core, nd_props, 1, 0, .requests = true},
+					   "", NULL, &o, err, sizeof(err)) && strstr(err, "actor mode"));
+	CLI(3, "--req-cap needs a number", "--model", "toy", "--all-props", "--req-cap", "65");
+}
+
+static void
+test_history(void)
+{
+	CmcOptions	o;
+	char		why[512],
+				err[256];
+	uint64_t	n0 = 0,
+				n1 = 0;
+	CmcRun	   *r;
+	uint8_t    *w;
+
+	cmc_options_default(&o);
+	CHECK(cfg_verdict(&hist_model, "", &o, why, sizeof(why), &n0) == CMC_PASS);
+	CHECK(cfg_verdict(&hist_model, "bug=1", &o, why, sizeof(why), &n1) == CMC_VIOLATION &&
+		  strstr(why, "chosen once"));
+	/* the ghost is part of the state: chosen-then-lost differs from never chosen */
+	CHECK(n0 == 3);
+	/* history() runs in every worker, with the same result */
+	same_search_cfg(&hist_model, "", NULL, &o, 4, 0);
+	same_search_cfg(&hist_model, "bug=1", NULL, &o, 4, 0);
+	cmc_options_default(&o);
+	o.search = CMC_SIMULATE;
+	o.walks = 20;
+	r = mkc(&hist_model, CMC_SIMULATE, "bug=1", NULL, &o);
+	{
+		CmcResult	res;
+
+		cmc_check(r, &res);
+		CHECK(res.verdict == CMC_VIOLATION);
+		cmc_result_free(&res);
+	}
+	cmc_run_free(r);
+	/* history() runs twice under --det and must agree */
+	cmc_options_default(&o);
+	o.det = true;
+	CHECK(cfg_verdict(&hist_nondet_model, "", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "history()"));
+	/* zero at init; NULL for a model with none */
+	cmc_options_default(&o);
+	r = mkc(&hist_model, CMC_BFS, "", NULL, &o);
+	w = calloc(1, cmc_world_size(r));
+	cmc_world_init(r, w);
+	CHECK(cmc_history(&(CmcWorld) {r, w})[0] == 0);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) == 0 &&
+		  cmc_history(&(CmcWorld) {r, w})[0] == 1);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) != 0);
+	free(w);
+	cmc_run_free(r);
+	r = mkc(&nd_model, CMC_BFS, "", NULL, &o);
+	CHECK(cmc_history(&(CmcWorld) {r, NULL}) == NULL);
+	cmc_run_free(r);
+	/* a size with no hook (or a hook with no size) is refused */
+	CHECK(!cmc_run_new(&(CmcModel) {"h", &hist_core, nd_props, 1, 0, .history_size = 1},
+					   "", NULL, &o, err, sizeof(err)) && strstr(err, "go together"));
+}
+
 static void
 test_version(void)
 {
@@ -3485,6 +3892,8 @@ main(void)
 	test_cli_input();
 	test_cli_runs();
 	test_cli_front_ends();
+	test_request_log();
+	test_history();
 	test_version();
 	if (failures)
 	{

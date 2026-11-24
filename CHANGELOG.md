@@ -31,6 +31,24 @@ change the API in `include/cmc.h`; this file says when it does.
   expanded and the run is INCOMPLETE.  Messages, clients, flushes and
   wakes take no time.  Replay files record the drift on a `time` line
   (API addition).
+- The request log (docs/plans/2.4-library-engine.md item 4).  A model
+  that sets `CmcModel.requests` keeps, per client request, whether it was
+  answered, the answer, and which requests were answered before it was
+  invoked; a `CMC_OUT_REPLY` names the request it answers in the new
+  `CmcOutput.req` (1 + the request number, 0 = none).  Properties read
+  it with `cmc_nrequests()`, `cmc_request()` and `cmc_precedes()`.  The
+  log holds no step numbers, so paths to the same state still merge.
+  `CmcOptions.req_cap` (`--req-cap`, default 8, at most 64) bounds it; a
+  log that would not fit is refused before the search.  API: additive;
+  with `requests` unset and `req` zero, worlds and counts are those of
+  2.3.
+- History variables: `CmcModel.history_size` bytes in the world, zero
+  at init, updated by `CmcModel.history(pre, action, post, ghost)` after
+  every step and read with `cmc_history()`.  Cores never see them.
+  `test/pgchain`'s copy gains a `paxos_hist` model whose HistChosen
+  invariant (the first value chosen at a slot stays safe in every later
+  state) catches pg_chain's Paxos bugs 107 and 110 (`make
+  check-pgchain-hist`).  API: additive.
 - The in-process engine's BFS (`cmc --model`, `cmc_check()`) keeps a
   32-byte record per state (fingerprint, parent record number, action)
   in 256 shards whose index grows without a second copy, instead of a
