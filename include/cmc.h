@@ -181,6 +181,9 @@ typedef struct CmcCore
 	/* optional: does this node take CLIENT events (from cfg, never state)?
 	 * NULL = every node does. */
 	int			(*clients) (const void *cfg, int node);
+	/* optional: may this node crash (from cfg, never state)?  NULL = every
+	 * node may.  CMC_A_CRASH is never offered for a node it excludes. */
+	int			(*crashable) (const void *cfg, int node);
 } CmcCore;
 
 /* ---- what properties see ------------------------------------------- */

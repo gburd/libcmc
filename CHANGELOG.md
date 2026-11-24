@@ -5,6 +5,10 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- `CmcCore.crashable(cfg, node)`, like `clients()`: from the settings
+  only, it says which nodes may crash; `CRASH` is not offered for a
+  node it excludes.  NULL keeps every node crashable (API addition).
+
 ## 2.3.1 (2026-11-24)
 
 The release of 2.3.0 stopped before publishing: its tag's CI ran the

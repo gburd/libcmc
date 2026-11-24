@@ -217,6 +217,7 @@ in the kernel, untouched.
 | the search on the HC calibration core | exact at the instances run | 22 rows against TLC: verdicts and distinct-state counts | `make check-calibration`, `check-hc-bugs` |
 | determinism of a core | checked | `--det` runs every step twice | toy_gate |
 | uninitialised reads in a core | checked | MemorySanitizer | `make check-msan` |
+| a node that never crashes (`crashable()`) | exact | read from cfg only; `CRASH` is never offered for an excluded node, and applying one is refused | test_cmc test_crashable |
 | crash, simulation, replay, the fair schedule | exact | a crash clears the node's self-channel; simulation and replay check every state; an armed timer is never starved (Phase 2 of the plan) | test_cmc |
 
 ## Examples

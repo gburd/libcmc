@@ -804,6 +804,13 @@ fifo_open(const CmcRun *r, const uint8_t *w, int dst, int src)
  * get CONN_RESET (a crashed end gets none: it is a new process). */
 static void conn_reset(CmcRun *r, uint8_t *w, int a, int b, bool notify_a);
 
+/* may node n crash?  From cfg only, like clients() */
+static inline bool
+node_crashable(const CmcRun *r, int n)
+{
+	return !r->core->crashable || r->core->crashable(r->cfg, n);
+}
+
 /*
  * Enabled actions.  Actor mode reads ONLY the environment part of the
  * world (what cores emitted, and budgets), never core state.
@@ -868,7 +875,7 @@ cmc_enabled(CmcRun *r, const uint8_t *w, CmcAction *acts, int max)
 				PUSH(CMC_ACT(CMC_A_RESET, n, p, 0, 0));
 		if (CLIENTS(r, w, n))
 			PUSH(CMC_ACT(CMC_A_CLIENT, n, 0, 0, 0));
-		if (CRASHES(r, w))
+		if (CRASHES(r, w) && node_crashable(r, n))
 		{
 			/* docs/research/02 B3: j of the k pending persists reached disk */
 			int			kmax = r->core->durable_size ? NPERS(r, w, n) : 0;
@@ -1323,7 +1330,7 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 				int			j = (int) CMC_ACT_B(a);
 
 				if (n >= r->nn || !CRASHES(r, w) || j > NPERS(r, w, n) ||
-					(j > 0 && !ds))
+					(j > 0 && !ds) || !node_crashable(r, n))
 					goto bad;
 				CRASHES(r, w)--;
 

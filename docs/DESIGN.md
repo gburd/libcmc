@@ -253,7 +253,7 @@ environment part of the world:
 | `FLUSH(n)` | node n has a pending persist; the oldest completes first |
 | `WAKE(n, w)` | node n emitted `WAKE(w)` |
 | `CLIENT(n)` | node n has client budget left (and `clients(cfg, n)` allows it) |
-| `CRASH(n, j)` | crash budget left; j = 0..k of n's k pending persists reach disk first |
+| `CRASH(n, j)` | crash budget left (and `crashable(cfg, n)` allows it); j = 0..k of n's k pending persists reach disk first |
 | `RESET(n, p)` | a crash or drop left node n a pending `CONN_RESET` from peer p |
 
 Applying an action makes one `step()` call on one node with the matching

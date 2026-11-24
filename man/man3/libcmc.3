@@ -157,6 +157,7 @@ typedef struct CmcCore {
 	void	(*describe_action)(const void *cfg, CmcAction a,
 		    FILE *f);			/* calibration only */
 	int	(*clients)(const void *cfg, int node);	/* optional */
+	int	(*crashable)(const void *cfg, int node);	/* optional */
 } CmcCore;
 .Ed
 .Pp
@@ -198,6 +199,12 @@ must supply
 .Fn clients ,
 if set, says which nodes take client requests; it reads the settings,
 never the state.
+.Fn crashable ,
+if set, says which nodes may crash, also from the settings alone:
+.Dv CMC_A_CRASH
+is never offered for a node it excludes.
+.Dv NULL
+means every node may crash.
 .Fn describe
 and
 .Fn describe_msg

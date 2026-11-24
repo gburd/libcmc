@@ -982,6 +982,53 @@ static const CmcCore e10_core = {
 };
 static const CmcModel e10_model = {"e10", &e10_core, e10_props, 1, 0};
 
+/* crashable(): nodes in e10_crash_mask may crash.  With the server
+ * excluded, a crash can no longer lose the request. */
+static unsigned e10_crash_mask;
+
+static int
+e10_crashable(const void *c, int n)
+{
+	(void) c;
+	return (e10_crash_mask >> n) & 1;
+}
+
+static const CmcCore e10s_core = {
+	.name = "e10s", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = two, .init = zero8, .step = e10_step,
+	.clients = e10_clients, .crashable = e10_crashable,
+};
+static const CmcModel e10s_model = {"e10s", &e10s_core, e10_props, 1, 0};
+
+static void
+test_crashable(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	uint8_t    *w;
+	CmcAction	a[CMC_MAX_ACTIONS];
+	int			na;
+	char		prop[64];
+
+	cmc_options_default(&o);
+	o.crash_budget = 1;
+	e10_crash_mask = 1;
+	CHECK(verdict_of(&e10s_model, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) == CMC_VIOLATION);
+	e10_crash_mask = 0;
+	CHECK(verdict_of(&e10s_model, &o, NULL, prop, sizeof(prop), NULL, 0, NULL) == CMC_PASS);
+	e10_crash_mask = 2;
+	r = mkc(&e10s_model, CMC_BFS, "", NULL, &o);
+	w = calloc(1, cmc_world_size(r));
+	cmc_world_init(r, w);
+	na = cmc_enabled(r, w, a, CMC_MAX_ACTIONS);
+	for (int i = 0; i < na; i++)
+		CHECK(CMC_ACT_KIND(a[i]) != CMC_A_CRASH || CMC_ACT_A(a[i]) == 1);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CRASH, 0, 0, 0, 0)) != 0);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CRASH, 1, 0, 0, 0)) == 0);
+	free(w);
+	cmc_run_free(r);
+}
+
 static void
 test_b5_crash_resets_connections(void)
 {
@@ -2756,6 +2803,7 @@ main(void)
 	test_b3_crash_keeps_disk_write();
 	test_b4_flushed_cannot_write_durable();
 	test_b5_crash_resets_connections();
+	test_crashable();
 	test_m1_large_durable();
 	test_m3_output_overflow();
 	test_m4_replay_conflict();
