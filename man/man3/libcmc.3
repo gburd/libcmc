@@ -660,12 +660,33 @@ typedef struct CmcOptions {
 	bool	symmetry;	/* symmetry reduction (the core's hooks) */
 	bool	sym_check;	/* check the symmetry obligations */
 	FILE	*out;		/* progress output; NULL: stdout */
+	int	workers;	/* BFS threads; 0 or 1: one */
+	uint64_t queue_mem;	/* BFS queue bytes in memory before it
+				    spills to files; 0: no limit */
 } CmcOptions;
 .Ed
 .Pp
 The fields are the options of
 .Xr cmc 1 ,
 which gives their defaults.
+.Va workers
+and
+.Va queue_mem
+are
+.Fl -workers
+and
+.Fl -queue-mem
+(in bytes here); with more than one worker the engine calls the step,
+enabled-action and property functions from several threads at once.
+The queue spills to files in the directory named by the environment
+variable
+.Ev CMC_SCRATCH ,
+else
+.Ev TMPDIR ;
+.Fn cmc_run_new
+refuses a
+.Va queue_mem
+with neither set.
 .Ss Running a check
 .Fn cmc_main
 parses the command line described in

@@ -374,6 +374,13 @@ typedef struct CmcOptions
 	bool		sym_check;		/* check the symmetry obligations on every
 								 * expanded world (needs symmetry) */
 	FILE	   *out;
+	/* BFS only: 0 or 1 = one worker; more expand each batch in parallel
+	 * threads, with the same result (cores and properties must then be
+	 * reentrant: no writable globals) */
+	int			workers;
+	/* BFS only: queue bytes kept in memory before chunks spill to files
+	 * in $CMC_SCRATCH (or $TMPDIR); 0 = never spill */
+	uint64_t	queue_mem;
 } CmcOptions;
 
 typedef enum CmcVerdict

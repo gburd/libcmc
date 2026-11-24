@@ -85,6 +85,8 @@
 .Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
+.Op Fl -workers Ar n
+.Op Fl -queue-mem Ar mb
 .Op Fl -symmetry Cm on | off
 .Op Fl -sym-check
 .Nm
@@ -896,6 +898,37 @@ bounds.
 .Pp
 Going past a cap is reported as an engine error, never silently
 truncated.
+.Ss Search resources
+These options change how breadth-first search uses the machine, never
+what it reports: the verdict, the counts, the depth, the witness depths,
+the coverage and the counterexample are those of one worker in memory.
+Other searches refuse them.
+.Bl -tag -width Ds
+.It Fl -workers Ar n
+Expand each batch of queued states in
+.Ar n
+threads, from 1 to 256.
+The counterexample is still the first one in breadth-first order: the
+violation at the lowest depth, then at the earliest queued state, then
+at its earliest action.
+The cores and the properties must then be reentrant, as a pure step
+function is; a core or property that writes a global gives wrong
+results.
+Default 1.
+.It Fl -queue-mem Ar mb
+Keep at most about
+.Ar mb
+MiB of the search queue in memory, and write the rest in chunks to files
+in
+.Ev CMC_SCRATCH ,
+or
+.Ev TMPDIR
+when that is unset, so a search that outgrows memory slows down instead
+of failing.
+With neither set the option is refused; a spill file that cannot be
+written or read stops the search with exit 3.
+Default: no limit.
+.El
 .Ss Output
 .Bl -tag -width Ds
 .It Fl -trace-out Ar file
@@ -919,6 +952,12 @@ distinct states it found.
 .El
 .Sh ENVIRONMENT
 .Bl -tag -width Ds
+.It Ev CMC_SCRATCH , Ev TMPDIR
+Where
+.Fl -queue-mem
+spills the search queue, in files named
+.Pa cmc-queue-PID-N ,
+which the search removes.
 .It Ev CMC_PRELOAD
 The path of
 .Pa cmc-preload.so ,

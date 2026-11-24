@@ -35,13 +35,20 @@
  */
 #include "cmc.h"
 
+#include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <threads.h>
 #include <time.h>
+#include <unistd.h>
 
 #define CMC_CFG_MAX 256
+#define CMC_MAX_WORKERS 256
+#define CMC_STR_(x) #x
+#define CMC_STR(x) CMC_STR_(x)
 #define CMC_MAX_PROPS 64
 
 #define MSG_KEY (3 + CMC_MSG_MAX)
@@ -66,12 +73,9 @@
 typedef struct Ent
 {
 	uint64_t	fp0,
-				fp1,
-				p0,
-				p1;
-	CmcAction	act;
+				fp1;
 	uint32_t	depth;
-	uint32_t	flags;			/* 1 = used, 2 = root */
+	uint32_t	flags;			/* 1 = used */
 } Ent;
 
 typedef struct Table
@@ -81,21 +85,57 @@ typedef struct Table
 	uint64_t	n;
 } Table;
 
+#define REC_ROOT UINT64_MAX
+#define REC_BITS 40
+#define REC_MASK ((UINT64_C(1) << REC_BITS) - 1)
+#define NSHARD 256
+
+typedef struct Rec
+{
+	uint64_t	fp0,
+				fp1,
+				parent;			/* record number, REC_ROOT for the initial state */
+	CmcAction	act;			/* the action from the parent */
+} Rec;
+
+/* One shard of the state store: the records whose fingerprint falls in
+ * it, and their index.  A record's number is local << 8 | shard. */
+typedef struct Shard
+{
+	Rec		   *rec;
+	uint64_t	n,				/* records */
+				rcap;			/* records allocated */
+	uint64_t   *slot;			/* 0 = empty, else tag << REC_BITS | (local + 1) */
+	uint64_t	cap;			/* slots, a power of two */
+} Shard;
+
+typedef struct Store
+{
+	Shard	   *sh;				/* NSHARD shards */
+} Store;
+
+/* A chunk of BFS queue entries {record number, world}.  A chunk whose
+ * data has been spilled has data == NULL and its entries in file. */
 typedef struct QChunk
 {
 	struct QChunk *next;
 	size_t		head,
 				tail;
-	uint8_t		data[];
+	uint8_t    *data;
+	char	   *file;
 } QChunk;
 
 typedef struct Queue
 {
 	QChunk	   *first,
 			   *last;
-	size_t		per;			/* worlds per chunk */
-	size_t		ws;
+	size_t		per;			/* entries per chunk */
+	size_t		esz;			/* bytes per entry: 8 + world size */
 	uint64_t	n;
+	uint64_t	mem,			/* chunk bytes resident */
+				budget;			/* spill beyond this; 0 = never */
+	const char *dir;			/* where spill files go */
+	uint64_t	nfile;			/* spill files written, for unique names */
 } Queue;
 
 struct CmcRun
@@ -131,7 +171,8 @@ struct CmcRun
 				nqui,
 				nev;
 	int			wit_depth[CMC_MAX_PROPS];
-	Table		t;
+	Table		t;			/* DFS: depth per state */
+	Store		st;				/* BFS: records and parents */
 	/* scratch, sized per run (docs/research/02 M1) */
 	uint8_t    *dur,			/* durable bytes before a step */
 			   *detst,			/* determinism gate: state copy */
@@ -205,6 +246,18 @@ xmalloc(size_t n)
 {
 	void	   *p = malloc(n);
 
+	if (!p)
+	{
+		fprintf(stderr, "cmc: out of memory (%zu bytes)\n", n);
+		exit(3);
+	}
+	return p;
+}
+
+static void *
+xrealloc(void *p, size_t n)
+{
+	p = realloc(p, n);
 	if (!p)
 	{
 		fprintf(stderr, "cmc: out of memory (%zu bytes)\n", n);
@@ -387,45 +440,228 @@ table_grow(Table *t)
 }
 
 /* ------------------------------------------------------------------ */
-/* FIFO of worlds */
+/*
+ * The BFS state store: records (fingerprint, parent record, action) and
+ * an index of them by fingerprint, split into NSHARD shards by the low
+ * byte of fp0 so that parallel workers can insert into disjoint shards.
+ * An index slot holds a local record number and 24 bits of the
+ * fingerprint, so most probes that miss never touch a record.  Growing a
+ * shard's index frees the old one first and rebuilds it from the records,
+ * so unlike Table two copies of the index are never resident at once;
+ * only one shard grows at a time per worker, so the transient is a
+ * fraction of the store.  A trace is the parent chain from a record back
+ * to the root.
+ */
 
-static void
-q_init(Queue *q, size_t ws)
+static inline Rec *
+store_rec(const Store *st, uint64_t k)
 {
-	memset(q, 0, sizeof(*q));
-	q->ws = ws;
-	q->per = (1u << 22) / ws + 1;
+	return &st->sh[k % NSHARD].rec[k / NSHARD];
 }
 
 static void
-q_push(Queue *q, const uint8_t *w)
+shard_index(Shard *h, uint64_t cap)
+{
+	uint64_t	mask = cap - 1;
+
+	free(h->slot);
+	h->slot = xcalloc(cap, sizeof(uint64_t));
+	h->cap = cap;
+	for (uint64_t k = 0; k < h->n; k++)
+	{
+		const Rec  *e = &h->rec[k];
+		uint64_t	i = (e->fp1 >> 8) & mask;
+
+		while (h->slot[i])
+			i = (i + 1) & mask;
+		h->slot[i] = (e->fp1 >> REC_BITS) << REC_BITS | (k + 1);
+	}
+}
+
+static void
+store_init(Store *st)
+{
+	st->sh = xcalloc(NSHARD, sizeof(Shard));
+}
+
+static void
+store_free(Store *st)
+{
+	if (st->sh)
+		for (int i = 0; i < NSHARD; i++)
+		{
+			free(st->sh[i].rec);
+			free(st->sh[i].slot);
+		}
+	free(st->sh);
+	st->sh = NULL;
+}
+
+/* Returns the slot of shard h for fingerprint (f0, f1): the one holding
+ * it, or the empty one where it would go. */
+static uint64_t
+shard_probe(const Shard *h, uint64_t f0, uint64_t f1)
+{
+	uint64_t	mask = h->cap - 1,
+				tag = (f1 >> REC_BITS) << REC_BITS;
+
+	for (uint64_t i = (f1 >> 8) & mask;; i = (i + 1) & mask)
+	{
+		uint64_t	v = h->slot[i];
+		const Rec  *e;
+
+		if (!v)
+			return i;
+		if ((v & ~REC_MASK) != tag)
+			continue;
+		e = &h->rec[(v & REC_MASK) - 1];
+		if (e->fp0 == f0 && e->fp1 == f1)
+			return i;
+	}
+}
+
+/*
+ * Returns the record number of fingerprint (f0, f1), adding it with
+ * parent and act when it is new (*isnew).  Only the worker that owns
+ * shard f0 % NSHARD may call this for it.  Note that a slot numbers
+ * 2^40 records per shard, 32 TiB of them, so memory runs out (an exit 3
+ * from xrealloc()) long before the numbers do.
+ */
+static uint64_t
+store_add(Store *st, uint64_t f0, uint64_t f1, uint64_t parent, CmcAction act, bool *isnew)
+{
+	Shard	   *h = &st->sh[f0 % NSHARD];
+	uint64_t	i;
+	Rec		   *e;
+
+	if ((h->n + 1) * 4 > h->cap * 3)
+		shard_index(h, h->cap ? h->cap * 2 : 256);
+	i = shard_probe(h, f0, f1);
+	*isnew = h->slot[i] == 0;
+	if (!*isnew)
+		return ((h->slot[i] & REC_MASK) - 1) * NSHARD + f0 % NSHARD;
+	if (h->n == h->rcap)
+	{
+		h->rcap = h->rcap ? h->rcap + h->rcap / 2 : 1024;
+		h->rec = xrealloc(h->rec, sizeof(Rec) * h->rcap);
+	}
+	e = &h->rec[h->n];
+	e->fp0 = f0;
+	e->fp1 = f1;
+	e->parent = parent;
+	e->act = act;
+	h->slot[i] = (f1 >> REC_BITS) << REC_BITS | (h->n + 1);
+	return h->n++ * NSHARD + f0 % NSHARD;
+}
+
+/* ------------------------------------------------------------------ */
+/* FIFO of worlds */
+
+/* Where queue chunks spill: $CMC_SCRATCH, else $TMPDIR, else NULL. */
+static const char *
+spill_dir(void)
+{
+	const char *d = getenv("CMC_SCRATCH");
+
+	if (!d || !*d)
+		d = getenv("TMPDIR");
+	return d && *d ? d : NULL;
+}
+
+static void
+q_init(Queue *q, size_t ws, uint64_t budget)
+{
+	memset(q, 0, sizeof(*q));
+	q->esz = 8 + ws;
+	/* a chunk is never larger than the budget, so a small one spills */
+	q->per = (budget && budget < (1u << 22) ? budget : (1u << 22)) / q->esz + 1;
+	q->budget = budget;
+	q->dir = spill_dir();
+}
+
+static _Noreturn void
+q_die(const char *what, const char *file)
+{
+	fprintf(stderr, "cmc: cannot %s BFS queue spill file %s: %s\n", what, file, strerror(errno));
+	exit(3);
+}
+
+/* Writes full chunk c to a file of its own and frees its data. */
+static void
+q_spill(Queue *q, QChunk *c)
+{
+	size_t		len = strlen(q->dir) + 64;
+	FILE	   *f;
+
+	c->file = xmalloc(len);
+	snprintf(c->file, len, "%s/cmc-queue-%ld-%" PRIu64, q->dir, (long) getpid(), q->nfile++);
+	if (!(f = fopen(c->file, "wb")))
+		q_die("create", c->file);
+	if (fwrite(c->data, q->esz, c->tail, f) != c->tail || fclose(f) != 0)
+		q_die("write", c->file);
+	free(c->data);
+	c->data = NULL;
+	q->mem -= q->per * q->esz;
+}
+
+/* Reads spilled chunk c back and removes its file. */
+static void
+q_load(Queue *q, QChunk *c)
+{
+	FILE	   *f = fopen(c->file, "rb");
+
+	if (!f)
+		q_die("open", c->file);
+	c->data = xmalloc(q->per * q->esz);
+	if (fread(c->data, q->esz, c->tail, f) != c->tail)
+		q_die("read", c->file);
+	fclose(f);
+	remove(c->file);
+	free(c->file);
+	c->file = NULL;
+	q->mem += q->per * q->esz;
+}
+
+static void
+q_push(Queue *q, uint64_t rec, const uint8_t *w)
 {
 	QChunk	   *c = q->last;
+	uint8_t    *e;
 
 	if (!c || c->tail == q->per)
 	{
-		c = xmalloc(sizeof(QChunk) + q->per * q->ws);
-		c->next = NULL;
-		c->head = c->tail = 0;
+		/* a full chunk between the two ends waits on disk when over budget */
+		if (c && c != q->first && q->budget && q->mem > q->budget)
+			q_spill(q, c);
+		c = xcalloc(1, sizeof(QChunk));
+		c->data = xmalloc(q->per * q->esz);
+		q->mem += q->per * q->esz;
 		if (q->last)
 			q->last->next = c;
 		else
 			q->first = c;
 		q->last = c;
 	}
-	memcpy(c->data + c->tail * q->ws, w, q->ws);
+	e = c->data + c->tail * q->esz;
+	memcpy(e, &rec, 8);
+	memcpy(e + 8, w, q->esz - 8);
 	c->tail++;
 	q->n++;
 }
 
 static bool
-q_pop(Queue *q, uint8_t *w)
+q_pop(Queue *q, uint64_t *rec, uint8_t *w)
 {
 	QChunk	   *c = q->first;
+	const uint8_t *e;
 
 	if (!c || c->head == c->tail)
 		return false;
-	memcpy(w, c->data + c->head * q->ws, q->ws);
+	if (!c->data)
+		q_load(q, c);
+	e = c->data + c->head * q->esz;
+	memcpy(rec, e, 8);
+	memcpy(w, e + 8, q->esz - 8);
 	c->head++;
 	q->n--;
 	if (c->head == c->tail && c->head == q->per)
@@ -433,7 +669,9 @@ q_pop(Queue *q, uint8_t *w)
 		q->first = c->next;
 		if (!q->first)
 			q->last = NULL;
+		free(c->data);
 		free(c);
+		q->mem -= q->per * q->esz;
 	}
 	return true;
 }
@@ -447,6 +685,12 @@ q_free(Queue *q)
 	{
 		QChunk	   *n = c->next;
 
+		if (c->file)
+		{
+			remove(c->file);
+			free(c->file);
+		}
+		free(c->data);
 		free(c);
 		c = n;
 	}
@@ -853,6 +1097,58 @@ add_prop(CmcRun *r, const CmcProp *p, char *err, size_t errlen)
 
 static int	sym_setup(CmcRun *r, char *err, size_t errlen);
 static void	sym_scratch_free(CmcRun *r);
+/*
+ * The scratch buffers cmc_enabled(), cmc_apply() and the fair schedule
+ * write, and the liveness memo.  Each BFS worker has its own set, in a
+ * copy of the run (bfs_clone()); everything else in a run is read-only
+ * during a search.
+ */
+static void
+scratch_alloc(CmcRun *r)
+{
+	r->dur = xmalloc(r->ss + 1);
+	r->detst = xmalloc(r->ss + 1);
+	r->deto = xmalloc(sizeof(CmcOut));
+	r->qw = xmalloc(r->ws);
+	if (r->o.time_check)
+	{
+		r->tcst = xmalloc(r->ss + 1);
+		r->tcpost = xmalloc(r->ss + 1);
+		r->tco = xmalloc(sizeof(CmcOut));
+	}
+	if (r->m->history)
+		r->hpre = xmalloc(r->ws + r->m->history_size);
+	r->fw = xmalloc(r->ws);
+	r->fw0 = xmalloc(r->ws);
+	r->fwr = xmalloc(r->ws);
+	r->fsuf = xmalloc(sizeof(CmcAction) * ((size_t) r->o.live_steps + 1));
+	r->facts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
+	r->ffp = xmalloc(sizeof(uint64_t) * 2 * ((size_t) r->o.live_steps + 2));
+	r->dfp = xmalloc(sizeof(uint64_t) * 2 * ((size_t) r->o.live_steps + 2));
+	r->fstep = xmalloc(sizeof(int) * ((size_t) r->o.live_steps + 2));
+}
+
+static void
+scratch_free(CmcRun *r)
+{
+	table_free(&r->live);
+	free(r->dur);
+	free(r->detst);
+	free(r->deto);
+	free(r->tcst);
+	free(r->tcpost);
+	free(r->tco);
+	free(r->qw);
+	free(r->fw);
+	free(r->fw0);
+	free(r->fwr);
+	free(r->fsuf);
+	free(r->facts);
+	free(r->ffp);
+	free(r->dfp);
+	free(r->fstep);
+	free(r->hpre);
+}
 
 static CmcRun *
 run_reject(CmcRun *r, char *err, size_t errlen, const char *msg)
@@ -909,12 +1205,6 @@ time_setup(CmcRun *r, char *err, size_t errlen)
 	{
 		snprintf(err, errlen, "%s", bad);
 		return -1;
-	}
-	if (r->o.time_check)
-	{
-		r->tcst = xmalloc(r->ss + 1);
-		r->tcpost = xmalloc(r->ss + 1);
-		r->tco = xmalloc(sizeof(CmcOut));
 	}
 	if (r->o.time_bound && world_init(r, r->qw) != 0)
 	{
@@ -1018,6 +1308,15 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 		return run_reject(r, err, errlen, "unknown search");
 	if (r->o.search == CMC_REPLAY && !r->o.replay_in)
 		return run_reject(r, err, errlen, "a replay needs replay_in, the file to replay");
+	if (r->o.workers < 0 || r->o.workers > CMC_MAX_WORKERS)
+		return run_reject(r, err, errlen, "workers must be from 0 to " CMC_STR(CMC_MAX_WORKERS));
+	if (r->o.workers > 1 && r->o.search != CMC_BFS)
+		return run_reject(r, err, errlen, "more than one worker needs breadth-first search");
+	if (r->o.queue_mem && r->o.search != CMC_BFS)
+		return run_reject(r, err, errlen, "a queue memory budget needs breadth-first search");
+	if (r->o.queue_mem && !spill_dir())
+		return run_reject(r, err, errlen,
+						  "a queue memory budget needs CMC_SCRATCH or TMPDIR for its files");
 	/* no walk looks at no state, which must not read as a pass */
 	if (r->o.search == CMC_SIMULATE && r->o.walks < 1)
 		return run_reject(r, err, errlen, "a simulation needs at least one walk");
@@ -1048,20 +1347,7 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 		return NULL;
 	}
 	r->ws = (r->ws + 7) & ~(size_t) 7;
-	r->dur = xmalloc(r->ss + 1);
-	r->detst = xmalloc(r->ss + 1);
-	r->deto = xmalloc(sizeof(CmcOut));
-	r->qw = xmalloc(r->ws);
-	if (m->history)
-		r->hpre = xmalloc(r->ws + m->history_size);
-	r->fw = xmalloc(r->ws);
-	r->fw0 = xmalloc(r->ws);
-	r->fwr = xmalloc(r->ws);
-	r->fsuf = xmalloc(sizeof(CmcAction) * ((size_t) r->o.live_steps + 1));
-	r->facts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
-	r->ffp = xmalloc(sizeof(uint64_t) * 2 * ((size_t) r->o.live_steps + 2));
-	r->dfp = xmalloc(sizeof(uint64_t) * 2 * ((size_t) r->o.live_steps + 2));
-	r->fstep = xmalloc(sizeof(int) * ((size_t) r->o.live_steps + 2));
+	scratch_alloc(r);
 
 	for (int j = 0; j < m->nalways; j++)
 		if (add_prop(r, &m->props[j], err, errlen) != 0)
@@ -1116,23 +1402,8 @@ cmc_run_free(CmcRun *r)
 	if (!r)
 		return;
 	table_free(&r->t);
-	table_free(&r->live);
-	free(r->dur);
-	free(r->detst);
-	free(r->deto);
-	free(r->tcst);
-	free(r->tcpost);
-	free(r->tco);
-	free(r->qw);
-	free(r->fw);
-	free(r->fw0);
-	free(r->fwr);
-	free(r->fsuf);
-	free(r->facts);
-	free(r->ffp);
-	free(r->dfp);
-	free(r->fstep);
-	free(r->hpre);
+	store_free(&r->st);
+	scratch_free(r);
 	free(r->perms);
 	sym_scratch_free(r);
 	free(r);
@@ -2296,10 +2567,11 @@ permute_requests(CmcRun *r, const uint8_t *w, const uint8_t *perm, uint8_t *out)
  * (CmcCore.symmetry); the group is every permutation perm[old] = new
  * that maps each class onto itself, identity first.  A world's canonical
  * form is the lexicographically smallest of its images under the group,
- * and the fingerprint table is keyed by it (world_fp()).  The queue and
- * the DFS stack keep the actual worlds, and a table entry records the
- * action that produced the actual world it was first reached by, so a
- * counterexample is a real execution with no replay matching.
+ * and the visited set (the BFS store, the DFS table) is keyed by it
+ * (world_fp()).  The queue and the DFS stack keep the actual worlds, and
+ * a state's record keeps the action that produced the actual world it
+ * was first reached by, so a counterexample is a real execution with no
+ * replay matching.  Each BFS worker has its own scratch (sym_scratch()).
  *
  * NB: sound only if the core and the properties are symmetric under the
  * group.  --sym-check tests both on every expanded world (sym_check()).
@@ -3186,33 +3458,25 @@ cmc_write_replay(CmcRun *r, const char *path, const CmcAction *acts, int n)
 	return fclose(f);
 }
 
-/* Rebuild the action path from the fingerprint table. */
+/* Rebuilds the action path to record rec from the parent chain. */
 static int
-trace_from_table(CmcRun *r, uint64_t f0, uint64_t f1, CmcAction **out)
+trace_from_store(const CmcRun *r, uint64_t rec, CmcAction **out)
 {
 	int			cap = 64,
 				n = 0;
 	CmcAction   *a = xmalloc(sizeof(CmcAction) * cap);
 
-	for (;;)
+	while (store_rec(&r->st, rec)->parent != REC_ROOT)
 	{
-		Ent		   *e = table_find(&r->t, f0, f1);
+		const Rec  *e = store_rec(&r->st, rec);
 
-		if (!e)
-		{
-			fprintf(stderr, "cmc: broken parent chain\n");
-			exit(3);
-		}
-		if (e->flags & 2)
-			break;
 		if (n == cap)
 		{
 			cap *= 2;
-			a = realloc(a, sizeof(CmcAction) * cap);
+			a = xrealloc(a, sizeof(CmcAction) * cap);
 		}
 		a[n++] = e->act;
-		f0 = e->p0;
-		f1 = e->p1;
+		rec = e->parent;
 	}
 	for (int i = 0; i < n / 2; i++)
 	{
@@ -3262,35 +3526,613 @@ progress(CmcRun *r, CmcResult *res, int level, uint64_t qn)
 			level, res->generated, res->distinct, qn);
 	fflush(r->o.out);
 }
+/* ------------------------------------------------------------------ */
+/*
+ * BFS, in batches (TLC semantics with any number of workers).
+ *
+ * The master pops a batch of states off the queue, a prefix of it, and
+ * the workers expand it in four phases separated by barriers:
+ *
+ *   1. expand: workers claim states and compute each one's enabled
+ *      actions, quiescence and liveness checks, successors, action
+ *      properties and successor fingerprints, stopping a state at its
+ *      first event (an error or a violation);
+ *   2. insert: each worker inserts, into the store shards it owns, the
+ *      successors of every state of the batch in batch order, so each
+ *      fingerprint gets the parent and the "new" flag that a one-worker
+ *      search would give it;
+ *   3. check: each worker checks the invariants and the witnesses not yet
+ *      reached on the new successors it generated;
+ *   4. merge: the master walks the batch in order and does what a
+ *      one-worker search does after each step: counts, coverage, depth,
+ *      witness depths, the queue, and the first event in (state, action)
+ *      order, which ends the search.
+ *
+ * Phase 4 sees exactly the sequence of a one-worker BFS, so the counts,
+ * the depth, the witness depths and the counterexample are the same for
+ * every worker count; work done past the first event is thrown away.
+ * Workers share the run read-only and write only their own copy's scratch
+ * (bfs_clone()), so the cores' step functions and the properties must be
+ * pure functions of their arguments, as cmc(7) requires.
+ */
+
+enum
+{
+	BEV_ENABLED = 1,			/* cmc_enabled() or --sym-check failed at the
+								 * state */
+	BEV_QUI,					/* a quiescence property failed at it */
+	BEV_FAIR,					/* the fair schedule from it failed */
+	BEV_APPLY,					/* an action of it failed to apply */
+	BEV_ACTP,					/* an action of it broke an action property */
+	BEV_INV						/* a new successor broke an invariant */
+};
+
+typedef struct BEvent
+{
+	int			kind;
+	CmcAction	act;			/* BEV_APPLY, BEV_ACTP */
+	const CmcProp *prop;		/* NULL = an engine error */
+	char		why[sizeof(((CmcWhy *) 0)->msg)];
+	CmcAction   *fsuf;			/* BEV_FAIR: the fair suffix */
+	int			nfsuf;
+} BEvent;
+
+typedef struct Succ
+{
+	CmcAction	act;
+	uint64_t	fp0,
+				fp1,
+				rec;			/* its record (phase 2) */
+	uint64_t	wit;			/* witnesses it reaches (phase 3) */
+	uint32_t	j;				/* the batch state it came from */
+	int			evi;			/* BEV_INV event, or -1 */
+	bool		isnew;
+} Succ;
+
+typedef struct BState
+{
+	uint64_t	rec;
+	uint32_t	beg,
+				end;			/* its successors in worker w's list */
+	int			w;
+	int			evi;			/* its event in worker w's list, or -1 */
+	bool		cut;			/* past --max-time: not expanded */
+} BState;
+
+typedef struct Bfs Bfs;
+
+typedef struct Worker
+{
+	Bfs		   *b;
+	CmcRun	   *r;				/* worker 0: the run itself */
+	int			id;
+	Succ	   *succ;
+	uint8_t    *wbuf;			/* the successor worlds */
+	uint32_t	nsucc,
+				csucc;
+	BEvent	   *ev;
+	int			nev,
+				cev;
+	CmcAction   *acts;
+	thrd_t		th;
+} Worker;
+
+struct Bfs
+{
+	CmcRun	   *r;
+	int			nw;
+	Worker	   *w;
+	BState	   *bs;
+	uint8_t    *bw;				/* the batch's worlds */
+	uint32_t	nb,
+				cap;			/* states in the batch, and room */
+	atomic_uint next;			/* phase 1: the next state to claim */
+	uint64_t	witdone;		/* witnesses reached before the batch */
+	mtx_t		mu;
+	cnd_t		cv;
+	unsigned	gen;
+	int			arrived;
+	bool		quit;
+	bool		cut;			/* a state past --max-time was not expanded */
+};
+
+typedef struct BLevel
+{
+	uint64_t	left,			/* states of this level still to expand */
+				next;			/* states found for the next level */
+	int			level;
+} BLevel;
+
+#define BFS_CLAIM 8				/* states a worker claims at a time */
+#define BFS_PER_WORKER 256		/* batch states per worker */
+
+/* Returns a new event slot of worker k. */
+static BEvent *
+bfs_event(Worker *k, int kind, const CmcProp *p, const char *why)
+{
+	BEvent	   *e;
+
+	if (k->nev == k->cev)
+	{
+		k->cev = k->cev ? 2 * k->cev : 16;
+		k->ev = xrealloc(k->ev, sizeof(BEvent) * (size_t) k->cev);
+	}
+	e = &k->ev[k->nev++];
+	memset(e, 0, sizeof(*e));
+	e->kind = kind;
+	e->prop = p;
+	snprintf(e->why, sizeof(e->why), "%s", why);
+	return e;
+}
+
+/* Returns room for one more successor of worker k, and its world. */
+static Succ *
+bfs_succ(Worker *k, uint8_t **w)
+{
+	size_t		ws = k->r->ws;
+
+	if (k->nsucc == k->csucc)
+	{
+		k->csucc = k->csucc ? 2 * k->csucc : 1024;
+		k->succ = xrealloc(k->succ, sizeof(Succ) * k->csucc);
+		k->wbuf = xrealloc(k->wbuf, ws * k->csucc);
+	}
+	*w = k->wbuf + ws * k->nsucc;
+	return &k->succ[k->nsucc];
+}
+
+/*
+ * Phase 1 for batch state j: what a one-worker search does from popping
+ * it to inserting its successors, up to the first event, which ends the
+ * state (an event after it could never be reported).
+ */
+static void
+bfs_expand(Worker *k, uint32_t j)
+{
+	CmcRun	   *r = k->r;
+	BState	   *bs = &k->b->bs[j];
+	const uint8_t *s = k->b->bw + r->ws * j;
+	CmcWhy		why;
+	const CmcProp *bad;
+	int			na;
+
+	bs->w = k->id;
+	bs->beg = bs->end = k->nsucc;
+	bs->evi = -1;
+	bs->cut = past_horizon(r, s);
+	if (bs->cut)
+		return;
+	na = cmc_enabled(r, s, k->acts, CMC_MAX_ACTIONS);
+	if (na < 0)
+	{
+		bs->evi = k->nev;
+		bfs_event(k, BEV_ENABLED, NULL, enabled_error(na));
+		return;
+	}
+	if (sym_check(r, s, k->acts, na) != 0)
+	{
+		bs->evi = k->nev;
+		bfs_event(k, BEV_ENABLED, NULL, r->err);
+		return;
+	}
+	if (r->nqui && is_quiescent(r, s, k->acts, na) && (bad = check_qui(r, s, &why)))
+	{
+		bs->evi = k->nev;
+		bfs_event(k, BEV_QUI, bad, why.msg);
+		return;
+	}
+	if (r->nev)
+	{
+		int			rc = check_ev(r, s, &why, &bad);
+
+		if (rc != 0)
+		{
+			BEvent	   *e;
+
+			bs->evi = k->nev;
+			e = bfs_event(k, BEV_FAIR, rc < 0 ? NULL : bad, rc < 0 ? r->err : why.msg);
+			e->nfsuf = r->nfsuf;
+			e->fsuf = xmalloc(sizeof(CmcAction) * ((size_t) r->nfsuf + 1));
+			memcpy(e->fsuf, r->fsuf, sizeof(CmcAction) * (size_t) r->nfsuf);
+			return;
+		}
+	}
+	for (int i = 0; i < na; i++)
+	{
+		uint8_t    *t;
+		Succ	   *u = bfs_succ(k, &t);
+		uint64_t	fp[2];
+
+		memcpy(t, s, r->ws);
+		if (cmc_apply(r, t, k->acts[i]) != 0)
+		{
+			bs->evi = k->nev;
+			bfs_event(k, BEV_APPLY, NULL, r->err)->act = k->acts[i];
+			return;
+		}
+		if (r->nactp && (bad = check_actp(r, s, k->acts[i], t, &why)))
+		{
+			bs->evi = k->nev;
+			bfs_event(k, BEV_ACTP, bad, why.msg)->act = k->acts[i];
+			return;
+		}
+		world_fp(r, t, fp);
+		u->act = k->acts[i];
+		u->fp0 = fp[0];
+		u->fp1 = fp[1];
+		u->j = j;
+		u->evi = -1;
+		u->wit = 0;
+		u->isnew = false;
+		bs->end = ++k->nsucc;
+	}
+}
+
+/* Phase 2: worker k inserts the batch's successors that fall in its
+ * shards, in batch order. */
+static void
+bfs_insert(Worker *k)
+{
+	Bfs		   *b = k->b;
+
+	for (uint32_t j = 0; j < b->nb; j++)
+	{
+		const BState *bs = &b->bs[j];
+		Worker	   *o = &b->w[bs->w];
+
+		for (uint32_t i = bs->beg; i < bs->end; i++)
+		{
+			Succ	   *u = &o->succ[i];
+
+			if ((int) (u->fp0 % NSHARD % (uint64_t) b->nw) != k->id)
+				continue;
+			u->rec = store_add(&b->r->st, u->fp0, u->fp1, bs->rec, u->act, &u->isnew);
+		}
+	}
+}
+
+/* Phase 3: worker k checks the invariants, and the witnesses not reached
+ * before the batch, on the new successors it generated. */
+static void
+bfs_check(Worker *k)
+{
+	CmcRun	   *r = k->r;
+
+	for (uint32_t i = 0; i < k->nsucc; i++)
+	{
+		Succ	   *u = &k->succ[i];
+		CmcWorld	W = {r, k->wbuf + r->ws * i};
+		CmcWhy		why;
+		const CmcProp *bad;
+
+		if (!u->isnew)
+			continue;
+		if ((bad = check_inv(r, W.bytes, &why)))
+		{
+			u->evi = k->nev;
+			bfs_event(k, BEV_INV, bad, why.msg);
+			continue;
+		}
+		for (int w = 0; w < r->nwit; w++)
+			if (!(k->b->witdone & (UINT64_C(1) << w)) && r->wit[w]->state(&W, NULL))
+				u->wit |= UINT64_C(1) << w;
+	}
+}
+
+/* Waits until every worker has arrived; worker 0 returns first-in-line
+ * only after all have. */
+static void
+bfs_barrier(Bfs *b)
+{
+	unsigned	g;
+
+	if (b->nw == 1)
+		return;
+	mtx_lock(&b->mu);
+	g = b->gen;
+	if (++b->arrived == b->nw)
+	{
+		b->arrived = 0;
+		b->gen++;
+		cnd_broadcast(&b->cv);
+	}
+	else
+		while (g == b->gen)
+			cnd_wait(&b->cv, &b->mu);
+	mtx_unlock(&b->mu);
+}
+
+/* Phases 1 to 3 of one batch, run by every worker. */
+static void
+bfs_phases(Worker *k)
+{
+	Bfs		   *b = k->b;
+
+	k->nsucc = 0;
+	for (int e = 0; e < k->nev; e++)
+		free(k->ev[e].fsuf);
+	k->nev = 0;
+	for (;;)
+	{
+		uint32_t	j = atomic_fetch_add(&b->next, BFS_CLAIM);
+
+		if (j >= b->nb)
+			break;
+		for (uint32_t i = j; i < j + BFS_CLAIM && i < b->nb; i++)
+			bfs_expand(k, i);
+	}
+	bfs_barrier(b);
+	bfs_insert(k);
+	bfs_barrier(b);
+	bfs_check(k);
+}
+
+/* A worker thread other than 0: a batch per round, until quit. */
+static int
+bfs_thread(void *arg)
+{
+	Worker	   *k = arg;
+	Bfs		   *b = k->b;
+
+	for (;;)
+	{
+		bfs_barrier(b);			/* the master has filled the batch */
+		if (b->quit)
+			return 0;
+		bfs_phases(k);
+		bfs_barrier(b);			/* the batch is checked */
+	}
+}
+
+/* A copy of run r for a worker: shared read-only state, its own scratch. */
+static CmcRun *
+bfs_clone(CmcRun *r)
+{
+	CmcRun	   *c = xmalloc(sizeof(CmcRun));
+
+	*c = *r;
+	memset(&c->t, 0, sizeof(c->t));
+	memset(&c->st, 0, sizeof(c->st));
+	scratch_alloc(c);
+	sym_scratch(c);
+	table_init(&c->live, 1u << 10);
+	return c;
+}
+
+static bool
+bfs_all_wit(const CmcRun *r)
+{
+	for (int i = 0; i < r->nwit; i++)
+		if (!r->wit_depth[i])
+			return false;
+	return true;
+}
+
+/* Starts the workers of b; worker 0 is the master, on run r itself. */
+static void
+bfs_start(Bfs *b, CmcRun *r)
+{
+	memset(b, 0, sizeof(*b));
+	b->r = r;
+	b->nw = r->o.workers > 1 ? r->o.workers : 1;
+	b->cap = (uint32_t) b->nw * BFS_PER_WORKER;
+	b->bs = xmalloc(sizeof(BState) * b->cap);
+	b->bw = xmalloc(r->ws * b->cap);
+	b->w = xcalloc((size_t) b->nw, sizeof(Worker));
+	if (b->nw > 1 && (mtx_init(&b->mu, mtx_plain) != thrd_success ||
+					  cnd_init(&b->cv) != thrd_success))
+	{
+		fprintf(stderr, "cmc: cannot set up the BFS workers\n");
+		exit(3);
+	}
+	for (int i = 0; i < b->nw; i++)
+	{
+		Worker	   *k = &b->w[i];
+
+		k->b = b;
+		k->id = i;
+		k->r = i == 0 ? r : bfs_clone(r);
+		k->acts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
+		if (i > 0 && thrd_create(&k->th, bfs_thread, k) != thrd_success)
+		{
+			fprintf(stderr, "cmc: cannot start BFS worker %d\n", i);
+			exit(3);
+		}
+	}
+}
+
+static void
+bfs_stop(Bfs *b)
+{
+	b->quit = true;
+	bfs_barrier(b);
+	for (int i = 0; i < b->nw; i++)
+	{
+		Worker	   *k = &b->w[i];
+
+		if (i > 0)
+		{
+			thrd_join(k->th, NULL);
+			scratch_free(k->r);
+			sym_scratch_free(k->r);
+			free(k->r);
+		}
+		for (int e = 0; e < k->nev; e++)
+			free(k->ev[e].fsuf);
+		free(k->ev);
+		free(k->succ);
+		free(k->wbuf);
+		free(k->acts);
+	}
+	if (b->nw > 1)
+	{
+		mtx_destroy(&b->mu);
+		cnd_destroy(&b->cv);
+	}
+	free(b->w);
+	free(b->bs);
+	free(b->bw);
+}
+
+/* Fills the next batch from the queue; returns its size. */
+static uint32_t
+bfs_fill(Bfs *b, Queue *q)
+{
+	uint32_t	n = 0;
+
+	while (n < b->cap && q_pop(q, &b->bs[n].rec, b->bw + b->r->ws * n))
+		n++;
+	b->nb = n;
+	atomic_store(&b->next, 0);
+	b->witdone = 0;
+	for (int w = 0; w < b->r->nwit; w++)
+		if (b->r->wit_depth[w])
+			b->witdone |= UINT64_C(1) << w;
+	return n;
+}
+
+/* The search-limit checks a one-worker search makes after each state. */
+static bool
+bfs_limits(CmcRun *r, CmcResult *res, double t0, double *tlast, BLevel *lv, uint64_t qn)
+{
+	if (r->o.max_states && res->distinct >= r->o.max_states)
+	{
+		res->verdict = CMC_INCOMPLETE;
+		snprintf(res->why, sizeof(res->why), "max_states reached");
+		return true;
+	}
+	if ((res->distinct & 0x3fff) == 0)
+	{
+		double		tn = now_s();
+
+		if (r->o.time_limit > 0 && tn - t0 > r->o.time_limit)
+		{
+			res->verdict = CMC_INCOMPLETE;
+			snprintf(res->why, sizeof(res->why), "time limit reached");
+			return true;
+		}
+		if (r->o.progress_s && tn - *tlast >= r->o.progress_s)
+		{
+			*tlast = tn;
+			progress(r, res, lv->level, qn);
+		}
+	}
+	return false;
+}
+
+/* The trace to record rec plus extra actions, into res. */
+static void
+bfs_trace(CmcRun *r, CmcResult *res, uint64_t rec, const CmcAction *extra, int nextra)
+{
+	int			n = trace_from_store(r, rec, &res->trace);
+
+	res->trace = xrealloc(res->trace, sizeof(CmcAction) * ((size_t) (n + nextra) + 1));
+	memcpy(res->trace + n, extra, sizeof(CmcAction) * (size_t) nextra);
+	res->trace_len = n + nextra + 1;
+}
+
+/* Reports state j's event e (phase 4), at BFS level 'level'. */
+static void
+bfs_report(CmcRun *r, CmcResult *res, const BState *bs, const BEvent *e, int level)
+{
+	set_violation(res, e->prop, e->why);
+	if (e->kind == BEV_ACTP)
+	{
+		/* its successor was generated before the property looked at it */
+		res->cov_gen[CMC_ACT_KIND(e->act)]++;
+		res->cov_sample[CMC_ACT_KIND(e->act)] = e->act;
+		res->generated++;
+	}
+	if (e->kind == BEV_APPLY || e->kind == BEV_ACTP)
+	{
+		bfs_trace(r, res, bs->rec, &e->act, 1);
+		res->depth = level + 1;
+	}
+	else if (e->kind == BEV_FAIR)
+	{
+		bfs_trace(r, res, bs->rec, e->fsuf, e->nfsuf);
+		res->fair_from = res->trace_len - e->nfsuf;
+	}
+	else
+		bfs_trace(r, res, bs->rec, NULL, 0);
+}
+
+/*
+ * Phase 4 for batch state j.  Returns 1 when the search ends at it (res
+ * set), 0 otherwise.
+ */
+static int
+bfs_merge(Bfs *b, uint32_t j, Queue *q, CmcResult *res, BLevel *lv)
+{
+	CmcRun	   *r = b->r;
+	const BState *bs = &b->bs[j];
+	Worker	   *k = &b->w[bs->w];
+
+	for (uint32_t i = bs->beg; i < bs->end; i++)
+	{
+		const Succ *u = &k->succ[i];
+		unsigned	kind = CMC_ACT_KIND(u->act);
+
+		res->cov_gen[kind]++;
+		res->cov_sample[kind] = u->act;
+		res->generated++;
+		if (!u->isnew)
+			continue;
+		res->distinct++;
+		res->cov_new[kind]++;
+		if (lv->level + 1 > res->depth)
+			res->depth = lv->level + 1;
+		if (u->evi >= 0)
+		{
+			set_violation(res, k->ev[u->evi].prop, k->ev[u->evi].why);
+			bfs_trace(r, res, u->rec, NULL, 0);
+			return 1;
+		}
+		for (int w = 0; w < r->nwit; w++)
+			if ((u->wit & (UINT64_C(1) << w)) && !r->wit_depth[w])
+				r->wit_depth[w] = lv->level + 1;
+		if (r->nwit && r->o.stop_on_witness && bfs_all_wit(r))
+			return 2;
+		q_push(q, u->rec, k->wbuf + r->ws * i);
+		lv->next++;
+	}
+	b->cut |= bs->cut;
+	if (bs->evi >= 0)
+	{
+		bfs_report(r, res, bs, &k->ev[bs->evi], lv->level);
+		return 1;
+	}
+	if (--lv->left == 0)
+	{
+		lv->left = lv->next;
+		lv->next = 0;
+		lv->level++;
+	}
+	return 0;
+}
 
 static void
 run_bfs(CmcRun *r, CmcResult *res)
 {
 	Queue		q;
-	uint8_t    *s = xmalloc(r->ws),
-			   *t = xmalloc(r->ws);
-	CmcAction   *acts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
+	Bfs			b;
+	uint8_t    *s = xmalloc(r->ws);
 	uint64_t	fp[2],
-				pfp[2];
+				rec;
 	CmcWhy		why;
 	const CmcProp *bad;
 	bool		isnew;
-	Ent		   *e;
 	double		t0 = now_s(),
 				tlast = t0;
-	uint64_t	level_left = 1,
-				next_level = 0;
-	int			level = 1;
-	bool		all_wit,
-				cut = false;
+	BLevel		lv = {1, 0, 1};
+	int			rc = 0;
+	uint64_t	left = 0;
 
-	table_init(&r->t, 1u << 16);
-	q_init(&q, r->ws);
+	store_init(&r->st);
+	q_init(&q, r->ws, r->o.queue_mem);
 	cmc_world_init(r, s);
 	world_fp(r, s, fp);
-	e = table_insert(&r->t, fp[0], fp[1], &isnew);
-	e->flags |= 2;
-	e->depth = 1;
+	rec = store_add(&r->st, fp[0], fp[1], REC_ROOT, 0, &isnew);
 	res->distinct = 1;
 	res->generated = 1;
 	res->depth = 1;
@@ -3298,157 +4140,43 @@ run_bfs(CmcRun *r, CmcResult *res)
 	{
 		set_violation(res, bad, why.msg);
 		res->trace_len = 1;
-		goto done;
+		goto out;
 	}
-	all_wit = check_wit(r, s, 1);
-	if (r->nwit && all_wit && r->o.stop_on_witness)
+	if (check_wit(r, s, 1) && r->nwit && r->o.stop_on_witness)
 		goto stopped;
-	q_push(&q, s);
+	q_push(&q, rec, s);
 
-	while (q_pop(&q, s))
+	bfs_start(&b, r);
+	while (rc == 0 && bfs_fill(&b, &q) > 0)
 	{
-		int			na;
-
-		if (past_horizon(r, s))
+		bfs_barrier(&b);		/* the batch is ready */
+		bfs_phases(&b.w[0]);
+		bfs_barrier(&b);		/* every worker has checked */
+		for (uint32_t j = 0; j < b.nb && rc == 0; j++)
 		{
-			cut = true;
-			goto next_state;
-		}
-		na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
-		world_fp(r, s, pfp);
-
-		if (na < 0)
-		{
-			set_violation(res, NULL, enabled_error(na));
-			goto fail_at_s;
-		}
-		if (sym_check(r, s, acts, na) != 0)
-		{
-			set_violation(res, NULL, r->err);
-			goto fail_at_s;
-		}
-		if (r->nqui && is_quiescent(r, s, acts, na) && (bad = check_qui(r, s, &why)))
-		{
-			set_violation(res, bad, why.msg);
-			goto fail_at_s;
-		}
-		if (r->nev)
-		{
-			int			rc = check_ev(r, s, &why, &bad);
-
-			if (rc != 0)
-			{
-				set_violation(res, rc < 0 ? NULL : bad, rc < 0 ? r->err : why.msg);
-				goto fail_fair;
-			}
-		}
-		for (int i = 0; i < na; i++)
-		{
-			memcpy(t, s, r->ws);
-			if (cmc_apply(r, t, acts[i]) != 0)
-			{
-				set_violation(res, NULL, r->err);
-				world_fp(r, s, pfp);
-				res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 2;
-				res->trace = realloc(res->trace, sizeof(CmcAction) * res->trace_len);
-				res->trace[res->trace_len - 2] = acts[i];
-				res->depth = level + 1;
-				goto done;
-			}
-			res->cov_gen[CMC_ACT_KIND(acts[i])]++;
-			res->cov_sample[CMC_ACT_KIND(acts[i])] = acts[i];
-			res->generated++;
-			if (r->nactp && (bad = check_actp(r, s, acts[i], t, &why)))
-			{
-				set_violation(res, bad, why.msg);
-				world_fp(r, s, pfp);
-				res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 2;
-				res->trace = realloc(res->trace, sizeof(CmcAction) * res->trace_len);
-				res->trace[res->trace_len - 2] = acts[i];
-				res->depth = level + 1;
-				goto done;
-			}
-			world_fp(r, t, fp);
-			e = table_insert(&r->t, fp[0], fp[1], &isnew);
-			if (!isnew)
-				continue;
-			e->p0 = pfp[0];
-			e->p1 = pfp[1];
-			e->act = acts[i];
-			e->depth = (uint32_t) (level + 1);
-			res->distinct++;
-			res->cov_new[CMC_ACT_KIND(acts[i])]++;
-			if (level + 1 > res->depth)
-				res->depth = level + 1;
-			if ((bad = check_inv(r, t, &why)))
-			{
-				set_violation(res, bad, why.msg);
-				res->trace_len = trace_from_table(r, fp[0], fp[1], &res->trace) + 1;
-				goto done;
-			}
-			all_wit = check_wit(r, t, level + 1);
-			if (r->nwit && all_wit && r->o.stop_on_witness)
-				goto stopped;
-			q_push(&q, t);
-			next_level++;
-		}
-next_state:
-		if (--level_left == 0)
-		{
-			level_left = next_level;
-			next_level = 0;
-			level++;
-		}
-		if (r->o.max_states && res->distinct >= r->o.max_states)
-		{
-			res->verdict = CMC_INCOMPLETE;
-			snprintf(res->why, sizeof(res->why), "max_states reached");
-			goto done;
-		}
-		if ((res->distinct & 0x3fff) == 0)
-		{
-			double		tn = now_s();
-
-			if (r->o.time_limit > 0 && tn - t0 > r->o.time_limit)
-			{
-				res->verdict = CMC_INCOMPLETE;
-				snprintf(res->why, sizeof(res->why), "time limit reached");
-				goto done;
-			}
-			if (r->o.progress_s && tn - tlast >= r->o.progress_s)
-			{
-				tlast = tn;
-				progress(r, res, level, q.n);
-			}
+			rc = bfs_merge(&b, j, &q, res, &lv);
+			if (rc == 0 && bfs_limits(r, res, t0, &tlast, &lv, q.n + b.nb - j - 1))
+				rc = 3;
+			/* the batch states after j were never popped, in one-worker terms */
+			if (rc)
+				left = b.nb - j - 1;
 		}
 	}
-	if (cut)
+	bfs_stop(&b);
+	if (rc == 0 && b.cut)
 		set_horizon(r, res);
-	goto done;
-
+	if (rc != 2)
+		goto out;
 stopped:
 	/* the rest of the graph was not searched, so this is no pass */
 	res->verdict = CMC_INCOMPLETE;
 	snprintf(res->why, sizeof(res->why), "stopped once every witness was reached");
-	goto done;
-fail_at_s:
-	world_fp(r, s, pfp);
-	res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 1;
-	goto done;
-fail_fair:
-	/* the shortest prefix to s, then the fair suffix from s */
-	world_fp(r, s, pfp);
-	res->fair_from = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 1;
-	res->trace_len = res->fair_from + r->nfsuf;
-	res->trace = realloc(res->trace, sizeof(CmcAction) * (size_t) res->trace_len);
-	memcpy(res->trace + res->fair_from - 1, r->fsuf, sizeof(CmcAction) * (size_t) r->nfsuf);
-done:
-	res->left = q.n;
+out:
+	res->left = q.n + left;
 	q_free(&q);
 	free(s);
-	free(t);
-	free(acts);
 }
+
 
 /* ------------------------------------------------------------------ */
 /* DFS with a depth bound (stateful; re-explores a state reached again at a
@@ -3482,7 +4210,6 @@ run_dfs(CmcRun *r, CmcResult *res)
 	cmc_world_init(r, worlds);
 	world_fp(r, worlds, fp);
 	e = table_insert(&r->t, fp[0], fp[1], &isnew);
-	e->flags |= 2;
 	e->depth = 1;
 	res->distinct = res->generated = 1;
 	res->depth = 1;

@@ -30,4 +30,13 @@ for bug in 107 110; do
 		fail=1
 	fi
 done
+# four BFS workers print what one does, on the correct core
+# shellcheck disable=SC2086
+"$B"/pgchain_mc --model paxos_hist --all-props --progress 0 $PX_D --workers 4 > "$OUT/ok-w4.txt" 2>&1
+if cmp -s <(grep -v '^Finished in' "$OUT/ok.txt") <(grep -v '^Finished in' "$OUT/ok-w4.txt"); then
+	echo "ok    paxos_hist correct core: --workers 4 prints the same"
+else
+	echo "FAIL  paxos_hist correct core: --workers 4 differs (see $OUT/ok-w4.txt)"
+	fail=1
+fi
 exit $fail

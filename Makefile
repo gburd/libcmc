@@ -55,7 +55,7 @@ ASAN_B ?= build-asan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples check-examples-slow check-asan check-pgchain-hist check-pgchain \
+        check-examples check-examples-slow check-asan check-pgchain check-pgchain-hist \
         check-pgchain-sym \
         codeberg-release \
         install docs-site clean
@@ -142,9 +142,11 @@ check-pgchain-hist: $(B)/pgchain_mc $(B)/pgchain_mc-bug107 $(B)/pgchain_mc-bug11
 # exact distinct-state counts, its witnesses, and every planted bug
 # caught.  About 7.5 minutes (one row at a time), so not part of make
 # check; CI runs it in its own weekly job.  PGCHAIN_MC_SLOW=1 adds the slow rows.
+# Every run uses 8 BFS workers, which must change nothing.
 PGC_BUGS = 1 2 3 4 5 6 7 8 9 10 101 102 103 104 105 106 107 108 109 110
 check-pgchain: $(B)/pgchain_mc $(PGC_BUGS:%=$(B)/pgchain_mc-bug%)
-	MC_B=$(B) PGCHAIN_MC_OUT=$(CMC_SCRATCH)/pgchain bash $(PGC)/mc-bug-gate.sh
+	MC_B=$(B) PGCHAIN_MC_OUT=$(CMC_SCRATCH)/pgchain PGCHAIN_MC_EXTRA="--workers 8" \
+		bash $(PGC)/mc-bug-gate.sh
 
 # symmetry reduction on pg_chain's Paxos: every gate row and planted bug
 # with --symmetry on (about five minutes)
@@ -288,7 +290,9 @@ COV_MIN ?= 90
 COV_PENDING ?=
 # CMC_COVERAGE: the node launcher in cmc_proc.c writes its forked child's
 # counts before the child's seccomp filter goes in (exec would lose them)
-COV_FLAGS = $(WARN) -O0 -g --coverage -DCMC_COVERAGE
+# -fprofile-update=atomic: BFS workers are threads, and plain counters
+# lose increments to races (gcov then reports negative hits)
+COV_FLAGS = $(WARN) -O0 -g --coverage -fprofile-update=atomic -DCMC_COVERAGE
 COV_S = $(CMC_SCRATCH)/coverage
 
 ifeq ($(COV_BUILD),1)

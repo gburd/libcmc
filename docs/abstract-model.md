@@ -629,6 +629,13 @@ it in `req`), and the real-time precedence between requests, read with
 they can only add distinct states; with neither set, the counts are
 those of 2.3.  See libcmc(3).
 
+## One worker
+
+`cmc --spec` searches with one thread and keeps its queue in memory.
+`--workers` and `--queue-mem`, the parallel search and the queue spill
+of the in-process engine (`cmc --model`, see cmc(1)), are refused here
+with exit 3 rather than ignored.
+
 ## Exit status
 
 0: no violation.  1: a violation (an invariant, a refinement, or a

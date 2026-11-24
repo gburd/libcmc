@@ -12,6 +12,8 @@
 # to $PGCHAIN_MC_OUT (default ~/tmp/pgchain-mc), never /tmp.
 set -u
 B=${MC_B:-test/mc/build}
+# options added to every run, such as --workers 8 (libcmc's check-pgchain)
+EXTRA=${PGCHAIN_MC_EXTRA:-}
 OUT=${PGCHAIN_MC_OUT:-$HOME/tmp/pgchain-mc}/$(date +%Y%m%d-%H%M%S)-$$
 mkdir -p "$OUT"
 ENV="--persist-cap 4 --net-cap 12 --cfg reconfigs=1 --crashes 1 --clients 2"
@@ -71,7 +73,7 @@ while IFS='|' read -r model bounds want wits; do
 		props="--inv $SAFETY_INV --prop $SAFETY_ACT,$wits,EventuallyReplied"
 	fi
 	# shellcheck disable=SC2086
-	"$B"/pgchain_mc --model "$model" $props --progress 0 $bounds > "$log" 2>&1
+	"$B"/pgchain_mc --model "$model" $props --progress 0 $bounds $EXTRA > "$log" 2>&1
 	got=$(grep -oE '[0-9]+ distinct states' "$log" | grep -oE '^[0-9]+')
 	wit_ok=1
 	if [ "$wits" = all ]; then
@@ -126,7 +128,7 @@ while IFS='|' read -r bin model prop env; do
 	what="$bin"
 	[ "$bin" = ok ] && what="ok ($(echo "$env" | grep -oE 'q[12]=[0-9]'))"
 	# shellcheck disable=SC2086
-	"$exe" --model "$model" $sel --progress 0 $env > "$log" 2>&1
+	"$exe" --model "$model" $sel --progress 0 $env $EXTRA > "$log" 2>&1
 	if grep -qE "(Invariant|Action property) $prop is violated" "$log"; then
 		echo "ok    $model $what caught by $prop at depth $(grep -oE 'search is [0-9]+' "$log" | grep -oE '[0-9]+')"
 	else

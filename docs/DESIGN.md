@@ -399,10 +399,31 @@ engine with the clamp removed never finishes the same search.
 | simulate | seeded random walks; `--seed S --walks 1` reproduces a failing walk |
 | replay | runs a replay file through the real cores; model, cfg and budgets come from the file, and a conflict is refused |
 
-The visited set is an open-addressing table of 128-bit fingerprints (two
-independent 64-bit mixes) plus each state's parent fingerprint and
-action, so traces are rebuilt from parents.  The collision estimate
+BFS keeps one 32-byte record per distinct state (its 128-bit
+fingerprint, from two independent 64-bit mixes, the number of its parent
+record, and the action from the parent), so a trace is rebuilt by
+following parent numbers.  The records and an index of 8-byte slots are
+split into 256 shards by fingerprint; a shard's index grows by freeing
+itself and rebuilding from its records, so the old and new index are
+never both resident and the growth transient is a fraction of one
+shard.  The queue holds {record number, world} entries in 4 MiB chunks;
+with `--queue-mem` the chunks between its two ends go to files in
+`$CMC_SCRATCH` once the budget is used.  DFS and the liveness memo keep
+the older table of fingerprint and depth.  The collision estimate
 n²/2¹²⁹ is printed, as TLC does.
+
+BFS runs in batches of states taken off the queue.  With `--workers N`
+the workers expand a batch in parallel (successors, quiescence and the
+fair schedule, action properties), insert the successors into the
+shards each owns in batch order, and check invariants and witnesses on
+the new states; then one thread walks the batch in queue order doing
+what a one-worker search does after each step.  Each fingerprint
+therefore gets the parent and the "new" flag one worker gives it, and
+the first event in (state, action) order ends the search, so counts,
+depths, witness depths, coverage and the counterexample do not depend on
+the worker count.  One worker runs the same code.  The threads are C11
+`<threads.h>`, part of glibc's libc since 2.34.  Measured:
+`docs/measurements/2026-11-24-library-engine-memory.md`.
 
 ### Symmetry reduction
 
@@ -415,13 +436,16 @@ body; the engine moves everything it owns itself (node order, budgets,
 clocks, timers, wakes, persists, connection resets, the network renamed
 and sorted again, replies, the request log), and the model's
 `permute_history()` moves a history.  With `--symmetry on`, BFS and DFS
-key the visited table by the fingerprint of the world's canonical form,
+key the visited set by the fingerprint of the world's canonical form,
 the smallest image under the group in memcmp order, found by trying
 every permutation (at most 8! = 40320, since a run has at most 8 nodes).
-The queue keeps the actual world, and a table entry the action that
+The queue keeps the actual world, and a state's record the action that
 reached the actual world first queued for its orbit, so the parent chain
 replays from the initial world: a counterexample is a real execution
-and no replay matching is needed.  Counts are of orbits.
+and no replay matching is needed.  Counts are of orbits.  With
+`--workers N` each worker canonicalises and runs `--sym-check` on its
+own copy of the scratch; the batch order is unchanged, so the counts
+and the counterexample do not depend on N.
 
 Under `--time-bound` the two canonical forms compose: `cmc_apply()`
 shifts every world into its time frame after each step, and the

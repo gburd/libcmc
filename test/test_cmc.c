@@ -16,6 +16,12 @@ extern const CmcModel toy_bug3_model;
 
 static int	failures;
 
+/* one worker in memory against several (and a queue budget): same result */
+static void same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
+						int workers, uint64_t queue_mem);
+static void same_search_cfg(const CmcModel *m, const char *cfg, const char *const *props,
+							const CmcOptions *base, int workers, uint64_t queue_mem);
+
 #define CHECK(c) do { if (!(c)) { \
 	fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #c); failures++; } } while (0)
 
@@ -1435,6 +1441,17 @@ test_time_bound(void)
 	o.drift = 0;
 	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
 	n1 = last_distinct;
+	/* workers fingerprint the canonical form too, and run the time check
+	 * in their own buffers: the same search, passing and caught */
+	same_search(&ldr_model, NULL, &o, 4, 0);
+	ld_bug = 1;
+	o.drift = 50;
+	same_search(&ldr_model, NULL, &o, 4, 0);
+	ld_bug = 0;
+	ld_tf_skip = 1;
+	same_search(&ldr_model, NULL, &o, 4, 0);
+	ld_tf_skip = 0;
+	o.drift = 0;
 	o.time_bound = 2 * LD_VET;
 	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
 	n2 = last_distinct;
@@ -3156,6 +3173,170 @@ test_search_limits(void)
 	}
 }
 
+/* ---- parallel BFS and the queue spill ---------------------------------
+ * A search with four workers, or with a queue that spills to files, must
+ * give what one worker in memory gives: the verdict, the property, the
+ * counts, the depth, the witness depths, the coverage and the very same
+ * counterexample (the first in BFS order). */
+
+static void
+same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
+			int workers, uint64_t queue_mem)
+{
+	same_search_cfg(m, "", props, base, workers, queue_mem);
+}
+
+static void
+same_search_cfg(const CmcModel *m, const char *cfg, const char *const *props,
+				const CmcOptions *base, int workers, uint64_t queue_mem)
+{
+	CmcOptions	o1 = *base,
+				o2 = *base;
+	CmcRun	   *r1,
+			   *r2;
+	CmcResult	a,
+				b;
+
+	o2.workers = workers;
+	o2.queue_mem = queue_mem;
+	r1 = mkc(m, CMC_BFS, cfg, props, &o1);
+	r2 = mkc(m, CMC_BFS, cfg, props, &o2);
+	cmc_check(r1, &a);
+	cmc_check(r2, &b);
+	if (getenv("CMC_VERBOSE"))
+		fprintf(stderr, "  %s workers %d: verdict %d %s distinct=%llu trace=%d\n", m->name,
+				workers, b.verdict, b.prop ? b.prop : "", (unsigned long long) b.distinct,
+				b.trace_len);
+	CHECK(a.verdict == b.verdict && a.distinct == b.distinct && a.generated == b.generated);
+	CHECK(a.left == b.left && a.depth == b.depth && a.fair_from == b.fair_from);
+	CHECK((a.prop == NULL) == (b.prop == NULL) && (!a.prop || !strcmp(a.prop, b.prop)));
+	CHECK(!strcmp(a.why, b.why) && a.trace_len == b.trace_len);
+	if (a.trace_len == b.trace_len && a.trace_len > 1)
+		CHECK(!memcmp(a.trace, b.trace, sizeof(CmcAction) * (size_t) (a.trace_len - 1)));
+	CHECK(a.nwitness == b.nwitness &&
+		  !memcmp(a.witness_depth, b.witness_depth, sizeof(a.witness_depth)));
+	CHECK(!memcmp(a.cov_gen, b.cov_gen, sizeof(a.cov_gen)) &&
+		  !memcmp(a.cov_new, b.cov_new, sizeof(a.cov_new)));
+	cmc_result_free(&a);
+	cmc_result_free(&b);
+	cmc_run_free(r1);
+	cmc_run_free(r2);
+}
+
+/* A spill file that cannot be created ends the search with exit 3 (in a
+ * child), never a pass on the states that fit. */
+static bool
+spill_refused(void)
+{
+	pid_t		pid;
+	int			st = 0;
+
+	fflush(NULL);
+	pid = fork();
+	if (pid == 0)
+	{
+		CmcOptions	o;
+		CmcRun	   *r;
+		CmcResult	res;
+
+		if (!freopen("/dev/null", "w", stderr))
+			_exit(99);
+		cmc_options_default(&o);
+		o.queue_mem = 4096;
+		r = mkc(&wide_model, CMC_BFS, "", NULL, &o);
+		cmc_check(r, &res);
+		_exit(res.verdict);
+	}
+	waitpid(pid, &st, 0);
+	return WIFEXITED(st) && WEXITSTATUS(st) == 3;
+}
+
+static void
+test_workers_agree(void)
+{
+	static const char *const inv[] = {"Mutex", NULL};
+	static const char *const act[] = {"PhaseMonotone", NULL};
+	static const char *const qui[] = {"AllReplied", NULL};
+	CmcOptions	o;
+	char		err[256];
+
+	cmc_options_default(&o);
+	/* every property kind of the toy, passing and broken */
+	same_search(&toy_model, NULL, &o, 4, 0);
+	same_search(&toy_bug1_model, inv, &o, 4, 0);
+	same_search(&toy_bug2_model, qui, &o, 4, 0);
+	same_search(&toy_bug3_model, act, &o, 4, 0);
+	o.net = CMC_NET_BAG;
+	o.drop_budget = o.dup_budget = 1;
+	same_search(&toy_model, NULL, &o, 3, 0);
+	/* fair-schedule failures and engine errors in the fair run */
+	for (fair_mode = 0; fair_mode < 6; fair_mode++)
+	{
+		cmc_options_default(&o);
+		o.live_steps = fair_mode == 3 ? 10 : 1000;
+		same_search(&fair_model, NULL, &o, 4, 0);
+	}
+	fair_mode = 0;
+	/* a step the engine refuses, and an output cap */
+	cmc_options_default(&o);
+	same_search(&cap_model, NULL, &o, 4, 0);
+	/* many batches and levels, a state limit, a stop at the witnesses, and
+	 * a queue that spills, a chunk of 256 states at a time, under
+	 * $CMC_BUILD; then a spill directory that is not there */
+	{
+		char	   *keep = getenv("CMC_SCRATCH") ? strdup(getenv("CMC_SCRATCH")) : NULL;
+
+		setenv("CMC_SCRATCH", getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".", 1);
+		same_search(&wide_model, NULL, &o, 4, 4096);
+		setenv("CMC_SCRATCH", "/nonexistent/cmc-spill", 1);
+		CHECK(spill_refused());
+		if (keep)
+			setenv("CMC_SCRATCH", keep, 1);
+		else
+			unsetenv("CMC_SCRATCH");
+		free(keep);
+	}
+	o.max_states = 70000;
+	same_search(&wide_model, NULL, &o, 4, 0);
+	cmc_options_default(&o);
+	o.stop_on_witness = true;
+	same_search(&toy_model, NULL, &o, 4, 0);
+	/* clocks: drift's FIRE variants, the lease bug they catch, a horizon
+	 * that cuts the search (INCOMPLETE), deadline order, and clock range
+	 * errors */
+	for (ld_bug = 0; ld_bug <= 1; ld_bug++)
+		for (int d = 0; d < 3; d++)
+		{
+			cmc_options_default(&o);
+			o.drift = d == 0 ? 0 : d == 1 ? 50 : 200;
+			same_search(&ld_model, NULL, &o, 4, 0);
+			o.max_time = 500;
+			same_search(&ld_model, NULL, &o, 4, 0);
+		}
+	ld_bug = 0;
+	cmc_options_default(&o);
+	o.drift = 100;
+	same_search(&to_model, NULL, &o, 4, 0);
+	cmc_options_default(&o);
+	o.drift = 500;
+	same_search(&big_model, NULL, &o, 4, 0);
+	/* the options a search cannot honour are refused */
+	cmc_options_default(&o);
+	o.search = CMC_DFS;
+	o.workers = 2;
+	CHECK(cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) == NULL &&
+		  strstr(err, "breadth-first"));
+	o.workers = 0;
+	o.queue_mem = 1;
+	CHECK(cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) == NULL &&
+		  strstr(err, "breadth-first"));
+	o.search = CMC_BFS;
+	o.queue_mem = 0;
+	o.workers = 257;
+	CHECK(cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) == NULL &&
+		  strstr(err, "workers"));
+}
+
 /* ---- the command line (cmc_main) ------------------------------------ */
 
 /* toy-bug1 with its first property (Mutex) always checked, under a
@@ -3311,6 +3492,16 @@ test_cli_input(void)
 		"--simulate", "--walks", "0");
 	CLI(3, "--drops needs a number from 0 to 255, not 'two'",
 		"--model-file", none, "--drops", "two");
+	/* the search resources: numbers in range, BFS only, and not --spec */
+	CLI(3, "--workers needs a number from 1 to 256, not '0'", "--model", "toy",
+		"--all-props", "--workers", "0");
+	CLI(3, "--queue-mem needs a number from 1", "--model", "toy", "--all-props",
+		"--queue-mem", "0");
+	CLI(3, "more than one worker needs breadth-first search", "--model", "toy",
+		"--all-props", "--dfs", "20", "--workers", "2");
+	CLI(3, "--workers is not supported with --spec", "--spec", "examples/spec/paxos.cml",
+		"--workers", "2");
+	CLI(1, "27 distinct states", "--model", "toy-bug1", "--inv", "Mutex", "--workers", "4");
 	/* --refine belongs to the process front end, which needs a model file */
 	CLI(3, "--refine needs --model-file", "--refine", "x.cml", "--bind", "x.bind");
 	/* TLC's one-line forms: CONSTANT k = v and INVARIANT name */
@@ -4224,7 +4415,8 @@ orbit_count(CmcRun *r, int cap)
 
 /* a run of sym_model, cfg cfg, with symmetry and check as given */
 static int	sym_crashes,
-			sym_drift;
+			sym_drift,
+			sym_workers;
 
 static CmcVerdict
 sym_run(const CmcModel *m, const char *cfg, const char *const *props, bool sym, bool check,
@@ -4235,6 +4427,7 @@ sym_run(const CmcModel *m, const char *cfg, const char *const *props, bool sym, 
 	cmc_options_default(&o);
 	o.crash_budget = sym_crashes;
 	o.drift = sym_drift;
+	o.workers = sym_workers;
 	o.symmetry = sym;
 	o.sym_check = check;
 	o.req_cap = 3;
@@ -4349,6 +4542,14 @@ test_symmetry(void)
 		fprintf(stderr, "  sym: %llu distinct, %llu reduced, %d orbits\n",
 				(unsigned long long) full, (unsigned long long) red, orbits);
 	CHECK(orbits > 0 && (uint64_t) orbits == red && red < full);
+	/* parallel BFS: the same reduced count with four workers, and
+	 * --sym-check in each */
+	sym_workers = 4;
+	CHECK(sym_run(&sym_model, "", safe, true, true, why, &red) == CMC_PASS &&
+		  red == (uint64_t) orbits);
+	CHECK(sym_run(&sym_model, "bad=1", safe, true, true, why, NULL) == CMC_VIOLATION &&
+		  strstr(why, "core is not symmetric"));
+	sym_workers = 0;
 	/* under --time-bound the time shift comes first, then the
 	 * permutation; the reduced count is still the orbit count */
 	cmc_options_default(&o);
@@ -4475,6 +4676,9 @@ test_request_log(void)
 	o.client_budget = 2;
 	CHECK(cfg_verdict(&lin_stale_model, "", &o, why, sizeof(why), NULL) == CMC_VIOLATION &&
 		  strstr(why, "then read"));
+	/* the log is the same with four workers, trace included */
+	same_search_cfg(&lin_stale_model, "", NULL, &o, 4, 0);
+	same_search_cfg(&lin_model, "", NULL, &o, 4, 0);
 	/* the trace shows the log: answers and the precedence */
 	cmc_options_default(&o);
 	o.client_budget = 1;
@@ -4539,6 +4743,9 @@ test_history(void)
 		  strstr(why, "chosen once"));
 	/* the ghost is part of the state: chosen-then-lost differs from never chosen */
 	CHECK(n0 == 3);
+	/* history() runs in every worker, with the same result */
+	same_search_cfg(&hist_model, "", NULL, &o, 4, 0);
+	same_search_cfg(&hist_model, "bug=1", NULL, &o, 4, 0);
 	cmc_options_default(&o);
 	o.search = CMC_SIMULATE;
 	o.walks = 20;
@@ -4624,6 +4831,7 @@ main(void)
 	test_replay_refusals();
 	test_fair_schedule();
 	test_search_limits();
+	test_workers_agree();
 	test_apply_refuses();
 	test_cli_input();
 	test_cli_runs();

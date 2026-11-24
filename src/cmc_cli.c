@@ -53,7 +53,7 @@ usage(void)
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
 			"         [--timer-cap N] [--wake-cap N] [--drift R] [--max-time T]\n"
 			"         [--time-bound B [--time-check]] [--req-cap N]\n"
-			"         [--net fifo|bag] [--live-steps K]\n"
+			"         [--net fifo|bag] [--live-steps K] [--workers N] [--queue-mem MB]\n"
 			"         [--symmetry on|off] [--sym-check]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
 			"         [--define TAG ...] [--no-deadlock]\n"
@@ -795,6 +795,10 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			o.sym_check = true;
 		else if (!strcmp(a, "--live-steps"))
 			o.live_steps = (int) num_arg(a, ARG(), 1, INT_MAX), set[8] = true;
+		else if (!strcmp(a, "--workers"))
+			o.workers = (int) num_arg(a, ARG(), 1, 256);
+		else if (!strcmp(a, "--queue-mem"))
+			o.queue_mem = num_arg(a, ARG(), 1, UINT64_MAX >> 20) << 20;
 		else
 			usage();
 #undef ARG
