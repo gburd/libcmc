@@ -7,10 +7,13 @@
 
 extern const CmcModel chain_member_model;
 extern const CmcModel paxos_model;
+extern const CmcModel paxos_hist_model;
 
 static const CmcModelEntry models[] = {
 	{"chain_member", &chain_member_model},
 	{"paxos", &paxos_model},
+	/* libcmc's copy only: ChosenStable over a history variable */
+	{"paxos_hist", &paxos_hist_model},
 };
 
 int

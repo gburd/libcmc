@@ -218,6 +218,8 @@ in the kernel, untouched.
 | determinism of a core | checked | `--det` runs every step twice | toy_gate |
 | uninitialised reads in a core | checked | MemorySanitizer | `make check-msan` |
 | crash, simulation, replay, the fair schedule | exact | a crash clears the node's self-channel; simulation and replay check every state; an armed timer is never starved (Phase 2 of the plan) | test_cmc |
+| the request log (`CmcModel.requests`, `cmc_request()`, `cmc_precedes()`) | exact | per request: answered, answer, and which requests were answered before it was invoked; a reply names its request in `CmcOutput.req`; a reply naming a request never invoked, answering one twice, or naming one with the log off is an engine violation; a log larger than `--req-cap` (at most 64) is refused before the search; reading the log on a model without it is exit 3 | test_cmc test_request_log (the stale-read register caught, the correct one passes) |
+| history variables (`CmcModel.history`, `cmc_history()`) | exact | bytes in the world, zero at init, updated after each step, part of the fingerprint; cores never see them; `--det` runs `history()` twice | test_cmc test_history; `make check-pgchain-hist`: pg_chain's Paxos bugs 107 and 110 caught by HistChosen, the correct core passes |
 
 ## Examples
 

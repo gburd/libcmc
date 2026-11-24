@@ -5,7 +5,7 @@
 #                            (Linux) the process front end's preload
 #   make check               fast gates: engine tests, toy bug gate, process
 #                            front end gate, purity gate and its teeth, docs
-#                            gate, fast calibration
+#                            gate, fast calibration, history on pg_chain's Paxos
 #   make check-msan          the engine tests under MemorySanitizer (clang)
 #   make check-calibration   every HC row against TLC (about 9 minutes)
 #   make check-hc-bugs       planted HC port bugs must fail calibration
@@ -53,7 +53,7 @@ ASAN_B ?= build-asan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples check-examples-slow check-asan \
+        check-examples check-examples-slow check-asan check-pgchain-hist \
         codeberg-release \
         install docs-site clean
 
@@ -119,7 +119,21 @@ check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 check-docs: $(LIB) $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/docs_gate.sh $(B)
 
-check: check-unit check-examples check-calibration-fast
+check: check-unit check-examples check-calibration-fast check-pgchain-hist
+
+# pg_chain's cores (test/pgchain), built as pg_chain builds them: the
+# correct binary and one per planted bug, $(B)/pgchain_mc-bugN
+PGC = test/pgchain
+PGC_SRC = $(PGC)/chain_member.c $(PGC)/paxos.c $(PGC)/chain_member_model.c \
+          $(PGC)/paxos_model.c $(PGC)/pgchain_mc.c
+$(B)/pgchain_mc: $(PGC_SRC) $(LIB)
+	$(CC) $(ALL_CFLAGS) -I$(PGC)/include -o $@ $(PGC_SRC) $(LIB)
+$(B)/pgchain_mc-bug%: $(PGC_SRC) $(LIB)
+	$(CC) $(ALL_CFLAGS) -I$(PGC)/include -DPGCHAIN_MC_BUG=$* -o $@ $(PGC_SRC) $(LIB)
+
+# history variables on pg_chain's Paxos (about a minute)
+check-pgchain-hist: $(B)/pgchain_mc $(B)/pgchain_mc-bug107 $(B)/pgchain_mc-bug110
+	$(PGC)/hist-gate.sh $(B)
 
 # every shipped example runs and gives its expected verdict: the C
 # process-mode examples (examples/*/) built and checked by proc_gate,

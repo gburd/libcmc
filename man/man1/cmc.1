@@ -77,6 +77,7 @@
 .Op Fl -net-cap Ar n
 .Op Fl -persist-cap Ar n
 .Op Fl -reply-cap Ar n
+.Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
 .Nm
@@ -769,6 +770,13 @@ Default 2.
 .It Fl -reply-cap Ar n
 Client replies recorded in the ghost log.
 Default 8.
+.It Fl -req-cap Ar n
+Slots in the request log of a model that keeps one
+.Pq see Xr libcmc 3 :
+one per node that takes clients times
+.Fl -clients .
+A log that does not fit is an error before the search starts.
+Default 8, at most 64.
 .It Fl -net Cm fifo | bag
 .Cm fifo ,
 the default, has one ordered channel per pair of nodes, as TCP does, and

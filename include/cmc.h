@@ -108,7 +108,8 @@ typedef enum CmcOutKind
 	CMC_OUT_CANCEL_TIMER,		/* arg = timer id */
 	CMC_OUT_PERSIST,				/* body = record; FLUSHED delivers it later */
 	CMC_OUT_WAKE,				/* arg = waiter id; WAKE delivered later */
-	CMC_OUT_REPLY				/* arg = client-visible result (ghost log) */
+	CMC_OUT_REPLY				/* arg = client-visible result (ghost log);
+								 * req: the request it answers */
 } CmcOutKind;
 
 typedef struct CmcOutput
@@ -118,6 +119,9 @@ typedef struct CmcOutput
 	uint16_t	len;
 	uint32_t	arg;
 	uint8_t		body[CMC_MSG_MAX];
+	/* REPLY only: 1 + the number of the request at this node it answers
+	 * (the arg of its CMC_EV_CLIENT), 0 = none.  Needs CmcModel.requests. */
+	uint32_t	req;
 } CmcOutput;
 
 typedef struct CmcOut
@@ -206,6 +210,16 @@ int			cmc_nreplies(const CmcWorld *w);
 /* CLIENT events delivered to node so far (environment, not core state) */
 int			cmc_requests(const CmcWorld *w, int node);
 void		cmc_reply(const CmcWorld *w, int i, int *node, uint32_t *arg);
+/* the request log (CmcModel.requests): requests invoked so far, i in
+ * [0, cmc_nrequests) in node order then request number; a run that keeps
+ * no log exits with status 3 here rather than read as empty */
+int			cmc_nrequests(const CmcWorld *w);
+void		cmc_request(const CmcWorld *w, int i, int *node, int *num,
+						bool *answered, uint32_t *answer);
+/* real-time order: request i was answered before request j was invoked */
+bool		cmc_precedes(const CmcWorld *w, int i, int j);
+/* the model's history bytes (CmcModel.history_size), NULL if none */
+const uint8_t *cmc_history(const CmcWorld *w);
 void		cmc_why(CmcWhy *why, const char *fmt,...)
 			__attribute__((format(printf, 2, 3)));
 
@@ -246,6 +260,15 @@ typedef struct CmcModel
 	const CmcProp *props;
 	int			nprops;
 	int			nalways;		/* the first nalways props are always checked */
+	/* keep the request log in the world (actor mode): cmc_request() */
+	bool		requests;
+	/* A history variable: history_size bytes kept in the world and hashed
+	 * with it, zero in the initial state.  history() runs after every
+	 * applied step and updates ghost, which is cmc_history(post); cores
+	 * never see it.  Deterministic, and reads only its arguments. */
+	size_t		history_size;
+	void		(*history) (const CmcWorld *pre, CmcAction a,
+							const CmcWorld *post, uint8_t *ghost);
 } CmcModel;
 
 /* ---- the engine ------------------------------------------------------ */
@@ -289,6 +312,8 @@ typedef struct CmcOptions
 	int			net_cap;		/* messages in flight */
 	int			persist_cap;	/* pending persists per node */
 	int			reply_cap;
+	int			req_cap;		/* request log slots (nodes taking clients
+								 * x client budget must fit), at most 64 */
 	CmcNet		net;
 	int			live_steps;		/* CMC_EVENTUALLY bound K (fair steps) */
 	FILE	   *out;

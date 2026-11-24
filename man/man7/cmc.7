@@ -892,6 +892,15 @@ The messages in flight.
 Each node's pending disk writes, oldest first.
 .It replies
 The ghost log of client replies, in emission order.
+.It requests
+Only for a model that keeps the request log: per client request, whether
+a reply answered it, the answer, and which requests were answered
+before it was invoked.
+No step numbers, so paths to the same log merge.
+.It history
+The model's history variables: bytes its
+.Fn history
+hook updates after every step, outside the cores.
 .El
 .Pp
 Every part is kept canonical, so two worlds are the same state exactly

@@ -51,6 +51,7 @@ usage(void)
 			"         [--trace-out FILE] [--progress S] [--quiet] [--list]\n"
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
+			"         [--req-cap N]\n"
 			"         [--net fifo|bag] [--live-steps K]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
 			"         [--define TAG ...] [--no-deadlock]\n"
@@ -730,6 +731,8 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			o.persist_cap = (int) num_arg(a, ARG(), 0, 255), set[5] = true;
 		else if (!strcmp(a, "--reply-cap"))
 			o.reply_cap = (int) num_arg(a, ARG(), 0, 255), set[6] = true;
+		else if (!strcmp(a, "--req-cap"))
+			o.req_cap = (int) num_arg(a, ARG(), 0, 64);
 		else if (!strcmp(a, "--net"))
 		{
 			const char *v = ARG();
