@@ -146,6 +146,22 @@ struct CmcRun
 			   *dfp;			/* generation-start fingerprints of a drain */
 	int		   *fstep;			/* fair steps taken at each round start */
 	int			fair_from;		/* of the last result, for traces */
+	/* symmetry reduction: the group (nperm permutations, identity first,
+	 * perm[old] = new), the transpositions that generate it, and scratch */
+	bool		sym;
+	int			nperm;
+	uint8_t    *perms,
+			   *symw,
+			   *symb;
+	/* --sym-check scratch: x = the image of a world s, t = a successor of
+	 * s, y = t's image, u = a successor of x, and x's successors' prints */
+	uint8_t    *scx,
+			   *sct,
+			   *scy,
+			   *scu;
+	uint64_t   *scfp;
+	bool	   *scused;
+	CmcAction   *scacts;
 	/* bound/gate error from the last apply */
 	char		err[256];
 };
@@ -825,6 +841,8 @@ add_prop(CmcRun *r, const CmcProp *p, char *err, size_t errlen)
 	return 0;
 }
 
+static int	sym_setup(CmcRun *r, char *err, size_t errlen);
+
 static CmcRun *
 run_reject(CmcRun *r, char *err, size_t errlen, const char *msg)
 {
@@ -1005,6 +1023,8 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 	if (r->core->durable_size && !r->core->apply_persist)
 		return run_reject(r, err, errlen,
 						  "durable_size > 0 needs apply_persist (the engine owns durable)");
+	if (sym_setup(r, err, errlen) != 0)
+		goto bad_prop;
 	return r;
 
 bad_prop:
@@ -1032,6 +1052,16 @@ cmc_run_free(CmcRun *r)
 	free(r->dfp);
 	free(r->fstep);
 	free(r->hpre);
+	free(r->perms);
+	free(r->symw);
+	free(r->symb);
+	free(r->scx);
+	free(r->sct);
+	free(r->scy);
+	free(r->scu);
+	free(r->scfp);
+	free(r->scused);
+	free(r->scacts);
 	free(r);
 }
 
@@ -2023,6 +2053,399 @@ is_quiescent(CmcRun *r, const uint8_t *s, const CmcAction *acts, int na)
 	return true;
 }
 
+/* request slot k's slot after perm: same request number, its node moved */
+static int
+req_moved(const CmcRun *r, int k, const uint8_t *perm)
+{
+	int			n,
+				num;
+
+	req_slot(r, k, &n, &num);
+	return r->req_base[perm[n]] + num;
+}
+
+/* Moves the request log of w into out under perm, rows and order bits. */
+static void
+permute_requests(CmcRun *r, const uint8_t *w, const uint8_t *perm, uint8_t *out)
+{
+	for (int k = 0; k < r->nreq; k++)
+	{
+		const uint8_t *e = REQ(r, w, k);
+		uint8_t    *o = REQ(r, out, req_moved(r, k, perm));
+
+		memcpy(o, e, 5);
+		for (int j = 0; j < r->nreq; j++)
+			if ((e[5 + j / 8] >> (j % 8)) & 1)
+			{
+				int			m = req_moved(r, j, perm);
+
+				o[5 + m / 8] |= (uint8_t) (1u << (m % 8));
+			}
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/*
+ * Symmetry reduction.  The core names classes of interchangeable nodes
+ * (CmcCore.symmetry); the group is every permutation perm[old] = new
+ * that maps each class onto itself, identity first.  A world's canonical
+ * form is the lexicographically smallest of its images under the group,
+ * and the fingerprint table is keyed by it (world_fp()).  The queue and
+ * the DFS stack keep the actual worlds, and a table entry records the
+ * action that produced the actual world it was first reached by, so a
+ * counterexample is a real execution with no replay matching.
+ *
+ * NB: sound only if the core and the properties are symmetric under the
+ * group.  --sym-check tests both on every expanded world (sym_check()).
+ */
+
+/* Writes w's image under perm into out (out != w). */
+static void
+permute_world(CmcRun *r, const uint8_t *w, const uint8_t *perm, uint8_t *out)
+{
+	const CmcCore *c = r->core;
+	int			nm = NMSG(r, w);
+
+	memset(out, 0, r->ws);
+	/* the core states, each rewritten by the core, at their new place */
+	for (int n = 0; n < r->nn; n++)
+	{
+		uint8_t    *st = out + (size_t) perm[n] * r->ss;
+
+		memcpy(st, w + (size_t) n * r->ss, r->ss);
+		c->permute(r->cfg, perm, n, st);
+	}
+	/* the environment: budgets, then per node its counters, resets, clock,
+	 * persists, timers and wakes, moved with it */
+	memcpy(HDR(r, out), HDR(r, w), HDR_FIXED);
+	put64(CLK(r, out), get64(CLK(r, w)));
+	for (int n = 0; n < r->nn; n++)
+	{
+		int			p = perm[n];
+		uint8_t		rs = 0;
+
+		memcpy(NODEH(r, out, p), NODEH(r, w, n), HDR_NODE);
+		for (int q = 0; q < r->nn; q++)
+			if (RESETS(r, w, n) & (1u << q))
+				rs |= (uint8_t) (1u << perm[q]);
+		RESETS(r, out, p) = rs;
+		put64(CLK(r, out) + 8 * (size_t) (p + 1), clk_get(r, w, n));
+		for (int i = 0; i < NPERS(r, w, n); i++)
+		{
+			uint8_t    *e = PERS(r, out, p, i);
+
+			memcpy(e, PERS(r, w, n, i), PERS_ENT);
+			c->permute_msg(r->cfg, perm, e + 1, e[0]);
+		}
+		memcpy(TMR(r, out, p, 0), TMR(r, w, n, 0), (size_t) r->o.timer_cap * TMR_ENT);
+		memcpy(WAK(r, out, p, 0), WAK(r, w, n, 0), (size_t) r->o.wake_cap * WAK_ENT);
+	}
+	/* the net: rename and rewrite each entry, then sort it back into its
+	 * canonical order, stably (a FIFO channel keeps its send order) */
+	for (int i = 0; i < nm; i++)
+	{
+		uint8_t		e[MSG_ENT];
+		int			j = i;
+		size_t		kl = FIFO(r) ? 2 : MSG_KEY;
+
+		memcpy(e, MSG(r, w, i), MSG_ENT);
+		e[0] = perm[e[0]];
+		e[1] = perm[e[1]];
+		c->permute_msg(r->cfg, perm, e + 3, e[2]);
+		while (j > 0 && memcmp(MSG(r, out, j - 1), e, kl) > 0)
+		{
+			memcpy(MSG(r, out, j), MSG(r, out, j - 1), MSG_ENT);
+			j--;
+		}
+		memcpy(MSG(r, out, j), e, MSG_ENT);
+	}
+	/* replies keep their emission order */
+	for (int i = 0; i < NREP(r, w); i++)
+	{
+		memcpy(REP(r, out, i), REP(r, w, i), REP_ENT);
+		REP(r, out, i)[0] = perm[REP(r, w, i)[0]];
+	}
+	permute_requests(r, w, perm, out);
+	if (r->m->history_size)
+	{
+		memcpy(out + r->off_hist, w + r->off_hist, r->m->history_size);
+		r->m->permute_history(r->cfg, perm, out + r->off_hist);
+	}
+}
+
+/*
+ * Writes the canonical form of w into out: the smallest image of w under
+ * the group, memcmp order.  Full enumeration of the group; the group is
+ * at most 8! = 40320 permutations because a run has at most 8 nodes.
+ */
+static void
+canon_world(CmcRun *r, const uint8_t *w, uint8_t *out)
+{
+	memcpy(out, w, r->ws);
+	for (int i = 1; i < r->nperm; i++)
+	{
+		permute_world(r, w, r->perms + (size_t) i * r->nn, r->symb);
+		if (memcmp(r->symb, out, r->ws) < 0)
+			memcpy(out, r->symb, r->ws);
+	}
+}
+
+/* The fingerprint every search keys its table by: of w, or of w's
+ * canonical form under symmetry reduction. */
+static void
+world_fp(CmcRun *r, const uint8_t *w, uint64_t fp[2])
+{
+	if (!r->sym || r->nperm == 1)
+	{
+		cmc_fingerprint(w, r->ws, fp);
+		return;
+	}
+	canon_world(r, w, r->symw);
+	cmc_fingerprint(r->symw, r->ws, fp);
+}
+
+/* the next permutation of p[0..n-1] in lexicographic order; false after
+ * the last */
+static bool
+next_perm(uint8_t *p, int n)
+{
+	int			i = n - 2,
+				j = n - 1;
+
+	while (i >= 0 && p[i] >= p[i + 1])
+		i--;
+	if (i < 0)
+		return false;
+	while (p[j] <= p[i])
+		j--;
+	{
+		uint8_t		t = p[i];
+
+		p[i] = p[j];
+		p[j] = t;
+	}
+	for (int a = i + 1, b = n - 1; a < b; a++, b--)
+	{
+		uint8_t		t = p[a];
+
+		p[a] = p[b];
+		p[b] = t;
+	}
+	return true;
+}
+
+/* "a>b c>d" for the nodes perm moves, for messages */
+static const char *
+perm_str(const CmcRun *r, const uint8_t *perm, char *buf, size_t len)
+{
+	size_t		k = 0;
+
+	buf[0] = 0;
+	for (int n = 0; n < r->nn && k + 8 < len; n++)
+		if (perm[n] != n)
+			k += (size_t) snprintf(buf + k, len - k, "%s%d>%d", k ? " " : "", n, perm[n]);
+	return buf;
+}
+
+/* Does state property p give the same verdict on w and on its image x? */
+static bool
+same_verdict(CmcRun *r, const CmcProp *p, const uint8_t *w, const uint8_t *x)
+{
+	CmcWorld	W = {r, w},
+				X = {r, x};
+	CmcWhy		why;
+
+	return p->state(&W, &why) == p->state(&X, &why);
+}
+
+/* The state properties' half of --sym-check on world s and its image x. */
+static int
+sym_props(CmcRun *r, const uint8_t *s, const uint8_t *x, const char *ps)
+{
+	const CmcProp *const *kinds[] = {r->inv, r->wit, r->qui, r->ev};
+	const int	nk[] = {r->ninv, r->nwit, r->nqui, r->nev};
+
+	for (int k = 0; k < 4; k++)
+		for (int i = 0; i < nk[k]; i++)
+			if (!same_verdict(r, kinds[k][i], s, x))
+			{
+				snprintf(r->err, sizeof(r->err), "symmetry check: property %s is not"
+						 " symmetric: it tells a world from its image under %s",
+						 kinds[k][i]->name, ps);
+				return -1;
+			}
+	return 0;
+}
+
+/*
+ * One permutation's part of --sym-check at world s, whose na enabled
+ * actions are acts: the image x = perm(s) must have as many actions, and
+ * each successor t of s must have its image perm(t) among x's successors,
+ * one for one, with every action property giving the same verdict on the
+ * two steps.  Writes r->err and returns -1 on a mismatch.
+ */
+static int
+sym_step(CmcRun *r, const uint8_t *s, const CmcAction *acts, int na, const uint8_t *perm)
+{
+	char		ps[64];
+	CmcWhy		why;
+	CmcAction   *xa = r->scacts;
+	int			nx;
+
+	perm_str(r, perm, ps, sizeof(ps));
+	permute_world(r, s, perm, r->scx);
+	if (sym_props(r, s, r->scx, ps) != 0)
+		return -1;
+	nx = cmc_enabled(r, r->scx, xa, CMC_MAX_ACTIONS);
+	if (nx != na)
+		goto differ;
+	for (int j = 0; j < nx; j++)
+	{
+		memcpy(r->scu, r->scx, r->ws);
+		r->scused[j] = cmc_apply(r, r->scu, xa[j]) != 0;
+		cmc_fingerprint(r->scu, r->ws, r->scfp + 2 * j);
+	}
+	for (int i = 0; i < na; i++)
+	{
+		uint64_t	fp[2];
+		int			j;
+
+		memcpy(r->sct, s, r->ws);
+		if (cmc_apply(r, r->sct, acts[i]) != 0)
+			continue;			/* the search reports it */
+		permute_world(r, r->sct, perm, r->scy);
+		cmc_fingerprint(r->scy, r->ws, fp);
+		for (j = 0; j < nx; j++)
+			if (!r->scused[j] && r->scfp[2 * j] == fp[0] && r->scfp[2 * j + 1] == fp[1])
+				break;
+		if (j == nx)
+			goto differ;
+		r->scused[j] = true;
+		memcpy(r->scu, r->scx, r->ws);
+		cmc_apply(r, r->scu, xa[j]);
+		for (int k = 0; k < r->nactp; k++)
+		{
+			CmcWorld	S = {r, s}, T = {r, r->sct}, X = {r, r->scx}, U = {r, r->scu};
+
+			if (r->actp[k]->action(&S, acts[i], &T, &why) !=
+				r->actp[k]->action(&X, xa[j], &U, &why))
+			{
+				snprintf(r->err, sizeof(r->err), "symmetry check: action property %s is"
+						 " not symmetric: it tells a step from its image under %s",
+						 r->actp[k]->name, ps);
+				return -1;
+			}
+		}
+	}
+	return 0;
+
+differ:
+	snprintf(r->err, sizeof(r->err), "symmetry check: the core is not symmetric under %s:"
+			 " a step's image is not a step of the world's image (check permute()"
+			 " and permute_msg())", ps);
+	return -1;
+}
+
+/* --sym-check at world s: every permutation in the group but identity. */
+static int
+sym_check(CmcRun *r, const uint8_t *s, const CmcAction *acts, int na)
+{
+	if (!r->o.sym_check)
+		return 0;
+	for (int i = 1; i < r->nperm; i++)
+		if (sym_step(r, s, acts, na, r->perms + (size_t) i * r->nn) != 0)
+			return -1;
+	return 0;
+}
+
+/*
+ * What a nontrivial group cannot reduce soundly.  Interchangeable nodes
+ * must agree on clients() and crashable(), which the engine reads by
+ * node id; a history needs the model's permute_history(); and the fair
+ * schedule of CMC_EVENTUALLY runs in node order, so a world and its image
+ * need not get the same verdict.  Allocates the scratch on success.
+ */
+static int
+sym_refuse(CmcRun *r, const int *cls, char *err, size_t errlen)
+{
+	const CmcCore *c = r->core;
+
+	for (int a = 0; a < r->nn; a++)
+		for (int b = 0; b < r->nn; b++)
+		{
+			if (a == b || cls[a] <= 0 || cls[a] != cls[b])
+				continue;
+			if ((!c->clients || c->clients(r->cfg, a)) != (!c->clients || c->clients(r->cfg, b)) ||
+				node_crashable(r, a) != node_crashable(r, b))
+				return snprintf(err, errlen, "symmetry: nodes %d and %d share a class and"
+								" differ in clients() or crashable()", a, b), -1;
+		}
+	if (r->m->history_size && !r->m->permute_history)
+		return snprintf(err, errlen, "symmetry with a history variable needs the model's"
+						" permute_history()"), -1;
+	if (r->nev)
+		return snprintf(err, errlen, "CMC_EVENTUALLY cannot be checked under symmetry"
+						" reduction (the fair schedule runs in node order)"), -1;
+	r->symw = xmalloc(r->ws);
+	r->symb = xmalloc(r->ws);
+	if (r->o.sym_check)
+	{
+		r->scx = xmalloc(r->ws);
+		r->sct = xmalloc(r->ws);
+		r->scy = xmalloc(r->ws);
+		r->scu = xmalloc(r->ws);
+		r->scfp = xmalloc(sizeof(uint64_t) * 2 * CMC_MAX_ACTIONS);
+		r->scused = xmalloc(sizeof(bool) * CMC_MAX_ACTIONS);
+		r->scacts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
+	}
+	return 0;
+}
+
+/*
+ * Builds the symmetry group of run r (CmcOptions.symmetry), or refuses
+ * what it cannot reduce soundly.  Returns 0, or -1 with the reason in
+ * err.  At most CMC_MAX_NODES = 8 nodes, so at most 8! = 40320
+ * permutations: full enumeration of nn! candidates is cheap.
+ */
+static int
+sym_setup(CmcRun *r, char *err, size_t errlen)
+{
+	const CmcCore *c = r->core;
+	int			cls[CMC_MAX_NODES];
+	uint8_t		p[CMC_MAX_NODES];
+
+	if (r->o.sym_check && !r->o.symmetry)
+		return snprintf(err, errlen, "--sym-check needs --symmetry on"), -1;
+	if (r->o.sym_check && r->o.search != CMC_BFS && r->o.search != CMC_DFS)
+		return snprintf(err, errlen, "--sym-check runs in a BFS or DFS search"), -1;
+	if (!r->o.symmetry)
+		return 0;
+	if (!c->symmetry || !c->permute || !c->permute_msg)
+		return snprintf(err, errlen, "core %s declares no symmetry (symmetry, permute and"
+						" permute_msg)", c->name), -1;
+	if (r->direct)
+		return snprintf(err, errlen, "symmetry reduction needs actor mode"), -1;
+	if (c->symmetry(r->cfg, cls, CMC_MAX_NODES) != r->nn)
+		return snprintf(err, errlen, "core %s: symmetry() must return the node count %d",
+						c->name, r->nn), -1;
+	for (int n = 0; n < r->nn; n++)
+		p[n] = (uint8_t) n;
+	r->perms = xmalloc((size_t) 40320 * (size_t) r->nn);
+	do
+	{
+		bool		ok = true;
+
+		for (int n = 0; n < r->nn && ok; n++)
+			ok = p[n] == n || (cls[n] > 0 && cls[p[n]] == cls[n]);
+		if (ok)
+			memcpy(r->perms + (size_t) r->nperm++ * r->nn, p, (size_t) r->nn);
+	} while (next_perm(p, r->nn));
+	r->sym = true;
+	if (r->nperm == 1)
+		return 0;
+	return sym_refuse(r, cls, err, errlen);
+}
+
 /* ------------------------------------------------------------------ */
 /*
  * Bounded liveness (CMC_EVENTUALLY, docs/research/02 B1).
@@ -2623,7 +3046,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 	table_init(&r->t, 1u << 16);
 	q_init(&q, r->ws);
 	cmc_world_init(r, s);
-	cmc_fingerprint(s, r->ws, fp);
+	world_fp(r, s, fp);
 	e = table_insert(&r->t, fp[0], fp[1], &isnew);
 	e->flags |= 2;
 	e->depth = 1;
@@ -2651,11 +3074,16 @@ run_bfs(CmcRun *r, CmcResult *res)
 			goto next_state;
 		}
 		na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
-		cmc_fingerprint(s, r->ws, pfp);
+		world_fp(r, s, pfp);
 
 		if (na < 0)
 		{
 			set_violation(res, NULL, enabled_error(na));
+			goto fail_at_s;
+		}
+		if (sym_check(r, s, acts, na) != 0)
+		{
+			set_violation(res, NULL, r->err);
 			goto fail_at_s;
 		}
 		if (r->nqui && is_quiescent(r, s, acts, na) && (bad = check_qui(r, s, &why)))
@@ -2679,7 +3107,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 			if (cmc_apply(r, t, acts[i]) != 0)
 			{
 				set_violation(res, NULL, r->err);
-				cmc_fingerprint(s, r->ws, pfp);
+				world_fp(r, s, pfp);
 				res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 2;
 				res->trace = realloc(res->trace, sizeof(CmcAction) * res->trace_len);
 				res->trace[res->trace_len - 2] = acts[i];
@@ -2692,14 +3120,14 @@ run_bfs(CmcRun *r, CmcResult *res)
 			if (r->nactp && (bad = check_actp(r, s, acts[i], t, &why)))
 			{
 				set_violation(res, bad, why.msg);
-				cmc_fingerprint(s, r->ws, pfp);
+				world_fp(r, s, pfp);
 				res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 2;
 				res->trace = realloc(res->trace, sizeof(CmcAction) * res->trace_len);
 				res->trace[res->trace_len - 2] = acts[i];
 				res->depth = level + 1;
 				goto done;
 			}
-			cmc_fingerprint(t, r->ws, fp);
+			world_fp(r, t, fp);
 			e = table_insert(&r->t, fp[0], fp[1], &isnew);
 			if (!isnew)
 				continue;
@@ -2763,12 +3191,12 @@ stopped:
 	snprintf(res->why, sizeof(res->why), "stopped once every witness was reached");
 	goto done;
 fail_at_s:
-	cmc_fingerprint(s, r->ws, pfp);
+	world_fp(r, s, pfp);
 	res->trace_len = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 1;
 	goto done;
 fail_fair:
 	/* the shortest prefix to s, then the fair suffix from s */
-	cmc_fingerprint(s, r->ws, pfp);
+	world_fp(r, s, pfp);
 	res->fair_from = trace_from_table(r, pfp[0], pfp[1], &res->trace) + 1;
 	res->trace_len = res->fair_from + r->nfsuf;
 	res->trace = realloc(res->trace, sizeof(CmcAction) * (size_t) res->trace_len);
@@ -2811,7 +3239,7 @@ run_dfs(CmcRun *r, CmcResult *res)
 
 	table_init(&r->t, 1u << 16);
 	cmc_world_init(r, worlds);
-	cmc_fingerprint(worlds, r->ws, fp);
+	world_fp(r, worlds, fp);
 	e = table_insert(&r->t, fp[0], fp[1], &isnew);
 	e->flags |= 2;
 	e->depth = 1;
@@ -2845,6 +3273,12 @@ run_dfs(CmcRun *r, CmcResult *res)
 		if (f->na < 0)
 		{
 			set_violation(res, NULL, enabled_error(f->na));
+			res->trace_len = sp + 1;
+			goto copy_path;
+		}
+		if (f->next == 0 && sym_check(r, s, f->acts, f->na) != 0)
+		{
+			set_violation(res, NULL, r->err);
 			res->trace_len = sp + 1;
 			goto copy_path;
 		}
@@ -2897,7 +3331,7 @@ run_dfs(CmcRun *r, CmcResult *res)
 			res->trace_len = sp + 2;
 			goto copy_path;
 		}
-		cmc_fingerprint(t, r->ws, fp);
+		world_fp(r, t, fp);
 		e = table_insert(&r->t, fp[0], fp[1], &isnew);
 		if (!isnew && e->depth <= (uint32_t) (sp + 2))
 			continue;

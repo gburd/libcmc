@@ -1,0 +1,11 @@
+cmc: model paxos, cfg "slots=2,candidates=1", breadth-first search, world 2048 bytes
+Model checking completed. No error has been found.
+  Estimated probability of a 128-bit fingerprint collision (n^2/2^129): 4.16e-30
+Witness ReachChosen: reached
+Witness ReachRefused: reached
+  ReachChosen first reached at depth 15
+  ReachRefused first reached at depth 3
+176791 states generated, 53229 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 40.
+Finished in 0.16s
+wall 0.16 s, max RSS 23540 kB

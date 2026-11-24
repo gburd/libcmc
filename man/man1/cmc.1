@@ -84,6 +84,8 @@
 .Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
+.Op Fl -symmetry Cm on | off
+.Op Fl -sym-check
 .Nm
 .Fl -replay Ar file
 .Op Fl -inv Ar names | Fl -all-props
@@ -822,6 +824,36 @@ fires the armed timers, but nodes that keep messaging each other in a
 cycle cannot postpone a timer.
 The verdict is about this one schedule, not every fair one.
 Default 1000.
+.It Fl -symmetry Cm on | off
+Symmetry reduction, for a core that declares interchangeable nodes
+.Pq Fn symmetry , Fn permute No and Fn permute_msg No in Xr libcmc 3 .
+Two worlds that one permutation of those nodes maps onto each other
+count as one state: the fingerprint is that of the smallest image of the
+world, so the counts are of orbits.
+Traces stay real executions.
+The reduction is sound only when the core and every property are
+symmetric under the permutations; a core whose
+.Fn clients
+or
+.Fn crashable
+tells two interchangeable nodes apart is refused, as are
+eventually-properties (the fair schedule runs in node order) and a
+history without
+.Fn permute_history .
+Default
+.Cm off .
+.It Fl -sym-check
+With
+.Fl -symmetry Cm on ,
+in a breadth-first or depth-first search: on every expanded world and
+every permutation in the group, check that every property gives the
+same verdict on the world and on its image, and that the images of the
+world's successors are exactly the successors of its image, each action
+property agreeing on the two steps.
+A failure is an engine violation naming the property or the
+permutation.
+It costs a permutation's worth of steps per world; use it on small
+bounds.
 .El
 .Pp
 Going past a cap is reported as an engine error, never silently

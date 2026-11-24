@@ -338,6 +338,39 @@ independent 64-bit mixes) plus each state's parent fingerprint and
 action, so traces are rebuilt from parents.  The collision estimate
 n²/2¹²⁹ is printed, as TLC does.
 
+### Symmetry reduction
+
+A core may declare interchangeable nodes: `CmcCore.symmetry(cfg, cls,
+max)` gives each node a class (0 = fixed), and the group is every
+permutation that maps each class onto itself.  `permute(cfg, perm,
+node, state)` rewrites the node ids inside one node's state and
+`permute_msg(cfg, perm, body, len)` those inside a message or persist
+body; the engine moves everything it owns itself (node order, budgets,
+clocks, timers, wakes, persists, connection resets, the network renamed
+and sorted again, replies, the request log), and the model's
+`permute_history()` moves a history.  With `--symmetry on`, BFS and DFS
+key the visited table by the fingerprint of the world's canonical form,
+the smallest image under the group in memcmp order, found by trying
+every permutation (at most 8! = 40320, since a run has at most 8 nodes).
+The queue keeps the actual world, and a table entry the action that
+reached the actual world first queued for its orbit, so the parent chain
+replays from the initial world: a counterexample is a real execution
+and no replay matching is needed.  Counts are of orbits.
+
+Soundness rests on two obligations the engine cannot prove: the core
+commutes with the permutations (`step(perm(s), perm(e)) = perm(step(s,
+e))`), and every property gives the same verdict on a world and on its
+images.  `--sym-check` tests both on every expanded world, for every
+permutation: each property on the world and its image, and the
+successors' images against the image's successors, one for one, with
+each action property agreeing on the paired steps.  A wrong `permute()`
+or an asymmetric property is an engine violation.  Refused outright:
+interchangeable nodes that `clients()` or `crashable()` tells apart,
+`CMC_EVENTUALLY` (the fair schedule runs in node order), and a history
+without `permute_history()`.  Node ids in a reply's `arg` or a timer's
+`arg2` are not rewritten; `--sym-check` catches a core that puts them
+there.
+
 ## Properties
 
 | kind | checked |
@@ -421,7 +454,7 @@ need first:
 4. Several cores per node, sharing a crash.
 5. A ghost history of client requests, not only replies (2.4: the
    request log and history variables).
-6. Symmetry reduction (a `permute` callback; a run counts only if the same
-   counterexamples appear with it on and off) and an on-disk BFS queue.
+6. Symmetry reduction (2.4: `CmcCore.symmetry`, `--symmetry`,
+   `--sym-check`) and an on-disk BFS queue.
 7. Parallel BFS over a sharded table.  After that, if search is still the
    bottleneck, expose a core as an LTSmin PINS module (`WHY.md`).

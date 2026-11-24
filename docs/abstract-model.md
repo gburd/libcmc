@@ -526,6 +526,17 @@ and constraint has the same value.  A model that fails this (a counter
 plain number) is exit 3.  An action whose guard tells the values apart
 is not seen by this check and remains the model's obligation.
 
+The library engine (`cmc.h`, in-process cores) has symmetry reduction
+too, as of 2.4, over node ids rather than values: a core names classes
+of interchangeable nodes with `CmcCore.symmetry()` and rewrites the ids
+in its state and messages with `permute()` and `permute_msg()`, and
+`cmc --symmetry on` counts orbits.  Its `--sym-check` checks more of
+the obligation than the spec engine's check does, because it can run
+the core: on every expanded world, for every permutation, the images of
+the successors must be the successors of the image (which catches a
+guard that tells nodes apart, or a wrong `permute()`), and every
+property must agree on a world and its image.  See libcmc(3).
+
 ## Liveness
 
 ```

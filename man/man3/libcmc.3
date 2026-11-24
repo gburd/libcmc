@@ -176,6 +176,11 @@ typedef struct CmcCore {
 		    FILE *f);			/* calibration only */
 	int	(*clients)(const void *cfg, int node);	/* optional */
 	int	(*crashable)(const void *cfg, int node);	/* optional */
+	int	(*symmetry)(const void *cfg, int *cls, int max);	/* optional */
+	void	(*permute)(const void *cfg, const uint8_t *perm, int node,
+		    void *state);		/* with symmetry */
+	void	(*permute_msg)(const void *cfg, const uint8_t *perm,
+		    uint8_t *body, uint16_t len);	/* with symmetry */
 } CmcCore;
 .Ed
 .Pp
@@ -223,6 +228,42 @@ if set, says which nodes may crash, also from the settings alone:
 is never offered for a node it excludes.
 .Dv NULL
 means every node may crash.
+.Pp
+.Fn symmetry ,
+.Fn permute
+and
+.Fn permute_msg
+declare interchangeable nodes for symmetry reduction
+.Pq Fl -symmetry Cm on No in Xr cmc 1 ;
+set all three or none.
+.Fn symmetry
+writes a class to
+.Fa cls Ns Bq n
+for each node and returns the node count; nodes that share a class
+greater than 0 are interchangeable, and class 0 is fixed.
+It reads the settings, never the state.
+The engine permutes the worlds by every
+.Fa perm
+that maps each class onto itself,
+.Fa perm Ns Bq old
+being the new id, and moves what it owns itself: node order, budgets,
+clocks, timers, wakes, persists, connection resets, the network (renamed
+and sorted again), replies and the request log.
+.Fn permute
+rewrites the node ids inside one node's state,
+.Fa node
+being its id before the permutation, and
+.Fn permute_msg
+those inside a message or persist body.
+Node ids in a reply's
+.Fa arg
+or a timer's or wake's
+.Fa arg2
+are not rewritten, so a core must not put them there.
+Reduction is sound only when the core and the properties are symmetric:
+.Fl -sym-check
+.Pq Va sym_check
+tests both on every expanded world.
 .Fn describe
 and
 .Fn describe_msg
@@ -480,6 +521,10 @@ states.
 Cores never see them, so a history variable cannot change behaviour.
 .Fn history
 must be deterministic; under the determinism gate it runs twice.
+Under symmetry reduction a model with a history must supply
+.Fn permute_history ,
+which rewrites the node ids in the history bytes under
+.Fa perm .
 Properties may read core state; the engine never calls them to decide
 which actions are possible.
 .Ss Version
@@ -506,6 +551,8 @@ typedef struct CmcModel {
 	size_t	history_size;	/* bytes of history variables */
 	void	(*history)(const CmcWorld *pre, CmcAction a,
 			   const CmcWorld *post, uint8_t *ghost);
+	void	(*permute_history)(const void *cfg, const uint8_t *perm,
+			   uint8_t *ghost);	/* symmetry with a history */
 } CmcModel;
 
 typedef struct CmcModelEntry {
@@ -575,6 +622,8 @@ typedef struct CmcOptions {
 	int	req_cap;	/* request log slots, at most 64 */
 	CmcNet	net;		/* CMC_NET_FIFO or CMC_NET_BAG */
 	int	live_steps;	/* bound for eventually-properties */
+	bool	symmetry;	/* symmetry reduction (the core's hooks) */
+	bool	sym_check;	/* check the symmetry obligations */
 	FILE	*out;		/* progress output; NULL: stdout */
 } CmcOptions;
 .Ed

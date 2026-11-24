@@ -162,6 +162,71 @@ describe_msg(const void *cfg, const uint8_t *b, FILE *f)
 			PX_ROUND(b[1]), PX_NODE(b[1]), b[2], b[3]);
 }
 
+/*
+ * Symmetry (libcmc's copy only: libcmc 2.4, CmcCore.symmetry).  The
+ * candidates 0..C-1 are distinguished: ballots and client values carry
+ * their ids, and only they take clients.  The other nodes are plain
+ * acceptors and learners, interchangeable when they agree on everything
+ * cfg says about them: whether they are initial voters, and whether the
+ * VoterCfg of change and change2 includes them, so permuting within a
+ * class leaves every member bitmap in a value unchanged.  No message or
+ * persist body names a non-candidate (they carry ballots, slots and
+ * values), so permute_msg() has nothing to do; the node ids in a state
+ * are the promise and accepted bitmaps, p1 and p2, and the rows of pb and
+ * pv, which are indexed by acceptor.  These helpers live here, not in
+ * paxos.c, so the shipped core file stays as pg_chain's; they know its
+ * state layout through paxos.h, as the properties below do.
+ */
+static int
+symmetry(const void *cfgv, int *cls, int max)
+{
+	const PaxosCfg *cfg = cfgv;
+
+	for (int n = 0; n < cfg->nodes && n < max; n++)
+		cls[n] = n < cfg->candidates ? 0 :
+			1 + (n < cfg->voters) + 2 * ((cfg->change >> n) & 1) +
+			4 * ((cfg->change2 >> n) & 1);
+	return cfg->nodes;
+}
+
+static uint8_t
+permute_mask(const PaxosCfg *cfg, const uint8_t *perm, uint8_t m)
+{
+	uint8_t		x = 0;
+
+	for (int a = 0; a < cfg->nodes; a++)
+		if (m & (1u << a))
+			x |= (uint8_t) (1u << perm[a]);
+	return x;
+}
+
+static void
+permute(const void *cfgv, const uint8_t *perm, int node, void *sv)
+{
+	const PaxosCfg *cfg = cfgv;
+	PaxosState *s = sv;
+	PaxosState	old = *s;
+
+	(void) node;
+	s->p1 = permute_mask(cfg, perm, old.p1);
+	for (int k = 0; k < PX_MAX_SLOTS; k++)
+		s->p2[k] = permute_mask(cfg, perm, old.p2[k]);
+	for (int a = 0; a < cfg->nodes; a++)
+	{
+		memcpy(s->pb[perm[a]], old.pb[a], PX_MAX_SLOTS);
+		memcpy(s->pv[perm[a]], old.pv[a], PX_MAX_SLOTS);
+	}
+}
+
+static void
+permute_msg(const void *cfg, const uint8_t *perm, uint8_t *body, uint16_t len)
+{
+	(void) cfg;
+	(void) perm;
+	(void) body;
+	(void) len;
+}
+
 static const CmcCore core = {
 	.name = "paxos",
 	.state_size = sizeof(PaxosState),
@@ -176,6 +241,9 @@ static const CmcCore core = {
 	.describe = describe,
 	.describe_msg = describe_msg,
 	.clients = clients,
+	.symmetry = symmetry,
+	.permute = permute,
+	.permute_msg = permute_msg,
 };
 
 /* ---- properties ------------------------------------------------------- */
@@ -680,6 +748,16 @@ chosen_history(const CmcWorld *pre, CmcAction act, const CmcWorld *post, uint8_t
 	}
 }
 
+/* the ghost holds values, and a permutation within a class changes no
+ * value (symmetry() above), so it names no node */
+static void
+permute_history(const void *cfg, const uint8_t *perm, uint8_t *ghost)
+{
+	(void) cfg;
+	(void) perm;
+	(void) ghost;
+}
+
 static bool
 hist_chosen(const CmcWorld *w, CmcWhy *why)
 {
@@ -709,4 +787,5 @@ const CmcModel paxos_hist_model = {
 	.nalways = 0,
 	.history_size = PX_MAX_SLOTS,
 	.history = chosen_history,
+	.permute_history = permute_history,
 };

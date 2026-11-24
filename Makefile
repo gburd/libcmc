@@ -53,7 +53,7 @@ ASAN_B ?= build-asan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples check-examples-slow check-asan check-pgchain-hist \
+        check-examples check-examples-slow check-asan check-pgchain-hist check-pgchain-sym \
         codeberg-release \
         install docs-site clean
 
@@ -119,7 +119,7 @@ check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 check-docs: $(LIB) $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/docs_gate.sh $(B)
 
-check: check-unit check-examples check-calibration-fast check-pgchain-hist
+check: check-unit check-examples check-calibration-fast check-pgchain-hist check-pgchain-sym
 
 # pg_chain's cores (test/pgchain), built as pg_chain builds them: the
 # correct binary and one per planted bug, $(B)/pgchain_mc-bugN
@@ -134,6 +134,12 @@ $(B)/pgchain_mc-bug%: $(PGC_SRC) $(LIB)
 # history variables on pg_chain's Paxos (about a minute)
 check-pgchain-hist: $(B)/pgchain_mc $(B)/pgchain_mc-bug107 $(B)/pgchain_mc-bug110
 	$(PGC)/hist-gate.sh $(B)
+
+# symmetry reduction on pg_chain's Paxos: every gate row and planted bug
+# with --symmetry on (about five minutes)
+PX_BUGS = 101 102 103 104 105 106 107 108 109 110
+check-pgchain-sym: $(B)/pgchain_mc $(addprefix $(B)/pgchain_mc-bug,$(PX_BUGS))
+	$(PGC)/sym-gate.sh $(B)
 
 # every shipped example runs and gives its expected verdict: the C
 # process-mode examples (examples/*/) built and checked by proc_gate,

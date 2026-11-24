@@ -49,6 +49,21 @@ change the API in `include/cmc.h`; this file says when it does.
   invariant (the first value chosen at a slot stays safe in every later
   state) catches pg_chain's Paxos bugs 107 and 110 (`make
   check-pgchain-hist`).  API: additive.
+- Symmetry reduction (docs/plans/2.4-library-engine.md item 5).  A core
+  declares interchangeable nodes with `CmcCore.symmetry(cfg, cls, max)`
+  and rewrites node ids with `permute()` (in a node's state) and
+  `permute_msg()` (in a message or persist body); a model with a history
+  adds `CmcModel.permute_history()`.  `--symmetry on`
+  (`CmcOptions.symmetry`) keys BFS and DFS by the smallest image of a
+  world under the group, so counts are of orbits; traces stay real
+  executions.  `--sym-check` (`CmcOptions.sym_check`) checks on every
+  expanded world that the core commutes with each permutation and that
+  each property is symmetric.  `test/pgchain`'s Paxos model declares its
+  non-candidate acceptors interchangeable (`make check-pgchain-sym`):
+  PX_A drops from 2017514 to 1017203 distinct states, PX_C from 53229 to
+  27928 and PX_D from 600110 to 305148, with the same verdicts, and every
+  planted bug is caught at the same depth.  API: additive; the default
+  is off, and NULL hooks keep every count.
 
 ## 2.3.1 (2026-11-24)
 

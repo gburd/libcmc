@@ -1440,7 +1440,7 @@ test_deadline_order(void)
 
 	cmc_options_default(&o);
 	o.det = true;
-	o.drift = 100;				/* one node: no other clock to drift */
+	o.drift = 500;				/* one node: no other clock to drift */
 	CHECK(verdict_of(&to_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
 	r = mkc(&to_model, CMC_BFS, "", NULL, &o);
 	w = calloc(1, cmc_world_size(r));
@@ -2881,6 +2881,8 @@ never_true(const CmcWorld *w, CmcWhy *why)
 static const CmcProp mute_props[] = {CMC_INVARIANT(Never, never_true)};
 static const CmcModel mute_model = {"mute", &mute_core, mute_props, 1, 0};
 
+static const CmcModel sym_model;
+
 static const CmcModelEntry cli_models[] = {
 	{"toy", &toy_model},
 	{"toy-bug1", &toy_bug1_model},
@@ -2890,6 +2892,7 @@ static const CmcModelEntry cli_models[] = {
 	{"cap", &cap_model},
 	{"mute", &mute_model},
 	{"lease", &ld_model},
+	{"sym", &sym_model},
 };
 
 /* p (512 bytes) = the path of a file under $CMC_BUILD */
@@ -3511,6 +3514,567 @@ static const CmcModel hist_nondet_model = {
 	"hist_nondet", &hist_core, nd_props, 1, 0, .history_size = 1, .history = hist_nondet,
 };
 
+/* ---- symmetry reduction (2.4) ----------------------------------------- */
+
+/*
+ * A clique of 3 interchangeable nodes.  On CLIENT a node arms a timed
+ * timer; when it fires, the node sends HELLO [1, own id] to every other
+ * node.  A receiver persists [src] and, once it is durable, sets bit src
+ * of its durable "seen" mask and answers ACK [2, own id].  The sender
+ * sets bit id of its "acks" mask and asks for a wake, which replies to
+ * its client once every other node answered.  Node ids sit in the state
+ * (both masks), in message and persist bodies, in the replies and in the
+ * request log, and the timer moves the clocks, so every part of the
+ * world is permuted.  cfg bad=1 is a permute() that forgets "acks".
+ */
+typedef struct SymSt
+{
+	uint8_t		seen,			/* durable */
+				acks,
+				pad[6];
+} SymSt;
+
+static int
+sym_cfg_set(void *cfg, const char *k, const char *v)
+{
+	if (strcmp(k, "bad") || strcmp(v, "1"))
+		return -1;
+	((uint8_t *) cfg)[0] = 1;
+	return 0;
+}
+
+static int
+three(const void *c)
+{
+	(void) c;
+	return 3;
+}
+
+static void
+sym_send(CmcOut *out, int dst, uint8_t type, int self)
+{
+	CmcOutput  *o = cmc_out_push(out, CMC_OUT_SEND);
+
+	o->dst = (uint8_t) dst;
+	o->len = 2;
+	o->body[0] = type;
+	o->body[1] = (uint8_t) self;
+}
+
+static void
+sym_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	SymSt	   *s = sv;
+	CmcOutput  *o;
+
+	(void) cfg;
+	if (ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_SET_TIMER)->dur = 1;
+	if (ev->kind == CMC_EV_TIMER)
+		for (int p = 0; p < 3; p++)
+			if (p != node)
+				sym_send(out, p, 1, node);
+	if (ev->kind == CMC_EV_RECV && ev->body[0] == 1)
+	{
+		o = cmc_out_push(out, CMC_OUT_PERSIST);
+		o->len = 1;
+		o->body[0] = ev->body[1];
+	}
+	if (ev->kind == CMC_EV_FLUSHED)
+		sym_send(out, ev->body[0], 2, node);
+	if (ev->kind == CMC_EV_RECV && ev->body[0] == 2)
+	{
+		s->acks |= (uint8_t) (1u << ev->body[1]);
+		cmc_out_push(out, CMC_OUT_WAKE)->arg = 3;
+	}
+	if (ev->kind == CMC_EV_WAKE && s->acks == (uint8_t) (7u & ~(1u << node)))
+		cmc_out_push(out, CMC_OUT_REPLY)->req = 1;
+}
+
+static void
+sym_persist(const void *cfg, int node, void *d, const uint8_t *body, uint16_t len)
+{
+	(void) cfg;
+	(void) node;
+	(void) len;
+	((SymSt *) d)->seen |= (uint8_t) (1u << body[0]);
+}
+
+static int
+sym_classes(const void *cfg, int *cls, int max)
+{
+	(void) cfg;
+	for (int n = 0; n < 3 && n < max; n++)
+		cls[n] = 1;
+	return 3;
+}
+
+static uint8_t
+sym_mask(const uint8_t *perm, uint8_t m)
+{
+	uint8_t		x = 0;
+
+	for (int n = 0; n < 3; n++)
+		if (m & (1u << n))
+			x |= (uint8_t) (1u << perm[n]);
+	return x;
+}
+
+static void
+sym_permute(const void *cfg, const uint8_t *perm, int node, void *sv)
+{
+	SymSt	   *s = sv;
+
+	(void) node;
+	s->seen = sym_mask(perm, s->seen);
+	if (!((const uint8_t *) cfg)[0])
+		s->acks = sym_mask(perm, s->acks);
+}
+
+/* a message [type, id] or a persist record [id] */
+static void
+sym_permute_msg(const void *cfg, const uint8_t *perm, uint8_t *body, uint16_t len)
+{
+	(void) cfg;
+	body[len - 1] = perm[body[len - 1]];
+}
+
+static void
+sym_hist(const CmcWorld *pre, CmcAction a, const CmcWorld *post, uint8_t *ghost)
+{
+	(void) pre;
+	(void) post;
+	if (CMC_ACT_KIND(a) == CMC_A_CLIENT && !ghost[0])
+		ghost[0] = (uint8_t) (1 + CMC_ACT_A(a));
+}
+
+static void
+sym_permute_hist(const void *cfg, const uint8_t *perm, uint8_t *ghost)
+{
+	(void) cfg;
+	if (ghost[0])
+		ghost[0] = (uint8_t) (1 + perm[ghost[0] - 1]);
+}
+
+/* symmetric: nobody has seen itself, and a reply needs every ack */
+static bool
+sym_inv(const CmcWorld *w, CmcWhy *why)
+{
+	for (int n = 0; n < 3; n++)
+	{
+		const SymSt *s = cmc_node(w, n);
+
+		if ((s->seen | s->acks) & (1u << n))
+		{
+			cmc_why(why, "node %d heard from itself", n);
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool
+sym_any_reply(const CmcWorld *w, CmcWhy *why)
+{
+	(void) why;
+	return cmc_nreplies(w) > 0;
+}
+
+/* not symmetric: names node 2 and node 0 */
+static bool
+sym_asym(const CmcWorld *w, CmcWhy *why)
+{
+	if (((const SymSt *) cmc_node(w, 2))->seen & 1)
+	{
+		cmc_why(why, "node 2 has seen node 0");
+		return false;
+	}
+	return true;
+}
+
+static bool
+sym_asym_act(const CmcWorld *pre, CmcAction a, const CmcWorld *post, CmcWhy *why)
+{
+	(void) pre;
+	(void) post;
+	(void) why;
+	return CMC_ACT_KIND(a) != CMC_A_FLUSH || CMC_ACT_A(a) != 1;
+}
+
+static bool
+sym_done(const CmcWorld *w, CmcWhy *why)
+{
+	(void) why;
+	return cmc_nreplies(w) == 3;
+}
+
+static const CmcProp sym_props[] = {
+	CMC_INVARIANT(NoSelf, sym_inv),
+	CMC_WITNESS_PROP(Replied, sym_any_reply),
+	CMC_INVARIANT(Asym, sym_asym),
+	CMC_ACTION_PROPERTY(AsymAct, sym_asym_act),
+	CMC_EVENTUALLY_PROP(Done, sym_done),
+};
+static const CmcCore sym_core = {
+	.name = "sym", .state_size = sizeof(SymSt), .durable_size = 1, .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = sym_cfg_set, .nnodes = three,
+	.init = zero8, .step = sym_step, .apply_persist = sym_persist,
+	.symmetry = sym_classes, .permute = sym_permute, .permute_msg = sym_permute_msg,
+};
+static const CmcModel sym_model = {
+	"sym", &sym_core, sym_props, 5, 0, .requests = true, .history_size = 1,
+	.history = sym_hist, .permute_history = sym_permute_hist,
+};
+static int
+sym_bad_count(const void *cfg, int *cls, int max)
+{
+	return sym_classes(cfg, cls, max) - 1;
+}
+
+/* every node in a class of its own: the group is the identity alone */
+static int
+sym_fixed(const void *cfg, int *cls, int max)
+{
+	(void) cfg;
+	memset(cls, 0, sizeof(int) * (size_t) max);
+	return 3;
+}
+
+static int
+sym_odd(const void *c, int n)
+{
+	(void) c;
+	return n != 1;
+}
+
+static const CmcModel sym_nohist_model = {
+	"sym_nohist", &sym_core, sym_props, 5, 0, .requests = true, .history_size = 1,
+	.history = sym_hist,
+};
+
+/*
+ * The orbit count, computed without the engine's symmetry code.  A plain
+ * BFS over the engine's public step API finds every reachable world and
+ * the action path to it; for each world w and each permutation p, the
+ * path renamed by p (deliveries matched by channel, since a FIFO channel
+ * has one head) is replayed from the initial world, and w is merged with
+ * the world that replay ends in.  The classes left are the orbits.
+ */
+typedef struct Orb
+{
+	CmcRun	   *r;
+	size_t		ws;
+	int			n,
+				cap;
+	uint8_t    *w;				/* n worlds */
+	int		   *par;			/* parent index, -1 = initial */
+	CmcAction   *act;			/* the action from the parent */
+	int		   *uf;				/* union-find */
+	int		   *hash;			/* open addressing, 4 x cap slots, -1 = free */
+} Orb;
+
+static int
+orb_find(Orb *b, const uint8_t *w, bool add, int par, CmcAction a)
+{
+	uint64_t	fp[2];
+	size_t		hs = (size_t) b->cap * 4,
+				h;
+
+	cmc_fingerprint(w, b->ws, fp);
+	for (h = fp[0] % hs; b->hash[h] >= 0; h = (h + 1) % hs)
+		if (memcmp(b->w + (size_t) b->hash[h] * b->ws, w, b->ws) == 0)
+			return b->hash[h];
+	if (!add || b->n == b->cap)
+		return -1;
+	memcpy(b->w + (size_t) b->n * b->ws, w, b->ws);
+	b->par[b->n] = par;
+	b->act[b->n] = a;
+	b->uf[b->n] = b->n;
+	b->hash[h] = b->n;
+	return b->n++;
+}
+
+static int
+orb_root(Orb *b, int i)
+{
+	while (b->uf[i] != i)
+		i = b->uf[i] = b->uf[b->uf[i]];
+	return i;
+}
+
+/* the action of world x matching a renamed by perm, or 0 */
+static CmcAction
+orb_match(CmcRun *r, const uint8_t *x, CmcAction a, const uint8_t *perm)
+{
+	CmcAction	acts[CMC_MAX_ACTIONS];
+	unsigned	k = CMC_ACT_KIND(a);
+	bool		msg = k == CMC_A_DELIVER || k == CMC_A_DROP;
+	unsigned	pa = perm[CMC_ACT_A(a)],
+				pb = msg || k == CMC_A_RESET ? perm[CMC_ACT_B(a)] : CMC_ACT_B(a),
+				c = CMC_ACT_C(a);
+	int			na = cmc_enabled(r, x, acts, CMC_MAX_ACTIONS);
+
+	/* a timer's drift variant 1 + 2j or 2 + 2j names node j */
+	if (k == CMC_A_FIRE && c > 0)
+		c = 1 + 2 * perm[(c - 1) / 2] + (c - 1) % 2;
+	for (int i = 0; i < na; i++)
+		if (CMC_ACT_KIND(acts[i]) == k && CMC_ACT_A(acts[i]) == pa &&
+			CMC_ACT_B(acts[i]) == pb && CMC_ACT_C(acts[i]) == c &&
+			(msg || CMC_ACT_D(acts[i]) == CMC_ACT_D(a)))
+			return acts[i];
+	return 0;
+}
+
+/* every permutation of 3 nodes */
+static const uint8_t orb_perms[6][3] = {
+	{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}
+};
+
+/* Replays world i's path renamed by perm into x; false if a step fails. */
+static bool
+orb_replay(Orb *b, int i, const uint8_t *perm, uint8_t *x)
+{
+	CmcAction	path[64];
+	int			len = 0;
+
+	for (int j = i; b->par[j] >= 0 && len < 64; j = b->par[j])
+		path[len++] = b->act[j];
+	cmc_world_init(b->r, x);
+	while (len-- > 0)
+	{
+		CmcAction	a = orb_match(b->r, x, path[len], perm);
+
+		if (!a || cmc_apply(b->r, x, a) != 0)
+			return false;
+	}
+	return true;
+}
+
+/* Returns the number of orbits of the worlds run r reaches, or -1. */
+static int
+orbit_count(CmcRun *r, int cap)
+{
+	Orb			b = {r, cmc_world_size(r), 0, cap, NULL, NULL, NULL, NULL, NULL};
+	CmcAction	acts[CMC_MAX_ACTIONS];
+	uint8_t    *x = malloc(b.ws);
+	int			orbits = 0;
+	bool		ok = true;
+
+	b.w = malloc((size_t) cap * b.ws);
+	b.par = malloc(sizeof(int) * (size_t) cap);
+	b.act = malloc(sizeof(CmcAction) * (size_t) cap);
+	b.uf = malloc(sizeof(int) * (size_t) cap);
+	b.hash = malloc(sizeof(int) * (size_t) cap * 4);
+	memset(b.hash, 0xff, sizeof(int) * (size_t) cap * 4);
+	cmc_world_init(r, x);
+	orb_find(&b, x, true, -1, 0);
+	for (int i = 0; i < b.n && ok; i++)
+	{
+		int			na = cmc_enabled(r, b.w + (size_t) i * b.ws, acts, CMC_MAX_ACTIONS);
+
+		for (int k = 0; k < na && ok; k++)
+		{
+			memcpy(x, b.w + (size_t) i * b.ws, b.ws);
+			ok = cmc_apply(r, x, acts[k]) == 0 && (orb_find(&b, x, true, i, acts[k]) >= 0);
+		}
+	}
+	for (int i = 0; i < b.n && ok; i++)
+		for (int p = 1; p < 6 && ok; p++)
+		{
+			int			j;
+
+			ok = orb_replay(&b, i, orb_perms[p], x) && (j = orb_find(&b, x, false, 0, 0)) >= 0;
+			if (ok)
+				b.uf[orb_root(&b, i)] = orb_root(&b, j);
+		}
+	for (int i = 0; i < b.n; i++)
+		orbits += orb_root(&b, i) == i;
+	free(x);
+	free(b.w);
+	free(b.par);
+	free(b.act);
+	free(b.uf);
+	free(b.hash);
+	return ok ? orbits : -1;
+}
+
+/* a run of sym_model, cfg cfg, with symmetry and check as given */
+static int	sym_crashes,
+			sym_drift;
+
+static CmcVerdict
+sym_run(const CmcModel *m, const char *cfg, const char *const *props, bool sym, bool check,
+		char *why, uint64_t *distinct)
+{
+	CmcOptions	o;
+
+	cmc_options_default(&o);
+	o.crash_budget = sym_crashes;
+	o.drift = sym_drift;
+	o.symmetry = sym;
+	o.sym_check = check;
+	o.req_cap = 3;
+	{
+		CmcRun	   *r = mkc(m, CMC_BFS, cfg, props, &o);
+		CmcResult	res;
+		CmcVerdict	v;
+
+		if (!r)
+			return CMC_ERROR;
+		cmc_check(r, &res);
+		v = res.verdict;
+		snprintf(why, 512, "%s", res.why);
+		if (distinct)
+			*distinct = res.distinct;
+		cmc_result_free(&res);
+		cmc_run_free(r);
+		return v;
+	}
+}
+
+/* run setups the symmetry code refuses, each with its reason */
+static void
+sym_refusals(void)
+{
+	static const char *const safe[] = {"NoSelf", NULL};
+	CmcCore		c = sym_core;
+	CmcModel	m = sym_model;
+	CmcOptions	o;
+	char		err[256];
+	CmcRun	   *r;
+
+	cmc_options_default(&o);
+	o.quiet = true;
+	o.req_cap = 3;
+	o.symmetry = true;
+	m.core = &c;
+	c.symmetry = sym_bad_count;
+	CHECK(!cmc_run_new(&m, "", safe, &o, err, sizeof(err)) && strstr(err, "node count 3"));
+	c.symmetry = sym_classes;
+	c.clients = sym_odd;
+	CHECK(!cmc_run_new(&m, "", safe, &o, err, sizeof(err)) && strstr(err, "clients()"));
+	c.clients = NULL;
+	c.crashable = sym_odd;
+	CHECK(!cmc_run_new(&m, "", safe, &o, err, sizeof(err)) && strstr(err, "crashable()"));
+	c.crashable = NULL;
+	c.permute_msg = NULL;
+	CHECK(!cmc_run_new(&m, "", safe, &o, err, sizeof(err)) && strstr(err, "declares no"));
+	c.permute_msg = sym_permute_msg;
+	c.permute = NULL;
+	CHECK(!cmc_run_new(&m, "", safe, &o, err, sizeof(err)) && strstr(err, "declares no"));
+	c = cap_core;
+	c.symmetry = sym_classes;
+	c.permute = sym_permute;
+	c.permute_msg = sym_permute_msg;
+	m = (CmcModel) {"cap", &c, nd_props, 1, 0};
+	CHECK(!cmc_run_new(&m, "", NULL, &o, err, sizeof(err)) && strstr(err, "actor mode"));
+	/* a trivial group is no reduction: the counts do not move */
+	c = sym_core;
+	c.symmetry = sym_fixed;
+	m = sym_model;
+	m.core = &c;
+	o.sym_check = true;
+	r = mkc(&m, CMC_BFS, "", safe, &o);
+	CHECK(r != NULL);
+	if (r)
+	{
+		CmcResult	res;
+		uint64_t	full = 0;
+		char		why[512];
+
+		cmc_check(r, &res);
+		CHECK(sym_run(&sym_model, "", safe, false, false, why, &full) == CMC_PASS);
+		CHECK(res.verdict == CMC_PASS && res.distinct == full);
+		cmc_result_free(&res);
+		cmc_run_free(r);
+	}
+}
+
+static void
+test_symmetry(void)
+{
+	static const char *const safe[] = {"NoSelf", "Replied", NULL};
+	static const char *const asym[] = {"NoSelf", "Asym", NULL};
+	static const char *const asym_act[] = {"NoSelf", "AsymAct", NULL};
+	static const char *const live[] = {"Done", NULL};
+	char		why[512],
+				err[256];
+	uint64_t	full = 0,
+				red = 0;
+	int			orbits;
+	CmcOptions	o;
+	CmcRun	   *r;
+
+	/* the reduced count is the orbit count, and the verdict is the same */
+	CHECK(sym_run(&sym_model, "", safe, false, false, why, &full) == CMC_PASS);
+	CHECK(sym_run(&sym_model, "", safe, true, true, why, &red) == CMC_PASS);
+	cmc_options_default(&o);
+	o.req_cap = 3;
+	r = mkc(&sym_model, CMC_BFS, "", safe, &o);
+	orbits = orbit_count(r, 1 << 18);
+	cmc_run_free(r);
+	if (getenv("CMC_VERBOSE"))
+		fprintf(stderr, "  sym: %llu distinct, %llu reduced, %d orbits\n",
+				(unsigned long long) full, (unsigned long long) red, orbits);
+	CHECK(orbits > 0 && (uint64_t) orbits == red && red < full);
+	/* drifting clocks, and a crash (persist prefixes, connection resets),
+	 * keep the verdict and pass the check */
+	sym_drift = 500;
+	CHECK(sym_run(&sym_model, "", safe, true, true, why, &red) == CMC_PASS);
+	sym_drift = 0;
+	sym_crashes = 1;
+	CHECK(sym_run(&sym_model, "", safe, true, true, why, &red) == CMC_PASS);
+	/* the asymmetric invariant is violated, with symmetry on and off */
+	CHECK(sym_run(&sym_model, "", asym, false, false, why, NULL) == CMC_VIOLATION);
+	CHECK(sym_run(&sym_model, "", asym, true, false, why, NULL) == CMC_VIOLATION);
+	/* --sym-check catches a wrong permute() and asymmetric properties */
+	CHECK(sym_run(&sym_model, "bad=1", safe, true, true, why, NULL) == CMC_VIOLATION &&
+		  strstr(why, "core is not symmetric"));
+	CHECK(sym_run(&sym_model, "", asym, true, true, why, NULL) == CMC_VIOLATION &&
+		  strstr(why, "property Asym is not symmetric"));
+
+	CHECK(sym_run(&sym_model, "", asym_act, true, true, why, NULL) == CMC_VIOLATION &&
+		  strstr(why, "action property AsymAct is not symmetric"));
+	/* refusals */
+	cmc_options_default(&o);
+	o.quiet = true;
+	o.req_cap = 3;
+	o.symmetry = true;
+	CHECK(!cmc_run_new(&sym_nohist_model, "", safe, &o, err, sizeof(err)) &&
+		  strstr(err, "permute_history"));
+	CHECK(!cmc_run_new(&sym_model, "", live, &o, err, sizeof(err)) &&
+		  strstr(err, "CMC_EVENTUALLY"));
+	CHECK(!cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) &&
+		  strstr(err, "declares no symmetry"));
+	o.symmetry = false;
+	o.sym_check = true;
+	CHECK(!cmc_run_new(&sym_model, "", safe, &o, err, sizeof(err)) &&
+		  strstr(err, "needs --symmetry on"));
+	o.symmetry = true;
+	o.search = CMC_SIMULATE;
+	CHECK(!cmc_run_new(&sym_model, "", safe, &o, err, sizeof(err)) &&
+		  strstr(err, "BFS or DFS"));
+	sym_crashes = 0;
+	sym_refusals();
+	/* DFS keys its table by the canonical form too, and checks */
+	cmc_options_default(&o);
+	o.req_cap = 3;
+	o.symmetry = true;
+	o.sym_check = true;
+	o.search = CMC_DFS;
+	o.max_depth = 60;
+	CHECK(verdict_of(&sym_model, &o, safe, NULL, 0, why, sizeof(why), NULL) == CMC_PASS);
+	CHECK(verdict_of(&sym_model, &o, asym, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "not symmetric"));
+	/* the command line */
+	CLI(0, "symmetry reduction on, symmetry check on", "--model", "sym", "--inv", "NoSelf",
+		"--prop", "Replied", "--req-cap", "3", "--symmetry", "on", "--sym-check");
+	CLI(0, "No error", "--model", "sym", "--inv", "NoSelf", "--req-cap", "3",
+		"--symmetry", "off");
+	CLI(3, "declares no symmetry", "--model", "toy", "--all-props", "--symmetry", "on");
+	CLI(3, "usage", "--model", "toy", "--all-props", "--symmetry", "yes");
+}
+
 /* a call that must end the process with status 3 (a model bug) */
 static void
 expect_exit3(const CmcModel *m)
@@ -3710,6 +4274,7 @@ main(void)
 	test_cli_front_ends();
 	test_request_log();
 	test_history();
+	test_symmetry();
 	test_version();
 	if (failures)
 	{

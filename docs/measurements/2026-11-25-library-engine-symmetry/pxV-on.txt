@@ -1,0 +1,14 @@
+cmc: model paxos, cfg "nodes=5,voters=5,q1=3,q2=3,slots=1,rounds=2,candidates=1", breadth-first search, world 3152 bytes
+cmc: symmetry reduction on
+Model checking completed. No error has been found.
+  Estimated probability of a 128-bit fingerprint collision (n^2/2^129): 2.35e-26
+Witness ReachChosen: reached
+Witness ReachSecondLeader: reached
+Witness ReachRefused: reached
+  ReachChosen first reached at depth 21
+  ReachSecondLeader first reached at depth 25
+  ReachRefused first reached at depth 3
+22873679 states generated, 3997213 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 68.
+Finished in 182.90s
+wall 182.92 s, max RSS 1210560 kB

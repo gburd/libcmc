@@ -54,6 +54,7 @@ usage(void)
 			"         [--timer-cap N] [--wake-cap N] [--drift R] [--max-time T]\n"
 			"         [--req-cap N]\n"
 			"         [--net fifo|bag] [--live-steps K]\n"
+			"         [--symmetry on|off] [--sym-check]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
 			"         [--define TAG ...] [--no-deadlock]\n"
 			"       cmc --spec | --emit-cml FILE.tla [--config FILE.cfg] [--no-deadlock]\n"
@@ -771,6 +772,19 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 				usage();
 			set[7] = true;
 		}
+		else if (!strcmp(a, "--symmetry"))
+		{
+			const char *v = ARG();
+
+			if (!strcmp(v, "on"))
+				o.symmetry = true;
+			else if (!strcmp(v, "off"))
+				o.symmetry = false;
+			else
+				usage();
+		}
+		else if (!strcmp(a, "--sym-check"))
+			o.sym_check = true;
 		else if (!strcmp(a, "--live-steps"))
 			o.live_steps = (int) num_arg(a, ARG(), 1, INT_MAX), set[8] = true;
 		else
@@ -804,6 +818,8 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		   o.search == CMC_DFS ? "depth-first search" :
 		   o.search == CMC_SIMULATE ? "random simulation" : "replay",
 		   cmc_world_size(r), o.det ? ", determinism gate on" : "");
+	if (o.symmetry)
+		printf("cmc: symmetry reduction on%s\n", o.sym_check ? ", symmetry check on" : "");
 	fflush(stdout);
 	cmc_check(r, &res);
 

@@ -199,6 +199,21 @@ typedef struct CmcCore
 	/* optional: may this node crash (from cfg, never state)?  NULL = every
 	 * node may.  CMC_A_CRASH is never offered for a node it excludes. */
 	int			(*crashable) (const void *cfg, int node);
+	/*
+	 * Symmetry reduction (actor mode), all three or none.  symmetry()
+	 * writes cls[n] for each node n < max and returns the number written
+	 * (the node count); nodes sharing a class value > 0 are
+	 * interchangeable, class 0 is fixed.  From cfg, never state.  A
+	 * permutation perm[old] = new maps each class onto itself.  permute()
+	 * rewrites the node ids inside node's state (node is its id before
+	 * the permutation), and permute_msg() those inside a message or
+	 * persist body.  The engine moves what it owns (node order, timers,
+	 * wakes, clocks, persists, the net, replies, the request log).
+	 */
+	int			(*symmetry) (const void *cfg, int *cls, int max);
+	void		(*permute) (const void *cfg, const uint8_t *perm, int node, void *state);
+	void		(*permute_msg) (const void *cfg, const uint8_t *perm, uint8_t *body,
+								uint16_t len);
 } CmcCore;
 
 /* ---- what properties see ------------------------------------------- */
@@ -286,6 +301,9 @@ typedef struct CmcModel
 	size_t		history_size;
 	void		(*history) (const CmcWorld *pre, CmcAction a,
 							const CmcWorld *post, uint8_t *ghost);
+	/* symmetry with a history: rewrites the node ids inside ghost under
+	 * perm[old] = new.  Required when both are in use. */
+	void		(*permute_history) (const void *cfg, const uint8_t *perm, uint8_t *ghost);
 } CmcModel;
 
 /* ---- the engine ------------------------------------------------------ */
@@ -338,6 +356,9 @@ typedef struct CmcOptions
 								 * x client budget must fit), at most 64 */
 	CmcNet		net;
 	int			live_steps;		/* CMC_EVENTUALLY bound K (fair steps) */
+	bool		symmetry;		/* reduce by the core's symmetry (needs its hooks) */
+	bool		sym_check;		/* check the symmetry obligations on every
+								 * expanded world (needs symmetry) */
 	FILE	   *out;
 } CmcOptions;
 
