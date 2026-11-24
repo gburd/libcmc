@@ -218,6 +218,7 @@ in the kernel, untouched.
 | determinism of a core | checked | `--det` runs every step twice | toy_gate |
 | uninitialised reads in a core | checked | MemorySanitizer | `make check-msan` |
 | a node that never crashes (`crashable()`) | exact | read from cfg only; `CRASH` is never offered for an excluded node, and applying one is refused | test_cmc test_crashable |
+| timers and wakes with an argument (`arg2`) | exact | `{id, arg2}` tables per node, sorted; the same id with two arguments is two pending events; past `--timer-cap` or `--wake-cap` is an engine violation | test_cmc test_timer_args; HC, toy and pg_chain counts unchanged |
 | crash, simulation, replay, the fair schedule | exact | a crash clears the node's self-channel; simulation and replay check every state; an armed timer is never starved (Phase 2 of the plan) | test_cmc |
 
 ## Examples

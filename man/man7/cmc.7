@@ -892,6 +892,9 @@ The messages in flight.
 Each node's pending disk writes, oldest first.
 .It replies
 The ghost log of client replies, in emission order.
+.It timers, wakes
+Each node's armed timers and pending wakes, as sorted tables of
+(id, argument) pairs.
 .El
 .Pp
 Every part is kept canonical, so two worlds are the same state exactly
@@ -1134,7 +1137,8 @@ Each of these is compared with a native Linux run by
 .Pp
 In-process cores: at most 8 nodes, 32 bytes per message or persist
 record, 16 effects per step, 2048 possible actions per state, 16 timers
-and 8 waiters per node, 256 bytes of core settings, and 255 for each
+and 8 waiters per node by default
+.Pq Fl -timer-cap , Fl -wake-cap , 256 bytes of core settings, and 255 for each
 budget and cap.
 .Sh SEE ALSO
 .Xr cmc 1 ,

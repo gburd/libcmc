@@ -1029,6 +1029,118 @@ test_crashable(void)
 	cmc_run_free(r);
 }
 
+/* Timers and wakes with an argument.  On CLIENT the node arms timer 1
+ * twice, with arg2 9 and 7, and asks for wake 2 with arg2 5.  Timer
+ * (1, 9) re-arms itself and changes nothing else; timer (1, 7) and the
+ * wake record the argument they came back with; the wake cancels (1, 9). */
+typedef struct TA
+{
+	uint8_t		f7,
+				wk,
+				pad[6];
+} TA;
+
+static void
+ta_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	TA		   *s = sv;
+	CmcOutput  *o;
+
+	(void) cfg;
+	(void) node;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		o = cmc_out_push(out, CMC_OUT_SET_TIMER);
+		o->arg = 1;
+		o->arg2 = 9;
+		o = cmc_out_push(out, CMC_OUT_SET_TIMER);
+		o->arg = 1;
+		o->arg2 = 7;
+		o = cmc_out_push(out, CMC_OUT_WAKE);
+		o->arg = 2;
+		o->arg2 = 5;
+	}
+	else if (ev->kind == CMC_EV_TIMER && ev->arg2 == 9)
+	{
+		o = cmc_out_push(out, CMC_OUT_SET_TIMER);
+		o->arg = 1;
+		o->arg2 = 9;
+	}
+	else if (ev->kind == CMC_EV_TIMER)
+		s->f7 = (uint8_t) ev->arg2;
+	else if (ev->kind == CMC_EV_WAKE)
+	{
+		s->wk = (uint8_t) ev->arg2;
+		o = cmc_out_push(out, CMC_OUT_CANCEL_TIMER);
+		o->arg = 1;
+		o->arg2 = 9;
+	}
+}
+
+static bool
+ta_both(const CmcWorld *w, CmcWhy *why)
+{
+	const TA   *s = cmc_node(w, 0);
+
+	(void) why;
+	return s->f7 == 7 && s->wk == 5;
+}
+
+static const CmcProp ta_props[] = {CMC_INVARIANT(True, always_true),
+CMC_WITNESS_PROP(BothBack, ta_both)};
+static const CmcCore ta_core = {
+	.name = "ta", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = nd_nnodes, .init = zero8, .step = ta_step,
+};
+static const CmcModel ta_model = {"ta", &ta_core, ta_props, 2, 0};
+
+static void
+test_timer_args(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	uint8_t    *w,
+			   *w2;
+	CmcAction	a[CMC_MAX_ACTIONS];
+	char		why[512];
+
+	cmc_options_default(&o);
+	o.det = true;
+	r = mkc(&ta_model, CMC_BFS, "", NULL, &o);
+	w = calloc(1, cmc_world_size(r));
+	w2 = calloc(1, cmc_world_size(r));
+	cmc_world_init(r, w);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) == 0);
+	/* equal deadlines, different arguments: two events, sorted by arg2 */
+	CHECK(cmc_enabled(r, w, a, CMC_MAX_ACTIONS) == 3);
+	CHECK(a[0] == CMC_ACT(CMC_A_FIRE, 0, 1, 0, 7) && a[1] == CMC_ACT(CMC_A_FIRE, 0, 1, 0, 9));
+	CHECK(a[2] == CMC_ACT(CMC_A_WAKE, 0, 2, 0, 5));
+	/* re-arming (1, 9) after (1, 7) gives the same bytes: canonical */
+	memcpy(w2, w, cmc_world_size(r));
+	CHECK(cmc_apply(r, w2, a[1]) == 0 && memcmp(w, w2, cmc_world_size(r)) == 0);
+	CHECK(cmc_apply(r, w2, CMC_ACT(CMC_A_FIRE, 0, 1, 1, 7)) != 0);
+	CHECK(cmc_apply(r, w2, CMC_ACT(CMC_A_FIRE, 0, 1, 0, 8)) != 0);
+	CHECK(cmc_apply(r, w2, CMC_ACT(CMC_A_WAKE, 0, 2, 0, 4)) != 0);
+	CHECK(cmc_apply(r, w2, a[2]) == 0 && ((TA *) w2)->wk == 5);
+	CHECK(cmc_enabled(r, w2, a, CMC_MAX_ACTIONS) == 1);	/* (1, 9) cancelled */
+	CHECK(cmc_apply(r, w2, a[0]) == 0 && ((TA *) w2)->f7 == 7);
+	free(w);
+	free(w2);
+	cmc_run_free(r);
+	CHECK(verdict_of(&ta_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	/* the caps are errors, never truncation */
+	o.timer_cap = 1;
+	CHECK(verdict_of(&ta_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "timer_cap 1 exceeded"));
+	o.timer_cap = 2;
+	o.wake_cap = 0;
+	CHECK(verdict_of(&ta_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "wake_cap 0 exceeded"));
+	o.timer_cap = 256;
+	CHECK(verdict_of(&ta_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_ERROR);
+}
+
 static void
 test_b5_crash_resets_connections(void)
 {
@@ -1593,10 +1705,10 @@ bad_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
 			cmc_out_push(out, CMC_OUT_SEND)->dst = 5;
 			break;
 		case 2:					/* a timer id past the last */
-			cmc_out_push(out, CMC_OUT_CANCEL_TIMER)->arg = CMC_MAX_TIMERS;
+			cmc_out_push(out, CMC_OUT_CANCEL_TIMER)->arg = 256;
 			break;
 		case 3:					/* a waiter id past the last */
-			cmc_out_push(out, CMC_OUT_WAKE)->arg = CMC_MAX_WAKES;
+			cmc_out_push(out, CMC_OUT_WAKE)->arg = 256;
 			break;
 		case 4:					/* more persists than --persist-cap */
 			for (int i = 0; i < 3; i++)
@@ -1637,7 +1749,7 @@ static void
 test_output_rules(void)
 {
 	static const char *const want[] = {"output body too long", "SEND to bad node 5",
-		"bad timer id 16", "bad waiter id 8", "persist_cap 2 exceeded",
+		"bad timer id 256", "bad waiter id 256", "persist_cap 2 exceeded",
 		"reply_cap 8 exceeded", "net_cap 8 exceeded", "unknown output kind 99",
 	"core emitted -1 outputs", "core emitted 17 outputs"};
 	char		path[512];
@@ -2192,11 +2304,16 @@ test_replay_refusals(void)
 		" persist=2 reply=8 mode=fifo live=999\n",
 		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
 		" persist=2 reply=8 mode=fifo live=1000\nact 0701000000000000\nact 0701000000000000\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=8 mode=fifo live=1000\ncaps timer=15 wake=8\n",
+		"# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0 net=8"
+		" persist=2 reply=8 mode=fifo live=1000\ncaps timer=16\n",
 	};
 	static const char *const want[] = {"not a cmc replay", "lacks its model", "lacks its model",
 		"lacks its model", "bad env line", "recorded with cfg", "different environment",
 		"different environment", "different environment", "different environment",
-		"different environment", "different environment", "replay step 2"};
+		"different environment", "different environment", "replay step 2",
+	"different environment", "bad caps line"};
 	char		path[512];
 
 	snprintf(path, sizeof(path), "%s/refuse.replay",
@@ -2597,13 +2714,13 @@ test_cli_runs(void)
 	CLI(3, "a FIFO connection never duplicates", "--model", "toy", "--all-props", "--dups", "1");
 	CLI(3, "usage:", "--all-props");
 	/* an option at the end of the line with no value */
-	for (int i = 0; i < 24; i++)
+	for (int i = 0; i < 26; i++)
 	{
 		static const char *const opt[] = {"--cfg", "--tlc-cfg", "--inv", "--dfs", "--seed",
 			"--walks", "--depth", "--replay", "--max-states", "--time", "--trace-out",
 			"--progress", "--clients", "--drops", "--dups", "--crashes", "--net-cap",
 			"--persist-cap", "--reply-cap", "--net", "--live-steps", "--prop", "--model",
-		"--bfs"};
+		"--timer-cap", "--wake-cap", "--bfs"};
 
 		/* --bfs takes no value, so the line is merely short of a model */
 		CLI(3, "usage:", "--all-props", opt[i]);
@@ -2617,7 +2734,7 @@ test_cli_runs(void)
 	CLI(0, "34 distinct states found", "--model", "toy", "--all-props", "--bfs", "--det",
 		"--clients", "1", "--drops", "0", "--crashes", "0", "--net-cap", "8",
 		"--persist-cap", "2", "--reply-cap", "8", "--net", "fifo", "--live-steps", "1000",
-		"--max-states", "0", "--time", "60", "--progress", "0", "--quiet");
+		"--timer-cap", "16", "--wake-cap", "8", "--max-states", "0", "--time", "60", "--progress", "0", "--quiet");
 	CLI(0, "ReachCS first reached at depth 4", "--model", "toy", "--all-props");
 	CLI(0, "Depth-first search completed within depth 40", "--model", "toy",
 		"--all-props", "--dfs", "40");
@@ -2672,14 +2789,24 @@ test_cli_runs(void)
 	/* flags given agree with the file, so each one replaces the file's */
 	CLI(1, "Invariant Mutex is violated", "--replay", rp, "--inv", "Mutex", "--clients", "1",
 		"--drops", "0", "--dups", "0", "--net-cap", "8", "--persist-cap", "2", "--reply-cap",
-		"8", "--net", "fifo", "--live-steps", "1000");
+		"8", "--net", "fifo", "--live-steps", "1000", "--timer-cap", "16", "--wake-cap", "8");
 	CLI(3, "recorded with different environment bounds", "--replay", rp, "--inv", "Mutex",
 		"--crashes", "1");
+	CLI(3, "recorded with different environment bounds", "--replay", rp, "--inv", "Mutex",
+		"--wake-cap", "3");
 	CLI(3, "recorded with model toy_bug1_model, not toy_model", "--replay", rp,
 		"--model", "toy", "--inv", "Mutex");
 	CLI(3, "cannot open /nonexistent/x.replay", "--replay", "/nonexistent/x.replay",
 		"--model", "toy", "--inv", "Mutex");
 	CLI(3, "usage:", "--replay", "/nonexistent/x.replay", "--inv", "Mutex");
+	/* the file's caps, and a garbled caps line, which the driver leaves
+	 * to the engine to refuse */
+	cli_write(rp, "# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0"
+			  " net=8 persist=2 reply=8 mode=fifo live=1000\ncaps timer=3 wake=2\n");
+	CLI(0, "Replay completed", "--replay", rp, "--inv", "Mutex");
+	cli_write(rp, "# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0"
+			  " net=8 persist=2 reply=8 mode=fifo live=1000\ncaps x\n");
+	CLI(3, "bad caps line", "--replay", rp, "--inv", "Mutex");
 	cli_write(rp, "# cmc replay v2\nmodel always_toy\ncfg\nenv garbled\n");
 	CLI(3, "bad env line in replay file", "--replay", rp, "--inv", "ReachCS");
 	/* the file names the model by its own name, not its table name */
@@ -2804,6 +2931,7 @@ main(void)
 	test_b4_flushed_cannot_write_durable();
 	test_b5_crash_resets_connections();
 	test_crashable();
+	test_timer_args();
 	test_m1_large_durable();
 	test_m3_output_overflow();
 	test_m4_replay_conflict();

@@ -77,6 +77,8 @@
 .Op Fl -net-cap Ar n
 .Op Fl -persist-cap Ar n
 .Op Fl -reply-cap Ar n
+.Op Fl -timer-cap Ar n
+.Op Fl -wake-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
 .Nm
@@ -768,6 +770,12 @@ Pending disk writes per node.
 Default 2.
 .It Fl -reply-cap Ar n
 Client replies recorded in the ghost log.
+Default 8.
+.It Fl -timer-cap Ar n
+Timers armed at once on one node, each named by its id and argument.
+Default 16.
+.It Fl -wake-cap Ar n
+Wakes pending at once on one node, each named by its id and argument.
 Default 8.
 .It Fl -net Cm fifo | bag
 .Cm fifo ,

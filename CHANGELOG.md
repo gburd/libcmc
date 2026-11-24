@@ -8,6 +8,17 @@ change the API in `include/cmc.h`; this file says when it does.
 - `CmcCore.crashable(cfg, node)`, like `clients()`: from the settings
   only, it says which nodes may crash; `CRASH` is not offered for a
   node it excludes.  NULL keeps every node crashable (API addition).
+- Timers and wakes carry an argument: `CmcOutput.arg2` on `SET_TIMER`,
+  `CANCEL_TIMER` and `WAKE`, returned in `CmcEvent.arg2`.  The pair
+  (id, arg2) names a pending timer or wake, so one id with two
+  arguments is two events, and ids run to 255.  The world keeps them in
+  sorted tables, `--timer-cap` and `--wake-cap` entries per node
+  (`CmcOptions.timer_cap`, `wake_cap`; defaults 16 and 8, as before).
+  `CMC_A_FIRE` and `CMC_A_WAKE` carry arg2 in the low 32 bits.  A core
+  that leaves arg2 zero sees no change: the toy, HC and pg_chain counts
+  are identical.  Replay files record the caps on a `caps` line; a file
+  without one replays with the defaults (API addition; the world layout
+  changes).
 
 ## 2.3.1 (2026-11-24)
 

@@ -221,10 +221,12 @@ A **world** is the concatenation of:
 | part | contents |
 |---|---|
 | node states | `nnodes` x `state_size` bytes; the first `durable_size` of each are durable |
-| env header | remaining budgets (drops, dups, crashes); per node: clients left, armed timers (u16), pending-persist count, pending wakes (u8), pending connection resets (u8) |
+| env header | remaining budgets (drops, dups, crashes); per node: clients left, armed-timer count, pending-wake count, pending-persist count, pending connection resets (u8) |
 | network | `net_cap` entries `{dst, src, len, body, count}` |
 | persists | `persist_cap` FIFO entries per node, `{len, body}` |
 | replies | the ghost client log, `reply_cap` entries in emission order |
+| timers | `timer_cap` entries per node, `{id, arg2}`, sorted, one per pair |
+| wakes | `wake_cap` entries per node, `{id, arg2}`, sorted, one per pair |
 
 Every part is canonical: sorted where order carries no meaning, with
 unused entries zeroed.  The world is zero-padded to 8 bytes.  The bytes
@@ -249,9 +251,9 @@ environment part of the world:
 | `DELIVER` | a message is in the network (FIFO: only a channel's head) |
 | `DROP` | drop budget left (FIFO: resets the connection, and both ends get `CONN_RESET`) |
 | `DUP` | dup budget left; bag mode only |
-| `FIRE(n, t)` | node n armed timer t (`SET_TIMER`, not yet cancelled or fired) |
+| `FIRE(n, t, a)` | node n armed timer t with argument a (`SET_TIMER`, not yet cancelled or fired); the action carries both, so the same id with two arguments is two actions |
 | `FLUSH(n)` | node n has a pending persist; the oldest completes first |
-| `WAKE(n, w)` | node n emitted `WAKE(w)` |
+| `WAKE(n, w, a)` | node n emitted `WAKE(w)` with argument a |
 | `CLIENT(n)` | node n has client budget left (and `clients(cfg, n)` allows it) |
 | `CRASH(n, j)` | crash budget left (and `crashable(cfg, n)` allows it); j = 0..k of n's k pending persists reach disk first |
 | `RESET(n, p)` | a crash or drop left node n a pending `CONN_RESET` from peer p |
