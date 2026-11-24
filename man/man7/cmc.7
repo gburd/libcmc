@@ -885,13 +885,17 @@ The first
 bytes of each are durable.
 .It header
 Remaining budgets; per node, the clients left, armed timers, pending
-wakes, pending persists and pending connection resets.
+wakes, pending persists and pending connection resets; then the
+reference time and each node's clock.
 .It network
 The messages in flight.
 .It persists
 Each node's pending disk writes, oldest first.
 .It replies
 The ghost log of client replies, in emission order.
+.It timers, wakes
+Each node's armed timers and pending wakes, as sorted tables of
+(id, argument) pairs; a timer also has its deadline, 0 if untimed.
 .It requests
 Only for a model that keeps the request log: per client request, whether
 a reply answered it, the answer, and which requests were answered
@@ -921,6 +925,12 @@ In FIFO mode a drop resets the connection.
 Dup budget is left; bag mode only.
 .It FIRE(n, t)
 Node n armed timer t and has not cancelled it.
+A timed timer fires only at its node's earliest deadline, and moves the
+clocks: that node's to the deadline, and the others by as much, or one
+of them at the slowest or fastest rate
+.Fl -drift
+allows.
+No other action takes time.
 .It FLUSH(n)
 Node n has a pending persist; the oldest completes first.
 .It WAKE(n, w)
@@ -1143,7 +1153,8 @@ Each of these is compared with a native Linux run by
 .Pp
 In-process cores: at most 8 nodes, 32 bytes per message or persist
 record, 16 effects per step, 2048 possible actions per state, 16 timers
-and 8 waiters per node, 256 bytes of core settings, and 255 for each
+and 8 waiters per node by default
+.Pq Fl -timer-cap , Fl -wake-cap , 256 bytes of core settings, and 255 for each
 budget and cap.
 .Sh SEE ALSO
 .Xr cmc 1 ,

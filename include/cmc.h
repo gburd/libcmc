@@ -41,8 +41,8 @@
 #define CMC_MSG_MAX		32		/* bytes per message body / persist record */
 #define CMC_OUT_MAX		16		/* outputs per step */
 #define CMC_MAX_ACTIONS	2048	/* enabled actions per state */
-#define CMC_MAX_TIMERS	16
-#define CMC_MAX_WAKES	8
+#define CMC_MAX_TIMERS	16		/* default timer_cap: armed timers per node */
+#define CMC_MAX_WAKES	8		/* default wake_cap: pending wakes per node */
 
 /* An action, packed so the fingerprint table can store it.  The top byte
  * is the kind: env kinds below, or a core-defined kind in direct mode. */
@@ -65,9 +65,12 @@ enum
 	CMC_A_DROP,					/* d = index in net (budget); fifo: resets the
 								 * connection a-b */
 	CMC_A_DUP,					/* d = index in net (budget; bag only) */
-	CMC_A_FIRE,					/* a = node, b = timer id */
+	CMC_A_FIRE,					/* a = node, b = timer id, d = its arg2, c =
+								 * drift variant (timed timers): 0 = every
+								 * clock at the common rate, 1 + 2j = node j's
+								 * clock slow, 2 + 2j = node j's fast */
 	CMC_A_FLUSH,					/* a = node: oldest pending persist completes */
-	CMC_A_WAKE,					/* a = node, b = waiter id */
+	CMC_A_WAKE,					/* a = node, b = waiter id, d = its arg2 */
 	CMC_A_CLIENT,				/* a = node (budget) */
 	CMC_A_CRASH,					/* a = node, b = j (budget): the first j pending
 								 * persists reached disk, then volatile is
@@ -80,9 +83,9 @@ enum
 typedef enum CmcEventKind
 {
 	CMC_EV_RECV = 1,				/* src, body: a message from src */
-	CMC_EV_TIMER,				/* arg = timer id */
+	CMC_EV_TIMER,				/* arg = timer id, arg2 = its argument */
 	CMC_EV_FLUSHED,				/* body = the record that is now durable */
-	CMC_EV_WAKE,					/* arg = waiter id */
+	CMC_EV_WAKE,					/* arg = waiter id, arg2 = its argument */
 	CMC_EV_CLIENT,				/* arg = request number at this node */
 	CMC_EV_RESTART,				/* volatile state was zeroed */
 	CMC_EV_ACTION,				/* direct mode only: action = the TLA+ action */
@@ -98,16 +101,19 @@ typedef struct CmcEvent
 	uint32_t	arg;
 	CmcAction	action;
 	const uint8_t *body;
+	uint32_t	arg2;			/* TIMER, WAKE: the argument it was set with */
+	uint64_t	now;			/* this node's clock (core's time unit) */
 } CmcEvent;
 
 /* Outputs from a core. */
 typedef enum CmcOutKind
 {
 	CMC_OUT_SEND = 1,			/* dst, body */
-	CMC_OUT_SET_TIMER,			/* arg = timer id */
-	CMC_OUT_CANCEL_TIMER,		/* arg = timer id */
+	CMC_OUT_SET_TIMER,			/* arg = timer id (< 256), arg2 = argument */
+	CMC_OUT_CANCEL_TIMER,		/* arg = timer id, arg2 = argument */
 	CMC_OUT_PERSIST,				/* body = record; FLUSHED delivers it later */
-	CMC_OUT_WAKE,				/* arg = waiter id; WAKE delivered later */
+	CMC_OUT_WAKE,				/* arg = waiter id (< 256), arg2 = argument;
+								 * WAKE delivered later */
 	CMC_OUT_REPLY				/* arg = client-visible result (ghost log);
 								 * req: the request it answers */
 } CmcOutKind;
@@ -119,6 +125,11 @@ typedef struct CmcOutput
 	uint16_t	len;
 	uint32_t	arg;
 	uint8_t		body[CMC_MSG_MAX];
+	uint32_t	arg2;			/* SET_TIMER, CANCEL_TIMER, WAKE: with arg, names
+								 * the entry; delivered back in CmcEvent.arg2 */
+	uint64_t	dur;			/* SET_TIMER: 0 = untimed (fires at any point),
+								 * > 0 = fires when this node's clock reaches
+								 * now + dur */
 	/* REPLY only: 1 + the number of the request at this node it answers
 	 * (the arg of its CMC_EV_CLIENT), 0 = none.  Needs CmcModel.requests. */
 	uint32_t	req;
@@ -185,6 +196,9 @@ typedef struct CmcCore
 	/* optional: does this node take CLIENT events (from cfg, never state)?
 	 * NULL = every node does. */
 	int			(*clients) (const void *cfg, int node);
+	/* optional: may this node crash (from cfg, never state)?  NULL = every
+	 * node may.  CMC_A_CRASH is never offered for a node it excludes. */
+	int			(*crashable) (const void *cfg, int node);
 } CmcCore;
 
 /* ---- what properties see ------------------------------------------- */
@@ -210,6 +224,9 @@ int			cmc_nreplies(const CmcWorld *w);
 /* CLIENT events delivered to node so far (environment, not core state) */
 int			cmc_requests(const CmcWorld *w, int node);
 void		cmc_reply(const CmcWorld *w, int i, int *node, uint32_t *arg);
+/* node's clock, and the reference time (environment, not core state) */
+uint64_t	cmc_clock(const CmcWorld *w, int node);
+uint64_t	cmc_now(const CmcWorld *w);
 /* the request log (CmcModel.requests): requests invoked so far, i in
  * [0, cmc_nrequests) in node order then request number; a run that keeps
  * no log exits with status 3 here rather than read as empty */
@@ -312,6 +329,11 @@ typedef struct CmcOptions
 	int			net_cap;		/* messages in flight */
 	int			persist_cap;	/* pending persists per node */
 	int			reply_cap;
+	int			timer_cap;		/* armed timers per node (CMC_MAX_TIMERS) */
+	int			wake_cap;		/* pending wakes per node (CMC_MAX_WAKES) */
+	int			drift;			/* clock drift, per thousand (0..500) */
+	uint64_t	max_time;		/* 0 = none; a world whose reference time
+								 * passed it is not expanded, INCOMPLETE */
 	int			req_cap;		/* request log slots (nodes taking clients
 								 * x client budget must fit), at most 64 */
 	CmcNet		net;

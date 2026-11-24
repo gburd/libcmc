@@ -51,6 +51,7 @@ usage(void)
 			"         [--trace-out FILE] [--progress S] [--quiet] [--list]\n"
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
+			"         [--timer-cap N] [--wake-cap N] [--drift R] [--max-time T]\n"
 			"         [--req-cap N]\n"
 			"         [--net fifo|bag] [--live-steps K]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
@@ -339,6 +340,23 @@ replay_defaults(const char *path, const CmcModel **m, char *cfg, size_t cfglen,
 			TAKE(6, reply_cap);
 			TAKE(7, net);
 			TAKE(8, live_steps);
+		}
+		else if (!strncmp(s, "caps ", 5))
+		{
+			CmcOptions	fo = *o;
+
+			if (sscanf(s, "caps timer=%d wake=%d", &fo.timer_cap, &fo.wake_cap) != 2)
+				continue;
+			TAKE(9, timer_cap);
+			TAKE(10, wake_cap);
+		}
+		else if (!strncmp(s, "time ", 5))
+		{
+			CmcOptions	fo = *o;
+
+			if (sscanf(s, "time drift=%d", &fo.drift) != 1)
+				continue;
+			TAKE(11, drift);
 #undef TAKE
 		}
 		else if (!strncmp(s, "act ", 4))
@@ -622,7 +640,7 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 	bool		all = false,
 				list = false,
 				cfg_given = false,
-				set[9] = {false};
+				set[12] = {false};
 	CmcRun	   *r;
 	CmcResult	res;
 
@@ -731,6 +749,14 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			o.persist_cap = (int) num_arg(a, ARG(), 0, 255), set[5] = true;
 		else if (!strcmp(a, "--reply-cap"))
 			o.reply_cap = (int) num_arg(a, ARG(), 0, 255), set[6] = true;
+		else if (!strcmp(a, "--timer-cap"))
+			o.timer_cap = (int) num_arg(a, ARG(), 0, 255), set[9] = true;
+		else if (!strcmp(a, "--wake-cap"))
+			o.wake_cap = (int) num_arg(a, ARG(), 0, 255), set[10] = true;
+		else if (!strcmp(a, "--drift"))
+			o.drift = (int) num_arg(a, ARG(), 0, 500), set[11] = true;
+		else if (!strcmp(a, "--max-time"))
+			o.max_time = num_arg(a, ARG(), 1, UINT64_MAX);
 		else if (!strcmp(a, "--req-cap"))
 			o.req_cap = (int) num_arg(a, ARG(), 0, 64);
 		else if (!strcmp(a, "--net"))

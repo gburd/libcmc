@@ -77,6 +77,10 @@
 .Op Fl -net-cap Ar n
 .Op Fl -persist-cap Ar n
 .Op Fl -reply-cap Ar n
+.Op Fl -timer-cap Ar n
+.Op Fl -wake-cap Ar n
+.Op Fl -drift Ar r
+.Op Fl -max-time Ar t
 .Op Fl -req-cap Ar n
 .Op Fl -net Cm fifo | bag
 .Op Fl -live-steps Ar k
@@ -770,6 +774,34 @@ Default 2.
 .It Fl -reply-cap Ar n
 Client replies recorded in the ghost log.
 Default 8.
+.It Fl -timer-cap Ar n
+Timers armed at once on one node, each named by its id and argument.
+Default 16.
+.It Fl -wake-cap Ar n
+Wakes pending at once on one node, each named by its id and argument.
+Default 8.
+.It Fl -drift Ar r
+For
+.Fl -model ,
+how far, per thousand, a node's clock may run slow or fast against
+another's, 0 to 500.
+When a timed timer fires, one other node's clock may move at the slowest
+or the fastest rate this allows; rates in between, and two clocks off
+the common rate at once, are not explored.
+Default 0.
+.It Fl -max-time Ar t
+For
+.Fl -model ,
+the horizon, in the core's time unit: a state whose reference time
+passed
+.Ar t
+is not expanded, and a run that reached one ends INCOMPLETE, never with
+a pass.
+Messages, client requests, flushes and wakes take no time; only a timed
+timer moves the clocks.
+A model that arms timed timers needs this, unless it stops arming them
+itself or the run is to end at
+.Fl -max-states .
 .It Fl -req-cap Ar n
 Slots in the request log of a model that keeps one
 .Pq see Xr libcmc 3 :
