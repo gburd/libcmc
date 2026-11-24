@@ -19,6 +19,18 @@ change the API in `include/cmc.h`; this file says when it does.
   are identical.  Replay files record the caps on a `caps` line; a file
   without one replays with the defaults (API addition; the world layout
   changes).
+- Time in the library engine: a clock per node and a reference time in
+  the world, `CmcEvent.now` (the node's clock), `cmc_clock()` and
+  `cmc_now()` for properties, and `CmcOutput.dur` on `SET_TIMER`: 0 is
+  untimed, as before; > 0 fires when the node's clock reaches now +
+  dur, in deadline order per node.  `--drift R` (`CmcOptions.drift`)
+  lets one other clock run at the slowest or fastest rate R per
+  thousand allows when a deadline fires, as process mode does;
+  `CMC_A_FIRE`'s c byte names the variant.  `--max-time T`
+  (`CmcOptions.max_time`) is a horizon: worlds past it are not
+  expanded and the run is INCOMPLETE.  Messages, clients, flushes and
+  wakes take no time.  Replay files record the drift on a `time` line
+  (API addition).
 
 ## 2.3.1 (2026-11-24)
 

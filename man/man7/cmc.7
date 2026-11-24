@@ -885,7 +885,8 @@ The first
 bytes of each are durable.
 .It header
 Remaining budgets; per node, the clients left, armed timers, pending
-wakes, pending persists and pending connection resets.
+wakes, pending persists and pending connection resets; then the
+reference time and each node's clock.
 .It network
 The messages in flight.
 .It persists
@@ -894,7 +895,7 @@ Each node's pending disk writes, oldest first.
 The ghost log of client replies, in emission order.
 .It timers, wakes
 Each node's armed timers and pending wakes, as sorted tables of
-(id, argument) pairs.
+(id, argument) pairs; a timer also has its deadline, 0 if untimed.
 .El
 .Pp
 Every part is kept canonical, so two worlds are the same state exactly
@@ -915,6 +916,12 @@ In FIFO mode a drop resets the connection.
 Dup budget is left; bag mode only.
 .It FIRE(n, t)
 Node n armed timer t and has not cancelled it.
+A timed timer fires only at its node's earliest deadline, and moves the
+clocks: that node's to the deadline, and the others by as much, or one
+of them at the slowest or fastest rate
+.Fl -drift
+allows.
+No other action takes time.
 .It FLUSH(n)
 Node n has a pending persist; the oldest completes first.
 .It WAKE(n, w)

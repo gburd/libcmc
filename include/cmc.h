@@ -65,7 +65,10 @@ enum
 	CMC_A_DROP,					/* d = index in net (budget); fifo: resets the
 								 * connection a-b */
 	CMC_A_DUP,					/* d = index in net (budget; bag only) */
-	CMC_A_FIRE,					/* a = node, b = timer id, d = its arg2 */
+	CMC_A_FIRE,					/* a = node, b = timer id, d = its arg2, c =
+								 * drift variant (timed timers): 0 = every
+								 * clock at the common rate, 1 + 2j = node j's
+								 * clock slow, 2 + 2j = node j's fast */
 	CMC_A_FLUSH,					/* a = node: oldest pending persist completes */
 	CMC_A_WAKE,					/* a = node, b = waiter id, d = its arg2 */
 	CMC_A_CLIENT,				/* a = node (budget) */
@@ -99,6 +102,7 @@ typedef struct CmcEvent
 	CmcAction	action;
 	const uint8_t *body;
 	uint32_t	arg2;			/* TIMER, WAKE: the argument it was set with */
+	uint64_t	now;			/* this node's clock (core's time unit) */
 } CmcEvent;
 
 /* Outputs from a core. */
@@ -122,6 +126,9 @@ typedef struct CmcOutput
 	uint8_t		body[CMC_MSG_MAX];
 	uint32_t	arg2;			/* SET_TIMER, CANCEL_TIMER, WAKE: with arg, names
 								 * the entry; delivered back in CmcEvent.arg2 */
+	uint64_t	dur;			/* SET_TIMER: 0 = untimed (fires at any point),
+								 * > 0 = fires when this node's clock reaches
+								 * now + dur */
 } CmcOutput;
 
 typedef struct CmcOut
@@ -213,6 +220,9 @@ int			cmc_nreplies(const CmcWorld *w);
 /* CLIENT events delivered to node so far (environment, not core state) */
 int			cmc_requests(const CmcWorld *w, int node);
 void		cmc_reply(const CmcWorld *w, int i, int *node, uint32_t *arg);
+/* node's clock, and the reference time (environment, not core state) */
+uint64_t	cmc_clock(const CmcWorld *w, int node);
+uint64_t	cmc_now(const CmcWorld *w);
 void		cmc_why(CmcWhy *why, const char *fmt,...)
 			__attribute__((format(printf, 2, 3)));
 
@@ -298,6 +308,9 @@ typedef struct CmcOptions
 	int			reply_cap;
 	int			timer_cap;		/* armed timers per node (CMC_MAX_TIMERS) */
 	int			wake_cap;		/* pending wakes per node (CMC_MAX_WAKES) */
+	int			drift;			/* clock drift, per thousand (0..500) */
+	uint64_t	max_time;		/* 0 = none; a world whose reference time
+								 * passed it is not expanded, INCOMPLETE */
 	CmcNet		net;
 	int			live_steps;		/* CMC_EVENTUALLY bound K (fair steps) */
 	FILE	   *out;

@@ -1141,6 +1141,343 @@ test_timer_args(void)
 	CHECK(verdict_of(&ta_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_ERROR);
 }
 
+/* A lease whose safety rests on bounded clock drift, ported from
+ * test/proc/leasedrift.c.  Node 0 reads its clock (t_send), asks node 1
+ * for a lease of LD_L, and on the grant serves reads until valid_until =
+ * t_send + L(1 - rho) on its own clock.  Node 1 grants, then waits L and
+ * one more unit on its own clock before the lease is free again.  With
+ * ld_bug the holder uses L, no margin: on equal clocks it still stops a
+ * unit before the granter's wait ends, so only a slow holder clock shows
+ * the bug. */
+#define LD_L 1000
+#define LD_RHO 100				/* per thousand: the drift the margin covers */
+
+typedef struct LD
+{
+	uint64_t	t_send,
+				valid_until;
+	uint8_t		serving,		/* node 0 */
+				again,			/* node 1: the lease is free again */
+				pad[6];
+} LD;
+
+static int	ld_bug;
+
+static void
+ld_timer(CmcOut *out, uint64_t dur)
+{
+	CmcOutput  *o = cmc_out_push(out, CMC_OUT_SET_TIMER);
+
+	o->dur = dur;
+}
+
+static void
+ld_send(CmcOut *out, int dst, uint8_t b)
+{
+	CmcOutput  *o = cmc_out_push(out, CMC_OUT_SEND);
+
+	o->dst = (uint8_t) dst;
+	o->len = 1;
+	o->body[0] = b;
+}
+
+static void
+ld_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	LD		   *s = sv;
+
+	(void) cfg;
+	out->n = 0;
+	if (node == 0 && ev->kind == CMC_EV_CLIENT)
+	{
+		s->t_send = ev->now;
+		ld_send(out, 1, 'Q');
+	}
+	else if (node == 0 && ev->kind == CMC_EV_RECV)
+	{
+		s->valid_until = s->t_send + (uint64_t) LD_L * (ld_bug ? 1000 : 1000 - LD_RHO) / 1000;
+		/* a grant that arrives after the lease ended is never served */
+		if (ev->now >= s->valid_until)
+			return;
+		s->serving = 1;
+		ld_timer(out, s->valid_until - ev->now);
+	}
+	else if (node == 0 && ev->kind == CMC_EV_TIMER)
+		s->serving = 0;
+	else if (node == 1 && ev->kind == CMC_EV_RECV)
+	{
+		ld_send(out, 0, 'G');
+		ld_timer(out, LD_L + 1);
+	}
+	else if (node == 1 && ev->kind == CMC_EV_TIMER)
+		s->again = 1;
+}
+
+static void
+ld_init(const void *cfg, int node, void *sv)
+{
+	(void) cfg;
+	(void) node;
+	memset(sv, 0, sizeof(LD));
+}
+
+static int
+ld_clients(const void *c, int n)
+{
+	(void) c;
+	return n == 0;
+}
+
+static bool
+ld_one_holder(const CmcWorld *w, CmcWhy *why)
+{
+	const LD   *h = cmc_node(w, 0),
+			   *g = cmc_node(w, 1);
+
+	if (h->serving && g->again)
+	{
+		cmc_why(why, "node 0 serves at clock %llu, node 1 freed the lease at %llu",
+				(unsigned long long) cmc_clock(w, 0), (unsigned long long) cmc_clock(w, 1));
+		return false;
+	}
+	return true;
+}
+
+/* the holder's clock never passes valid_until while it serves: its
+ * deadline fires first */
+static bool
+ld_on_clock(const CmcWorld *w, CmcWhy *why)
+{
+	const LD   *h = cmc_node(w, 0);
+
+	if (h->serving && cmc_clock(w, 0) > h->valid_until)
+	{
+		cmc_why(why, "serving at clock %llu", (unsigned long long) cmc_clock(w, 0));
+		return false;
+	}
+	return true;
+}
+
+static bool
+ld_freed(const CmcWorld *w, CmcWhy *why)
+{
+	(void) why;
+	return cmc_now(w) > LD_L;
+}
+
+static const CmcProp ld_props[] = {CMC_INVARIANT(OneHolder, ld_one_holder),
+	CMC_INVARIANT(ServesOnOwnClock, ld_on_clock), CMC_WITNESS_PROP(Freed, ld_freed)};
+static const CmcCore ld_core = {
+	.name = "lease", .state_size = sizeof(LD), .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = two, .init = ld_init,
+	.step = ld_step, .clients = ld_clients,
+};
+static const CmcModel ld_model = {"lease", &ld_core, ld_props, 3, 0};
+
+static void
+test_lease_drift(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	CmcResult	res;
+	char		prop[64],
+				why[512];
+	int			depth;
+
+	/* L(1 - rho) holds under drift 50, the bug holds on equal clocks */
+	for (ld_bug = 0; ld_bug <= 1; ld_bug++)
+	{
+		cmc_options_default(&o);
+		o.det = true;
+		o.drift = ld_bug ? 0 : 50;
+		CHECK(verdict_of(&ld_model, &o, NULL, prop, sizeof(prop), why, sizeof(why), NULL)
+			  == CMC_PASS);
+	}
+	/* no margin: caught with node 0's clock slow when node 1's timer fires */
+	ld_bug = 1;
+	o.drift = 50;
+	r = mkc(&ld_model, CMC_BFS, "", NULL, &o);
+	cmc_check(r, &res);
+	CHECK(res.verdict == CMC_VIOLATION && res.prop && !strcmp(res.prop, "OneHolder"));
+	CHECK(res.trace_len >= 2 &&
+		  res.trace[res.trace_len - 2] == CMC_ACT(CMC_A_FIRE, 1, 0, 1, 0));
+	cmc_result_free(&res);
+	cmc_run_free(r);
+	/* margin beaten: drift 200 */
+	ld_bug = 0;
+	o.drift = 200;
+	CHECK(verdict_of(&ld_model, &o, NULL, prop, sizeof(prop), NULL, 0, &depth)
+		  == CMC_VIOLATION && !strcmp(prop, "OneHolder"));
+	/* a horizon short of the lease: no pass, INCOMPLETE */
+	o.drift = 50;
+	o.max_time = 500;
+	CHECK(verdict_of(&ld_model, &o, NULL, prop, sizeof(prop), why, sizeof(why), NULL)
+		  == CMC_INCOMPLETE && strstr(why, "max_time"));
+	o.max_time = 5000;
+	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	o.drift = 501;
+	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_ERROR);
+	/* DFS and simulation stop at the horizon too, never passing */
+	o.drift = 0;
+	o.max_time = 500;
+	o.search = CMC_DFS;
+	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_INCOMPLETE);
+	o.search = CMC_SIMULATE;
+	o.walks = 20;
+	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_INCOMPLETE);
+}
+
+/* Deadline order on one node.  On CLIENT node 0 arms timer 1 for 30,
+ * timer 2 for 10 and timer 3 untimed; each fire records its clock. */
+typedef struct TO
+{
+	uint64_t	at[4];
+} TO;
+
+static int	to_dur_max;
+
+static void
+to_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	TO		   *s = sv;
+	CmcOutput  *o;
+
+	(void) cfg;
+	(void) node;
+	out->n = 0;
+	if (ev->kind == CMC_EV_CLIENT)
+	{
+		for (int t = 1; t <= 3; t++)
+		{
+			o = cmc_out_push(out, CMC_OUT_SET_TIMER);
+			o->arg = (uint32_t) t;
+			o->dur = t == 1 ? 30 : t == 2 ? 10 : 0;
+		}
+	}
+	else if (ev->kind == CMC_EV_TIMER)
+	{
+		s->at[ev->arg] = ev->now + 1;
+		/* a deadline past the clock's range, once the clock is not 0 */
+		if (to_dur_max && ev->now)
+			cmc_out_push(out, CMC_OUT_SET_TIMER)->dur = UINT64_MAX;
+	}
+}
+
+static void
+to_init(const void *cfg, int node, void *sv)
+{
+	(void) cfg;
+	(void) node;
+	memset(sv, 0, sizeof(TO));
+}
+
+/* timer 1 never fires before timer 2, nor before its own deadline */
+static bool
+to_order(const CmcWorld *w, CmcWhy *why)
+{
+	const TO   *s = cmc_node(w, 0);
+
+	(void) why;
+	return (!s->at[1] || (s->at[2] && s->at[1] == 31)) && (!s->at[2] || s->at[2] == 11);
+}
+
+static bool
+to_late(const CmcWorld *w, CmcWhy *why)
+{
+	const TO   *s = cmc_node(w, 0);
+
+	(void) why;
+	return s->at[3] == 31;		/* the untimed timer fires after both */
+}
+
+/* the fair schedule fires every timer, the timed ones in deadline order */
+static bool
+to_all(const CmcWorld *w, CmcWhy *why)
+{
+	const TO   *s = cmc_node(w, 0);
+
+	(void) why;
+	return cmc_requests(w, 0) == 0 || (s->at[1] && s->at[2] && s->at[3]);
+}
+
+static const CmcProp to_props[] = {CMC_INVARIANT(Order, to_order),
+	CMC_WITNESS_PROP(UntimedLast, to_late), CMC_EVENTUALLY_PROP(AllFired, to_all)};
+static const CmcCore to_core = {
+	.name = "torder", .state_size = sizeof(TO), .cfg_size = 4,
+	.cfg_default = nd_cfg_default, .cfg_set = nd_cfg_set, .nnodes = nd_nnodes,
+	.init = to_init, .step = to_step,
+};
+static const CmcModel to_model = {"torder", &to_core, to_props, 3, 0};
+
+/* two nodes; node 0 arms the longest timer the engine takes */
+static void
+big_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
+{
+	(void) cfg;
+	(void) sv;
+	out->n = 0;
+	if (node == 0 && ev->kind == CMC_EV_CLIENT)
+		cmc_out_push(out, CMC_OUT_SET_TIMER)->dur = UINT64_MAX >> 2;
+}
+
+static const CmcCore big_core = {
+	.name = "big", .state_size = 8, .cfg_size = 4, .cfg_default = nd_cfg_default,
+	.cfg_set = nd_cfg_set, .nnodes = two, .init = zero8, .step = big_step,
+	.clients = ld_clients,
+};
+static const CmcModel big_model = {"big", &big_core, nd_props, 1, 0};
+
+static const CmcModel cap_model;
+
+static void
+test_deadline_order(void)
+{
+	CmcOptions	o;
+	CmcRun	   *r;
+	uint8_t    *w;
+	char		why[512];
+	CmcWorld	W;
+
+	cmc_options_default(&o);
+	o.det = true;
+	o.drift = 100;				/* one node: no other clock to drift */
+	CHECK(verdict_of(&to_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	r = mkc(&to_model, CMC_BFS, "", NULL, &o);
+	w = calloc(1, cmc_world_size(r));
+	cmc_world_init(r, w);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_CLIENT, 0, 0, 0, 0)) == 0);
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_FIRE, 0, 1, 0, 0)) != 0);	/* not first */
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_FIRE, 0, 2, 1, 0)) != 0);	/* no node 0 drift */
+	CHECK(cmc_apply(r, w, CMC_ACT(CMC_A_FIRE, 0, 2, 0, 0)) == 0);
+	W.run = r;
+	W.bytes = w;
+	CHECK(cmc_now(&W) == 10 && cmc_clock(&W, 0) == 10 && cmc_clock(&W, 1) == 0);
+	free(w);
+	cmc_run_free(r);
+	/* a calibration core has no clocks: 0, and no drift or horizon */
+	cmc_options_default(&o);
+	r = mkc(&cap_model, CMC_BFS, "", NULL, &o);
+	w = calloc(1, cmc_world_size(r) + 8);
+	W.run = r;
+	W.bytes = w;
+	CHECK(cmc_now(&W) == 0 && cmc_clock(&W, 0) == 0);
+	free(w);
+	cmc_run_free(r);
+	o.max_time = 10;
+	CHECK(mkc(&cap_model, CMC_BFS, "", NULL, &o) == NULL);
+	cmc_options_default(&o);
+	to_dur_max = 1;
+	CHECK(verdict_of(&to_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "deadline past the clock's range"));
+	to_dur_max = 0;
+	/* the longest deadline, with another clock fast at drift 500, would
+	 * carry that clock past the range: an error, not a wrap */
+	cmc_options_default(&o);
+	o.drift = 500;
+	CHECK(verdict_of(&big_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_VIOLATION &&
+		  strstr(why, "clock past its range"));
+}
+
 static void
 test_b5_crash_resets_connections(void)
 {
@@ -1735,6 +2072,9 @@ bad_step(const void *cfg, int node, void *sv, const CmcEvent *ev, CmcOut *out)
 		case 9:					/* past the array, with no overflow counted */
 			out->n = CMC_OUT_MAX + 1;
 			break;
+		case 10:				/* a duration on a wake */
+			cmc_out_push(out, CMC_OUT_WAKE)->dur = 5;
+			break;
 	}
 }
 
@@ -1751,12 +2091,12 @@ test_output_rules(void)
 	static const char *const want[] = {"output body too long", "SEND to bad node 5",
 		"bad timer id 256", "bad waiter id 256", "persist_cap 2 exceeded",
 		"reply_cap 8 exceeded", "net_cap 8 exceeded", "unknown output kind 99",
-	"core emitted -1 outputs", "core emitted 17 outputs"};
+	"core emitted -1 outputs", "core emitted 17 outputs", "a duration on an output"};
 	char		path[512];
 
 	snprintf(path, sizeof(path), "%s/bad.replay",
 			 getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".");
-	for (bad_kind = 0; bad_kind < 10; bad_kind++)
+	for (bad_kind = 0; bad_kind < 11; bad_kind++)
 		for (int s = 0; s < 4; s++)
 		{
 			CmcOptions	o;
@@ -2549,6 +2889,7 @@ static const CmcModelEntry cli_models[] = {
 	{"always", &always_model},
 	{"cap", &cap_model},
 	{"mute", &mute_model},
+	{"lease", &ld_model},
 };
 
 /* p (512 bytes) = the path of a file under $CMC_BUILD */
@@ -2714,13 +3055,13 @@ test_cli_runs(void)
 	CLI(3, "a FIFO connection never duplicates", "--model", "toy", "--all-props", "--dups", "1");
 	CLI(3, "usage:", "--all-props");
 	/* an option at the end of the line with no value */
-	for (int i = 0; i < 26; i++)
+	for (int i = 0; i < 28; i++)
 	{
 		static const char *const opt[] = {"--cfg", "--tlc-cfg", "--inv", "--dfs", "--seed",
 			"--walks", "--depth", "--replay", "--max-states", "--time", "--trace-out",
 			"--progress", "--clients", "--drops", "--dups", "--crashes", "--net-cap",
 			"--persist-cap", "--reply-cap", "--net", "--live-steps", "--prop", "--model",
-		"--timer-cap", "--wake-cap", "--bfs"};
+		"--timer-cap", "--wake-cap", "--drift", "--max-time", "--bfs"};
 
 		/* --bfs takes no value, so the line is merely short of a model */
 		CLI(3, "usage:", "--all-props", opt[i]);
@@ -2799,6 +3140,26 @@ test_cli_runs(void)
 	CLI(3, "cannot open /nonexistent/x.replay", "--replay", "/nonexistent/x.replay",
 		"--model", "toy", "--inv", "Mutex");
 	CLI(3, "usage:", "--replay", "/nonexistent/x.replay", "--inv", "Mutex");
+	/* time: a drift trace names the slow clock and replays under the
+	 * file's drift; a horizon is INCOMPLETE, never a pass */
+	ld_bug = 1;
+	CLI(1, "FIRE node 1 timer 0 (node 0's clock slow)", "--model", "lease", "--inv",
+		"OneHolder", "--drift", "50", "--det", "--trace-out", rp);
+	CLI(1, "time: now=1001 n0=951 n1=1001", "--replay", rp, "--inv", "OneHolder");
+	CLI(3, "recorded with different environment bounds", "--replay", rp, "--inv",
+		"OneHolder", "--drift", "40");
+	ld_bug = 0;
+	CLI(2, "INCOMPLETE (no violation found): max_time 500 reached", "--model", "lease",
+		"--all-props", "--drift", "50", "--max-time", "500");
+	CLI(0, "No error has been found", "--model", "lease", "--inv", "OneHolder", "--max-time",
+		"5000");
+	CLI(3, "--drift needs a number from 0 to 500", "--model", "lease", "--all-props",
+		"--drift", "501");
+	CLI(3, "--max-time needs a number from 1", "--model", "lease", "--all-props",
+		"--max-time", "0");
+	cli_write(rp, "# cmc replay v2\nmodel lease\ncfg\nenv client=1 drop=0 dup=0 crash=0"
+			  " net=8 persist=2 reply=8 mode=fifo live=1000\ntime x\n");
+	CLI(3, "bad time line", "--replay", rp, "--inv", "OneHolder");
 	/* the file's caps, and a garbled caps line, which the driver leaves
 	 * to the engine to refuse */
 	cli_write(rp, "# cmc replay v2\nmodel toy_model\ncfg\nenv client=1 drop=0 dup=0 crash=0"
@@ -2932,6 +3293,8 @@ main(void)
 	test_b5_crash_resets_connections();
 	test_crashable();
 	test_timer_args();
+	test_lease_drift();
+	test_deadline_order();
 	test_m1_large_durable();
 	test_m3_output_overflow();
 	test_m4_replay_conflict();

@@ -8,7 +8,9 @@
  *   node[0..nn-1]   core states, state_size bytes each (opaque)
  *   env header      budgets left, then per node: client_left, armed-timer
  *                   count, pending-wake count, pending-persist count, resets
- *                   (u8: bit p = a CONN_RESET from peer p is pending), 0
+ *                   (u8: bit p = a CONN_RESET from peer p is pending), 0;
+ *                   then the reference time and each node's clock (u64,
+ *                   the core's time unit, all 0 at the start)
  *   net             net_cap entries {dst, src, len, body[CMC_MSG_MAX], count}.
  *                   bag: sorted by (dst, src, len, body), equal messages
  *                   share an entry.  fifo: sorted by (dst, src), send order
@@ -16,7 +18,8 @@
  *                   delivered.  Unused entries zero
  *   persists        nn x persist_cap FIFO entries {len, body}
  *   replies         reply_cap entries {node, arg[4]} in emission order
- *   timers          nn x timer_cap entries {id, arg2 (u32 big-endian)}
+ *   timers          nn x timer_cap entries {id, arg2 (u32 big-endian),
+ *                   deadline (u64 on the node's clock; 0 = untimed)}
  *   wakes           nn x wake_cap entries {id, arg2 (u32 big-endian)}.
  *                   Both sorted by (id, arg2), one entry per pair, unused
  *                   entries zero
@@ -42,7 +45,10 @@
 #define HDR_FIXED 8
 #define HDR_NODE 6
 #define TKEY 5					/* timer and wake key: id, arg2 big-endian */
-#define TMR_ENT TKEY
+#define TMR_ENT (TKEY + 8)
+/* the clocks' range: a fast clock moves at most 2D for a deadline D
+ * away, so no sum or scale_t() product wraps */
+#define CLK_MAX (UINT64_MAX >> 2)
 #define WAK_ENT TKEY
 
 typedef struct Ent
@@ -447,6 +453,7 @@ cmc_world_size(const CmcRun *r)
 #define NWAK(r, w, n)	(NODEH(r, w, n)[2])
 #define NPERS(r, w, n)	(NODEH(r, w, n)[3])
 #define RESETS(r, w, n)	(NODEH(r, w, n)[4])
+#define CLK(r, w)		(HDR(r, w) + HDR_FIXED + (size_t) (r)->nn * HDR_NODE)
 #define FIFO(r)			((r)->o.net == CMC_NET_FIFO)
 #define MSG(r, w, i)	((w) + (r)->off_msgs + (size_t) (i) * MSG_ENT)
 #define PERS(r, w, n, i) ((w) + (r)->off_pers + \
@@ -530,6 +537,46 @@ tab_del(uint8_t *t, uint8_t *np, size_t es, const uint8_t *key)
 	(*np)--;
 	memset(t + (size_t) *np * es, 0, es);
 	return true;
+}
+
+/* The u64 at p, stored in host order: the world is never shared between
+ * hosts, so this is canonical for the run. */
+static inline uint64_t
+get64(const uint8_t *p)
+{
+	uint64_t	v;
+
+	memcpy(&v, p, 8);
+	return v;
+}
+
+static inline void
+put64(uint8_t *p, uint64_t v)
+{
+	memcpy(p, &v, 8);
+}
+
+/* the reference time is CLK[0]; node n's clock is CLK[1 + n] */
+static inline uint64_t
+clk_get(const CmcRun *r, const uint8_t *w, int n)
+{
+	return get64(CLK(r, w) + 8 * (size_t) (n + 1));
+}
+
+uint64_t
+cmc_clock(const CmcWorld *w, int node)
+{
+	if (w->run->direct || node < 0 || node >= w->run->nn)
+		return 0;
+	return clk_get(w->run, w->bytes, node);
+}
+
+uint64_t
+cmc_now(const CmcWorld *w)
+{
+	if (w->run->direct)
+		return 0;
+	return get64(CLK(w->run, w->bytes));
 }
 
 int
@@ -710,12 +757,12 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 		return run_reject(r, err, errlen, "durable_size exceeds state_size");
 	/* docs/research/02 m4: negative bounds are an error, not 255 */
 	if (r->o.net_cap < 0 || r->o.reply_cap < 0 || r->o.persist_cap < 0 ||
-		r->o.timer_cap < 0 || r->o.wake_cap < 0 ||
+		r->o.timer_cap < 0 || r->o.wake_cap < 0 || r->o.drift < 0 || r->o.drift > 500 ||
 		r->o.client_budget < 0 || r->o.drop_budget < 0 || r->o.dup_budget < 0 ||
 		r->o.crash_budget < 0 || r->o.max_depth < 1 || r->o.live_steps < 1 ||
 		r->o.time_limit < 0 || r->o.progress_s < 0)
 		return run_reject(r, err, errlen,
-						  "bounds must be >= 0 (depth and live steps >= 1)");
+						  "bounds must be >= 0 (depth and live steps >= 1, drift <= 500)");
 	if (r->o.net != CMC_NET_FIFO && r->o.net != CMC_NET_BAG)
 		return run_reject(r, err, errlen, "unknown network model");
 	/* cmc_check() would run no search and report a pass */
@@ -739,7 +786,8 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 		if (FIFO(r) && r->o.dup_budget > 0)
 			return run_reject(r, err, errlen,
 							  "a FIFO connection never duplicates: --dups needs --net bag");
-		r->off_msgs = r->off_hdr + HDR_FIXED + (size_t) r->nn * HDR_NODE;
+		r->off_msgs = r->off_hdr + HDR_FIXED + (size_t) r->nn * HDR_NODE +
+			8 * ((size_t) r->nn + 1);
 		r->off_pers = r->off_msgs + (size_t) r->o.net_cap * MSG_ENT;
 		r->off_reps = r->off_pers + (size_t) r->nn * r->o.persist_cap * PERS_ENT;
 		r->off_tmr = r->off_reps + (size_t) r->o.reply_cap * REP_ENT;
@@ -788,6 +836,8 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 				goto bad_prop;
 	if (r->nev && r->direct)
 		return run_reject(r, err, errlen, "CMC_EVENTUALLY needs actor mode");
+	if ((r->o.drift || r->o.max_time) && r->direct)
+		return run_reject(r, err, errlen, "drift and max_time need actor mode");
 	if (r->core->durable_size && !r->core->apply_persist)
 		return run_reject(r, err, errlen,
 						  "durable_size > 0 needs apply_persist (the engine owns durable)");
@@ -885,6 +935,105 @@ fifo_open(const CmcRun *r, const uint8_t *w, int dst, int src)
  * get CONN_RESET (a crashed end gets none: it is a new process). */
 static void conn_reset(CmcRun *r, uint8_t *w, int a, int b, bool notify_a);
 
+/*
+ * Time (docs/DESIGN.md, Time).  A timed timer fires when its node's clock
+ * reaches its deadline, and only the node's earliest timed deadline may
+ * fire (several, if they tie).  Firing moves that node's clock by D to
+ * the deadline, the reference time by D, and every other clock by D, or,
+ * under drift variant c > 0, node (c - 1) / 2's clock at the slowest
+ * (c odd) or fastest (c even) rate --drift allows: process mode's
+ * drift_advance() and expire_ok() in src/cmc_proc.c.
+ */
+
+/* node n's earliest timed deadline in *dl; false if it has none */
+static bool
+tmr_min(const CmcRun *r, const uint8_t *w, int n, uint64_t *dl)
+{
+	bool		any = false;
+
+	for (int i = 0; i < NTMR(r, w, n); i++)
+	{
+		uint64_t	d = get64(TMR(r, w, n, i) + TKEY);
+
+		if (d && (!any || d < *dl))
+		{
+			*dl = d;
+			any = true;
+		}
+	}
+	return any;
+}
+
+/* x * num / den without overflow for any x below 2^64 / 1000; rounded up
+ * when up is set */
+static uint64_t
+scale_t(uint64_t x, unsigned num, unsigned den, bool up)
+{
+	uint64_t	q = x / den,
+				lo = (x % den) * num;
+
+	return q * num + lo / den + (up && lo % den ? 1 : 0);
+}
+
+/* how far node j's clock moves while node d's moves by D, variant c */
+static uint64_t
+drift_adv(const CmcRun *r, int d, int j, uint64_t D, unsigned c)
+{
+	unsigned	slow = (unsigned) (1000 - r->o.drift);
+
+	if (j == d || c == 0 || (int) (c - 1) / 2 != j)
+		return D;
+	return (c - 1) & 1 ? scale_t(D, 1000, slow, false) : scale_t(D, slow, 1000, true);
+}
+
+/* node d's clock moves by D under variant c: no other node may pass its
+ * own earliest deadline on the way, which fires first */
+static bool
+expire_ok(const CmcRun *r, const uint8_t *w, int d, uint64_t D, unsigned c)
+{
+	for (int j = 0; j < r->nn; j++)
+	{
+		uint64_t	dl,
+					cj;
+
+		if (j == d || !tmr_min(r, w, j, &dl))
+			continue;
+		cj = clk_get(r, w, j);
+		if (drift_adv(r, d, j, D, c) > (dl > cj ? dl - cj : 0))
+			return false;
+	}
+	return true;
+}
+
+/* May timer entry e of node n fire under variant c?  *D is how far n's
+ * clock moves. */
+static bool
+fire_ok(const CmcRun *r, const uint8_t *w, int n, const uint8_t *e, unsigned c, uint64_t *D)
+{
+	uint64_t	dl = get64(e + TKEY),
+				mn = 0,
+				cn = clk_get(r, w, n);
+
+	*D = 0;
+	if (dl == 0)
+		return c == 0;
+	tmr_min(r, w, n, &mn);
+	if (dl != mn)
+		return false;
+	*D = dl > cn ? dl - cn : 0;
+	if (c && (r->o.drift == 0 || *D == 0 || c > 2 * (unsigned) r->nn ||
+			  (int) (c - 1) / 2 == n))
+		return false;
+	return expire_ok(r, w, n, *D, c);
+}
+
+/* --max-time: is w past the horizon, so not to be expanded? */
+static inline bool
+past_horizon(const CmcRun *r, const uint8_t *w)
+{
+	return r->o.max_time && get64(CLK(r, w)) > r->o.max_time;
+}
+
 /* may node n crash?  From cfg only, like clients() */
 static inline bool
 node_crashable(const CmcRun *r, int n)
@@ -945,7 +1094,15 @@ cmc_enabled(CmcRun *r, const uint8_t *w, CmcAction *acts, int max)
 		{
 			const uint8_t *e = TMR(r, w, n, i);
 
-			PUSH(CMC_ACT(CMC_A_FIRE, n, e[0], 0, tkey_arg2(e)));
+			for (unsigned c = 0; c <= 2 * (unsigned) r->nn; c++)
+			{
+				uint64_t	D;
+
+				if (fire_ok(r, w, n, e, c, &D))
+					PUSH(CMC_ACT(CMC_A_FIRE, n, e[0], c, tkey_arg2(e)));
+				if (c == 0 && (D == 0 || r->o.drift == 0))
+					break;
+			}
 		}
 		if (NPERS(r, w, n))
 			PUSH(CMC_ACT(CMC_A_FLUSH, n, 0, 0, 0));
@@ -1074,6 +1231,11 @@ process_outputs(CmcRun *r, uint8_t *w, int n, const CmcOut *out)
 			snprintf(r->err, sizeof(r->err), "output body too long");
 			return -1;
 		}
+		if (o->dur && o->kind != CMC_OUT_SET_TIMER)
+		{
+			snprintf(r->err, sizeof(r->err), "a duration on an output other than SET_TIMER");
+			return -1;
+		}
 		switch (o->kind)
 		{
 			case CMC_OUT_SEND:
@@ -1099,16 +1261,30 @@ process_outputs(CmcRun *r, uint8_t *w, int n, const CmcOut *out)
 						snprintf(r->err, sizeof(r->err), "bad timer id %u", o->arg);
 						return -1;
 					}
+					uint8_t    *e;
+					uint64_t	now = clk_get(r, w, n);
+
 					tkey(key, o->arg, o->arg2);
 					if (o->kind == CMC_OUT_CANCEL_TIMER)
+					{
 						tab_del(TMR(r, w, n, 0), &NTMR(r, w, n), TMR_ENT, key);
-					else if (!tab_add(TMR(r, w, n, 0), &NTMR(r, w, n), r->o.timer_cap,
-									  TMR_ENT, key))
+						break;
+					}
+					if (o->dur > CLK_MAX - now)
+					{
+						snprintf(r->err, sizeof(r->err),
+								 "timer deadline past the clock's range (2^62 - 1)");
+						return -1;
+					}
+					e = tab_add(TMR(r, w, n, 0), &NTMR(r, w, n), r->o.timer_cap, TMR_ENT, key);
+					if (!e)
 					{
 						snprintf(r->err, sizeof(r->err),
 								 "timer_cap %d exceeded (raise --timer-cap)", r->o.timer_cap);
 						return -1;
 					}
+					/* arming an armed timer again restarts it */
+					put64(e + TKEY, o->dur ? now + o->dur : 0);
 					break;
 				}
 			case CMC_OUT_PERSIST:
@@ -1365,11 +1541,30 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 		case CMC_A_FIRE:
 			{
 				uint8_t		key[TKEY];
+				unsigned	c = CMC_ACT_C(a);
+				uint64_t	D;
+				int			i;
 
 				tkey(key, CMC_ACT_B(a), CMC_ACT_D(a));
-				if (n >= r->nn || CMC_ACT_C(a) ||
-					!tab_del(TMR(r, w, n, 0), &NTMR(r, w, n), TMR_ENT, key))
+				if (n >= r->nn ||
+					(i = tab_find(TMR(r, w, n, 0), NTMR(r, w, n), TMR_ENT, key)) < 0 ||
+					!fire_ok(r, w, n, TMR(r, w, n, i), c, &D))
 					goto bad;
+				/* the clocks move first, so step() reads the deadline */
+				for (int j = -1; j < r->nn; j++)
+				{
+					uint8_t    *p = CLK(r, w) + 8 * (size_t) (j + 1);
+					uint64_t	v = get64(p) + (j < 0 ? D : drift_adv(r, n, j, D, c));
+
+					if (v > CLK_MAX)
+					{
+						snprintf(r->err, sizeof(r->err),
+								 "clock past its range (2^62 - 1) after a fast drift");
+						return -1;
+					}
+					put64(p, v);
+				}
+				tab_del(TMR(r, w, n, 0), &NTMR(r, w, n), TMR_ENT, key);
 				ev.kind = CMC_EV_TIMER;
 				ev.arg = CMC_ACT_B(a);
 				ev.arg2 = CMC_ACT_D(a);
@@ -1478,6 +1673,7 @@ cmc_apply(CmcRun *r, uint8_t *w, CmcAction a)
 		default:
 			goto bad;
 	}
+	ev.now = clk_get(r, w, n);
 	if (core_step(r, w, n, &ev, &out) != 0)
 		return -1;
 	return process_outputs(r, w, n, &out);
@@ -1699,6 +1895,50 @@ fair_drain(CmcRun *r)
 }
 
 /*
+ * The timer phase of a fair round: fires once each timer armed at the
+ * round's start that is still armed when its turn comes, draining after
+ * each, at the common clock rate.  r->fwr holds the timers not yet
+ * fired this round.  A timed timer's turn comes when it may fire (its
+ * deadline is its node's first, and no other node's comes before it), so
+ * timed timers fire in deadline order.  Same returns as fair_step.
+ */
+static int
+fair_timers(CmcRun *r)
+{
+	memcpy(r->fwr, r->fw, r->ws);
+	for (;;)
+	{
+		bool		fired = false;
+
+		for (int n = 0; n < r->nn && !fired; n++)
+			for (int i = 0; i < NTMR(r, r->fwr, n) && !fired; i++)
+			{
+				uint8_t		key[TKEY];
+				uint64_t	D;
+				int			k;
+				int			rc;
+
+				memcpy(key, TMR(r, r->fwr, n, i), TKEY);
+				k = tab_find(TMR(r, r->fw, n, 0), NTMR(r, r->fw, n), TMR_ENT, key);
+				if (k >= 0 && !fire_ok(r, r->fw, n, TMR(r, r->fw, n, k), 0, &D))
+					continue;	/* a later deadline: its turn may come */
+				/* fired now, or cancelled: either way done for this round */
+				tab_del(TMR(r, r->fwr, n, 0), &NTMR(r, r->fwr, n), TMR_ENT, key);
+				i--;
+				if (k < 0)
+					continue;
+				fired = true;
+				if ((rc = fair_step(r, CMC_ACT(CMC_A_FIRE, n, key[0], 0, tkey_arg2(key)))) == 0)
+					rc = fair_drain(r);
+				if (rc)
+					return rc;
+			}
+		if (!fired)
+			return 0;
+	}
+}
+
+/*
  * Returns 0 (holds), 1 (violated: *badp, why; r->fsuf/nfsuf is the fair
  * suffix) or -1 (engine error in r->err; the suffix ends with the action
  * that failed).
@@ -1744,20 +1984,7 @@ check_ev(CmcRun *r, const uint8_t *s, CmcWhy *why, const CmcProp **badp)
 
 		if ((rc = fair_drain(r)) != 0)
 			goto stepped;
-		/* the timers armed now, each fired once if still armed when its
-		 * turn comes (r->fwr keeps the round's armed set) */
-		memcpy(r->fwr, r->fw, r->ws);
-		for (int n = 0; n < r->nn && !rc; n++)
-			for (int i = 0; i < NTMR(r, r->fwr, n) && !rc; i++)
-			{
-				const uint8_t *t = TMR(r, r->fwr, n, i);
-
-				if (tab_find(TMR(r, r->fw, n, 0), NTMR(r, r->fw, n), TMR_ENT, t) < 0)
-					continue;
-				if ((rc = fair_step(r, CMC_ACT(CMC_A_FIRE, n, t[0], 0, tkey_arg2(t)))) == 0)
-					rc = fair_drain(r);
-			}
-		if (rc)
+		if ((rc = fair_timers(r)) != 0)
 			goto stepped;
 		if (r->nfsuf == start)
 		{
@@ -1854,6 +2081,9 @@ cmc_describe_action(CmcRun *r, CmcAction a, FILE *f)
 			fprintf(f, "FIRE node %u timer %u", CMC_ACT_A(a), CMC_ACT_B(a));
 			if (CMC_ACT_D(a))
 				fprintf(f, " arg %u", CMC_ACT_D(a));
+			if (CMC_ACT_C(a))
+				fprintf(f, " (node %u's clock %s)", (CMC_ACT_C(a) - 1) / 2,
+						(CMC_ACT_C(a) - 1) & 1 ? "fast" : "slow");
 			break;
 		case CMC_A_FLUSH:
 			fprintf(f, "FLUSH node %u", CMC_ACT_A(a));
@@ -1880,18 +2110,20 @@ cmc_describe_action(CmcRun *r, CmcAction a, FILE *f)
 	}
 }
 
-/* prints a timer or wake table as {id, id:arg2, ...} */
+/* prints a timer or wake table as {id, id:arg2, id@deadline, ...} */
 static void
-describe_tab(const uint8_t *t, int n, FILE *f)
+describe_tab(const uint8_t *t, int n, size_t es, FILE *f)
 {
 	fprintf(f, "{");
 	for (int i = 0; i < n; i++)
 	{
-		const uint8_t *e = t + (size_t) i * TKEY;
+		const uint8_t *e = t + (size_t) i * es;
 
 		fprintf(f, i ? ",%u" : "%u", e[0]);
 		if (tkey_arg2(e))
 			fprintf(f, ":%u", tkey_arg2(e));
+		if (es > TKEY && get64(e + TKEY))
+			fprintf(f, "@%" PRIu64, get64(e + TKEY));
 	}
 	fprintf(f, "}");
 }
@@ -1923,10 +2155,17 @@ describe_world(CmcRun *r, const uint8_t *w, FILE *f)
 	for (int n = 0; n < r->nn; n++)
 	{
 		fprintf(f, " | n%d clients=%u timers=", n, CLIENTS(r, w, n));
-		describe_tab(TMR(r, w, n, 0), NTMR(r, w, n), f);
+		describe_tab(TMR(r, w, n, 0), NTMR(r, w, n), TMR_ENT, f);
 		fprintf(f, " wakes=");
-		describe_tab(WAK(r, w, n, 0), NWAK(r, w, n), f);
+		describe_tab(WAK(r, w, n, 0), NWAK(r, w, n), WAK_ENT, f);
 		fprintf(f, " persists=%u resets=%#x", NPERS(r, w, n), RESETS(r, w, n));
+	}
+	/* the clocks, once time has moved (an untimed model prints none) */
+	if (get64(CLK(r, w)))
+	{
+		fprintf(f, "\n  time: now=%" PRIu64, get64(CLK(r, w)));
+		for (int n = 0; n < r->nn; n++)
+			fprintf(f, " n%d=%" PRIu64, n, clk_get(r, w, n));
 	}
 	fprintf(f, "\n  replies:");
 	for (int i = 0; i < NREP(r, w); i++)
@@ -1982,7 +2221,8 @@ cmc_write_replay(CmcRun *r, const char *path, const CmcAction *acts, int n)
 				r->o.crash_budget, r->o.net_cap, r->o.persist_cap, r->o.reply_cap,
 				r->o.net == CMC_NET_BAG ? "bag" : "fifo", r->o.live_steps);
 	if (!r->direct)
-		fprintf(f, "caps timer=%d wake=%d\n", r->o.timer_cap, r->o.wake_cap);
+		fprintf(f, "caps timer=%d wake=%d\ntime drift=%d\n", r->o.timer_cap, r->o.wake_cap,
+				r->o.drift);
 	for (int i = 0; i < n; i++)
 	{
 		if (r->fair_from && i + 1 == r->fair_from)
@@ -2033,6 +2273,15 @@ trace_from_table(CmcRun *r, uint64_t f0, uint64_t f1, CmcAction **out)
 	return n;
 }
 
+/* a search that left worlds past --max-time unexpanded is no pass */
+static void
+set_horizon(const CmcRun *r, CmcResult *res)
+{
+	res->verdict = CMC_INCOMPLETE;
+	snprintf(res->why, sizeof(res->why), "max_time %" PRIu64
+			 " reached: worlds past it were not expanded", r->o.max_time);
+}
+
 static void
 set_violation(CmcResult *res, const CmcProp *p, const char *why)
 {
@@ -2080,7 +2329,8 @@ run_bfs(CmcRun *r, CmcResult *res)
 	uint64_t	level_left = 1,
 				next_level = 0;
 	int			level = 1;
-	bool		all_wit;
+	bool		all_wit,
+				cut = false;
 
 	table_init(&r->t, 1u << 16);
 	q_init(&q, r->ws);
@@ -2105,8 +2355,14 @@ run_bfs(CmcRun *r, CmcResult *res)
 
 	while (q_pop(&q, s))
 	{
-		int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
+		int			na;
 
+		if (past_horizon(r, s))
+		{
+			cut = true;
+			goto next_state;
+		}
+		na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
 		cmc_fingerprint(s, r->ws, pfp);
 
 		if (na < 0)
@@ -2179,6 +2435,7 @@ run_bfs(CmcRun *r, CmcResult *res)
 			q_push(&q, t);
 			next_level++;
 		}
+next_state:
 		if (--level_left == 0)
 		{
 			level_left = next_level;
@@ -2208,6 +2465,8 @@ run_bfs(CmcRun *r, CmcResult *res)
 			}
 		}
 	}
+	if (cut)
+		set_horizon(r, res);
 	goto done;
 
 stopped:
@@ -2256,7 +2515,8 @@ run_dfs(CmcRun *r, CmcResult *res)
 	CmcWhy		why;
 	const CmcProp *bad;
 	bool		isnew,
-				truncated = false;
+				truncated = false,
+				cut = false;
 	Ent		   *e;
 	int			sp = 0;
 	double		t0 = now_s();
@@ -2288,6 +2548,12 @@ run_dfs(CmcRun *r, CmcResult *res)
 		uint8_t    *s = worlds + (size_t) sp * r->ws,
 				   *t;
 
+		if (past_horizon(r, s))
+		{
+			cut = true;
+			sp--;
+			continue;
+		}
 		if (f->na < 0)
 		{
 			set_violation(res, NULL, enabled_error(f->na));
@@ -2385,6 +2651,8 @@ run_dfs(CmcRun *r, CmcResult *res)
 		res->verdict = CMC_INCOMPLETE;
 		snprintf(res->why, sizeof(res->why), "depth bound %d reached", D);
 	}
+	if (cut && res->verdict == CMC_PASS)
+		set_horizon(r, res);
 	goto done;
 
 copy_path:
@@ -2438,6 +2706,7 @@ run_simulate(CmcRun *r, CmcResult *res)
 	CmcWhy		why;
 	const CmcProp *bad;
 	double		t0 = now_s();
+	bool		cut = false;
 
 	for (uint64_t walk = 0; walk < r->o.walks; walk++)
 	{
@@ -2453,7 +2722,14 @@ run_simulate(CmcRun *r, CmcResult *res)
 		check_wit(r, s, 1);
 		for (len = 0;; len++)
 		{
-			int			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
+			int			na;
+
+			if (past_horizon(r, s))
+			{
+				cut = true;
+				break;
+			}
+			na = cmc_enabled(r, s, acts, CMC_MAX_ACTIONS);
 
 			if (na < 0)
 			{
@@ -2530,6 +2806,8 @@ viol:
 		res->depth = len + 1;
 		break;
 	}
+	if (cut && res->verdict == CMC_PASS)
+		set_horizon(r, res);
 	free(s);
 	free(t);
 	free(acts);
@@ -2558,6 +2836,7 @@ replay_check_header(CmcRun *r, FILE *f, char *why, size_t whylen)
 	/* a file from before the caps line was recorded with the defaults */
 	fo.timer_cap = CMC_MAX_TIMERS;
 	fo.wake_cap = CMC_MAX_WAKES;
+	fo.drift = 0;
 	char		err[256];
 	long		pos;
 
@@ -2602,6 +2881,14 @@ replay_check_header(CmcRun *r, FILE *f, char *why, size_t whylen)
 			fo.net = strcmp(net, "bag") ? CMC_NET_FIFO : CMC_NET_BAG;
 			have_env = true;
 		}
+		else if (!strncmp(line, "time ", 5))
+		{
+			if (sscanf(line, "time drift=%d", &fo.drift) != 1)
+			{
+				snprintf(why, whylen, "bad time line in replay file");
+				return -1;
+			}
+		}
 		else if (!strncmp(line, "caps ", 5))
 		{
 			if (sscanf(line, "caps timer=%d wake=%d", &fo.timer_cap, &fo.wake_cap) != 2)
@@ -2638,15 +2925,16 @@ replay_check_header(CmcRun *r, FILE *f, char *why, size_t whylen)
 		 fo.net_cap != r->o.net_cap || fo.persist_cap != r->o.persist_cap ||
 		 fo.reply_cap != r->o.reply_cap || fo.net != r->o.net ||
 		 fo.timer_cap != r->o.timer_cap || fo.wake_cap != r->o.wake_cap ||
+		 fo.drift != r->o.drift ||
 		 (r->nev && fo.live_steps != r->o.live_steps)))
 	{
 		snprintf(why, whylen, "replay file recorded with different environment bounds"
 				 " (client=%d drop=%d dup=%d crash=%d net-cap=%d persist-cap=%d"
-				 " reply-cap=%d net=%s live-steps=%d timer-cap=%d wake-cap=%d)",
+				 " reply-cap=%d net=%s live-steps=%d timer-cap=%d wake-cap=%d drift=%d)",
 				 fo.client_budget, fo.drop_budget, fo.dup_budget, fo.crash_budget,
 				 fo.net_cap, fo.persist_cap, fo.reply_cap,
 				 fo.net == CMC_NET_BAG ? "bag" : "fifo", fo.live_steps,
-				 fo.timer_cap, fo.wake_cap);
+				 fo.timer_cap, fo.wake_cap, fo.drift);
 		return -1;
 	}
 	return 0;

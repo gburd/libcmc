@@ -219,6 +219,8 @@ in the kernel, untouched.
 | uninitialised reads in a core | checked | MemorySanitizer | `make check-msan` |
 | a node that never crashes (`crashable()`) | exact | read from cfg only; `CRASH` is never offered for an excluded node, and applying one is refused | test_cmc test_crashable |
 | timers and wakes with an argument (`arg2`) | exact | `{id, arg2}` tables per node, sorted; the same id with two arguments is two pending events; past `--timer-cap` or `--wake-cap` is an engine violation | test_cmc test_timer_args; HC, toy and pg_chain counts unchanged |
+| per-node clocks, timed timers (`dur`), `--drift R` | exact for the rule stated | a timed timer fires only at its node's earliest deadline; firing moves the other clocks at the common rate or one at the slowest or fastest rate R allows; rates in between and two clocks off at once are not explored; other events take no time | test_cmc test_lease_drift (the leasedrift port: L(1 - rho) holds at drift 50, L caught with node 0 slow, holds at drift 0; drift 200 beats the margin), test_deadline_order |
+| `--max-time T` | refused past T | a world past T is not expanded and the run is INCOMPLETE, never PASS, in BFS, DFS and simulation | test_cmc test_lease_drift, test_cli_runs |
 | crash, simulation, replay, the fair schedule | exact | a crash clears the node's self-channel; simulation and replay check every state; an armed timer is never starved (Phase 2 of the plan) | test_cmc |
 
 ## Examples
