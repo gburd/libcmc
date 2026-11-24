@@ -65,6 +65,9 @@ change the API in `include/cmc.h`; this file says when it does.
   invariant (the first value chosen at a slot stays safe in every later
   state) catches pg_chain's Paxos bugs 107 and 110 (`make
   check-pgchain-hist`).  API: additive.
+- `make check-pgchain` builds `test/pgchain` and its planted bugs and
+  runs the fast rows of pg_chain's gate (about 7.5 minutes); CI runs it
+  in a weekly `pgchain` job, which a release also runs.
 
 ## 2.3.1 (2026-11-24)
 
