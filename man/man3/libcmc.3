@@ -527,6 +527,15 @@ and
 .Fl -queue-mem
 (in bytes here); with more than one worker the engine calls the step,
 enabled-action and property functions from several threads at once.
+The queue spills to files in the directory named by the environment
+variable
+.Ev CMC_SCRATCH ,
+else
+.Ev TMPDIR ;
+.Fn cmc_run_new
+refuses a
+.Va queue_mem
+with neither set.
 .Ss Running a check
 .Fn cmc_main
 parses the command line described in
