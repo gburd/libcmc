@@ -900,6 +900,38 @@ Each node's armed timers and pending wakes, as sorted tables of
 .Pp
 Every part is kept canonical, so two worlds are the same state exactly
 when their bytes are equal.
+.Ss Time fields
+A core that keeps times in its state names their offsets with
+.Fn time_fields
+and runs with
+.Fl -time-bound Ar B .
+After every step the engine stores each node's clock as K = B + 2, and
+moves that node's deadlines and declared times with it: a future time
+stays exact, a past time up to B old keeps its age, and an older one is
+stored as 1, which reads as B + 1 old.
+A field holding 0 stays 0.
+This is the clock-ceiling extrapolation of timed automata: if the core
+compares past times only with constants up to B, ages above B are
+indistinguishable, so worlds that differ only in when things happened
+are one state and the search ends without
+.Fl -max-time .
+.Pp
+The engine cannot see the core's constants, so B is the user's claim.
+.Fn step
+must read time only through
+.Va ev->now
+and its declared fields, behave the same when all of them move by one
+constant, and send no time in a message or a persist record.
+Properties see the canonical world:
+.Fn cmc_clock
+reads K and
+.Fn cmc_now
+reads 0.
+.Fl -time-check
+runs every step again with the times moved 2^40 later and the
+saturated ones made older still, and reports an engine violation if the
+outputs or the canonical post state differ: an undeclared time, an
+absolute time, or a bound below a constant the core uses.
 The engine hashes the bytes into a 128-bit fingerprint and stores the
 fingerprints of the states it has seen.
 .Ss Where actions come from
