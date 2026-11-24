@@ -852,6 +852,7 @@ add_prop(CmcRun *r, const CmcProp *p, char *err, size_t errlen)
 }
 
 static int	sym_setup(CmcRun *r, char *err, size_t errlen);
+static void	sym_scratch_free(CmcRun *r);
 
 static CmcRun *
 run_reject(CmcRun *r, char *err, size_t errlen, const char *msg)
@@ -1133,15 +1134,7 @@ cmc_run_free(CmcRun *r)
 	free(r->fstep);
 	free(r->hpre);
 	free(r->perms);
-	free(r->symw);
-	free(r->symb);
-	free(r->scx);
-	free(r->sct);
-	free(r->scy);
-	free(r->scu);
-	free(r->scfp);
-	free(r->scused);
-	free(r->scacts);
+	sym_scratch_free(r);
 	free(r);
 }
 
@@ -2578,6 +2571,40 @@ sym_check(CmcRun *r, const uint8_t *s, const CmcAction *acts, int na)
 	return 0;
 }
 
+/* The symmetry scratch of run r, which each search thread needs its own
+ * copy of; the group itself (r->perms) is shared read-only. */
+static void
+sym_scratch(CmcRun *r)
+{
+	if (!r->sym || r->nperm == 1)
+		return;
+	r->symw = xmalloc(r->ws);
+	r->symb = xmalloc(r->ws);
+	if (!r->o.sym_check)
+		return;
+	r->scx = xmalloc(r->ws);
+	r->sct = xmalloc(r->ws);
+	r->scy = xmalloc(r->ws);
+	r->scu = xmalloc(r->ws);
+	r->scfp = xmalloc(sizeof(uint64_t) * 2 * CMC_MAX_ACTIONS);
+	r->scused = xmalloc(sizeof(bool) * CMC_MAX_ACTIONS);
+	r->scacts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
+}
+
+static void
+sym_scratch_free(CmcRun *r)
+{
+	free(r->symw);
+	free(r->symb);
+	free(r->scx);
+	free(r->sct);
+	free(r->scy);
+	free(r->scu);
+	free(r->scfp);
+	free(r->scused);
+	free(r->scacts);
+}
+
 /*
  * What a nontrivial group cannot reduce soundly.  Interchangeable nodes
  * must agree on clients() and crashable(), which the engine reads by
@@ -2610,18 +2637,7 @@ sym_refuse(CmcRun *r, const int *cls, char *err, size_t errlen)
 	if (r->nev)
 		return snprintf(err, errlen, "CMC_EVENTUALLY cannot be checked under symmetry"
 						" reduction (the fair schedule runs in node order)"), -1;
-	r->symw = xmalloc(r->ws);
-	r->symb = xmalloc(r->ws);
-	if (r->o.sym_check)
-	{
-		r->scx = xmalloc(r->ws);
-		r->sct = xmalloc(r->ws);
-		r->scy = xmalloc(r->ws);
-		r->scu = xmalloc(r->ws);
-		r->scfp = xmalloc(sizeof(uint64_t) * 2 * CMC_MAX_ACTIONS);
-		r->scused = xmalloc(sizeof(bool) * CMC_MAX_ACTIONS);
-		r->scacts = xmalloc(sizeof(CmcAction) * CMC_MAX_ACTIONS);
-	}
+	sym_scratch(r);
 	return 0;
 }
 
