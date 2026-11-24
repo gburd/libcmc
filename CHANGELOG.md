@@ -5,7 +5,14 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
-## 2.3.0 (2026-11-24)
+## 2.3.1 (2026-11-24)
+
+The release of 2.3.0 stopped before publishing: its tag's CI ran the
+calibration job past its 60-minute limit, now that the job also ran the
+TLA+ twins and reader against TLC.  That step moves to the bridge job
+and both jobs get 90 minutes.  The code is 2.3.0's.
+
+## 2.3.0 (2026-11-24, tagged, not published)
 
 Gives `cmc --spec` what a TLA+ user brings to it
 (docs/plans/2.3-tla-users.md): TLC's deadlock check, state and action

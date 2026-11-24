@@ -113,7 +113,7 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 2.3.0.  `cmc --model-file`
+Release 2.3.1.  `cmc --model-file`
 checks the shipped binary as it runs, under seccomp, with the network,
 timeouts, crashes, connection resets, partitions and short writes as
 search decisions.  Blocking and non-blocking sockets,
