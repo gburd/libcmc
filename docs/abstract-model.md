@@ -603,6 +603,13 @@ whose guard has a disjunction once per true disjunct, so its
 "generated" can be larger; cmc counts each successor once.  The distinct count, the one that shows vacuity, is
 the same.
 
+## One worker
+
+`cmc --spec` searches with one thread and keeps its queue in memory.
+`--workers` and `--queue-mem`, the parallel search and the queue spill
+of the in-process engine (`cmc --model`, see cmc(1)), are refused here
+with exit 3 rather than ignored.
+
 ## Exit status
 
 0: no violation.  1: a violation (an invariant, a refinement, or a

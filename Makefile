@@ -11,6 +11,7 @@
 #   make check-hc-bugs       planted HC port bugs must fail calibration
 #   make check-spec-calibration  the .cml twins and the TLA+ reader against
 #                            TLC (needs nix or the pinned java)
+#   make check-pgchain       pg_chain's cores, its gate's fast rows, 8 workers
 #   make check-all           all of the above
 #   make coverage            every gate of make check on a gcc --coverage
 #                            build; fails below 90% of functions or of
@@ -53,7 +54,7 @@ ASAN_B ?= build-asan
 .PHONY: all check check-unit check-purity check-docs check-msan \
         check-calibration check-calibration-fast check-hc-bugs check-all \
         check-spec-calibration check-emit-tla check-emit-apalache \
-        check-examples check-examples-slow check-asan \
+        check-examples check-examples-slow check-asan check-pgchain \
         codeberg-release \
         install docs-site clean
 
@@ -164,6 +165,20 @@ check-asan:
 	CFLAGS="$(ASAN_FLAGS)" test/spec_gate.sh $(ASAN_B)
 	test/tla_gate.sh $(ASAN_B)
 
+# pg_chain's cores (test/pgchain, a copy): the fast rows of its own gate,
+# with its exact counts, run with 8 BFS workers, which must change nothing
+PGC = test/pgchain
+PGC_SRC = $(PGC)/chain_member.c $(PGC)/paxos.c $(PGC)/chain_member_model.c \
+          $(PGC)/paxos_model.c $(PGC)/pgchain_mc.c
+PGC_BUGS = 1 2 3 4 5 6 7 8 9 10 101 102 103 104 105 106 107 108 109 110
+$(B)/pgchain_mc: $(PGC_SRC) $(LIB)
+	$(CC) $(ALL_CFLAGS) -I$(PGC)/include -o $@ $(PGC_SRC) $(LIB)
+$(B)/pgchain_mc-bug%: $(PGC_SRC) $(LIB)
+	$(CC) $(ALL_CFLAGS) -I$(PGC)/include -DPGCHAIN_MC_BUG=$* -o $@ $(PGC_SRC) $(LIB)
+check-pgchain: $(B)/pgchain_mc $(PGC_BUGS:%=$(B)/pgchain_mc-bug%)
+	MC_B=$(B) PGCHAIN_MC_OUT=$(CMC_SCRATCH)/pgchain PGCHAIN_MC_EXTRA="--workers 8" \
+		$(PGC)/mc-bug-gate.sh
+
 check-calibration: $(B)/cmc
 	calib/hc/calibrate.sh $(B)/cmc all
 
@@ -196,7 +211,7 @@ check-emit-apalache: $(B)/cmc
 	test/apalache_gate.sh $(B)/cmc
 
 check-all: check-unit check-msan check-asan check-calibration check-hc-bugs check-examples-slow \
-	check-spec-calibration
+	check-spec-calibration check-pgchain
 
 install: $(LIB) $(B)/cmc $(PRELOAD)
 	mkdir -p $(DESTDIR)$(PREFIX)/bin $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include \

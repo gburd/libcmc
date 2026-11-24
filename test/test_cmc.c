@@ -2359,6 +2359,144 @@ test_search_limits(void)
 	}
 }
 
+/* ---- parallel BFS and the queue spill ---------------------------------
+ * A search with four workers, or with a queue that spills to files, must
+ * give what one worker in memory gives: the verdict, the property, the
+ * counts, the depth, the witness depths, the coverage and the very same
+ * counterexample (the first in BFS order). */
+
+static void
+same_search(const CmcModel *m, const char *const *props, const CmcOptions *base,
+			int workers, uint64_t queue_mem)
+{
+	CmcOptions	o1 = *base,
+				o2 = *base;
+	CmcRun	   *r1,
+			   *r2;
+	CmcResult	a,
+				b;
+
+	o2.workers = workers;
+	o2.queue_mem = queue_mem;
+	r1 = mkc(m, CMC_BFS, "", props, &o1);
+	r2 = mkc(m, CMC_BFS, "", props, &o2);
+	cmc_check(r1, &a);
+	cmc_check(r2, &b);
+	if (getenv("CMC_VERBOSE"))
+		fprintf(stderr, "  %s workers %d: verdict %d %s distinct=%llu trace=%d\n", m->name,
+				workers, b.verdict, b.prop ? b.prop : "", (unsigned long long) b.distinct,
+				b.trace_len);
+	CHECK(a.verdict == b.verdict && a.distinct == b.distinct && a.generated == b.generated);
+	CHECK(a.left == b.left && a.depth == b.depth && a.fair_from == b.fair_from);
+	CHECK((a.prop == NULL) == (b.prop == NULL) && (!a.prop || !strcmp(a.prop, b.prop)));
+	CHECK(!strcmp(a.why, b.why) && a.trace_len == b.trace_len);
+	if (a.trace_len == b.trace_len && a.trace_len > 1)
+		CHECK(!memcmp(a.trace, b.trace, sizeof(CmcAction) * (size_t) (a.trace_len - 1)));
+	CHECK(a.nwitness == b.nwitness &&
+		  !memcmp(a.witness_depth, b.witness_depth, sizeof(a.witness_depth)));
+	CHECK(!memcmp(a.cov_gen, b.cov_gen, sizeof(a.cov_gen)) &&
+		  !memcmp(a.cov_new, b.cov_new, sizeof(a.cov_new)));
+	cmc_result_free(&a);
+	cmc_result_free(&b);
+	cmc_run_free(r1);
+	cmc_run_free(r2);
+}
+
+/* A spill file that cannot be created ends the search with exit 3 (in a
+ * child), never a pass on the states that fit. */
+static bool
+spill_refused(void)
+{
+	pid_t		pid;
+	int			st = 0;
+
+	fflush(NULL);
+	pid = fork();
+	if (pid == 0)
+	{
+		CmcOptions	o;
+		CmcRun	   *r;
+		CmcResult	res;
+
+		if (!freopen("/dev/null", "w", stderr))
+			_exit(99);
+		cmc_options_default(&o);
+		o.queue_mem = 4096;
+		r = mkc(&wide_model, CMC_BFS, "", NULL, &o);
+		cmc_check(r, &res);
+		_exit(res.verdict);
+	}
+	waitpid(pid, &st, 0);
+	return WIFEXITED(st) && WEXITSTATUS(st) == 3;
+}
+
+static void
+test_workers_agree(void)
+{
+	static const char *const inv[] = {"Mutex", NULL};
+	static const char *const act[] = {"PhaseMonotone", NULL};
+	static const char *const qui[] = {"AllReplied", NULL};
+	CmcOptions	o;
+	char		err[256];
+
+	cmc_options_default(&o);
+	/* every property kind of the toy, passing and broken */
+	same_search(&toy_model, NULL, &o, 4, 0);
+	same_search(&toy_bug1_model, inv, &o, 4, 0);
+	same_search(&toy_bug2_model, qui, &o, 4, 0);
+	same_search(&toy_bug3_model, act, &o, 4, 0);
+	o.net = CMC_NET_BAG;
+	o.drop_budget = o.dup_budget = 1;
+	same_search(&toy_model, NULL, &o, 3, 0);
+	/* fair-schedule failures and engine errors in the fair run */
+	for (fair_mode = 0; fair_mode < 6; fair_mode++)
+	{
+		cmc_options_default(&o);
+		o.live_steps = fair_mode == 3 ? 10 : 1000;
+		same_search(&fair_model, NULL, &o, 4, 0);
+	}
+	fair_mode = 0;
+	/* a step the engine refuses, and an output cap */
+	cmc_options_default(&o);
+	same_search(&cap_model, NULL, &o, 4, 0);
+	/* many batches and levels, a state limit, a stop at the witnesses, and
+	 * a queue that spills, a chunk of 256 states at a time, under
+	 * $CMC_BUILD; then a spill directory that is not there */
+	{
+		char	   *keep = getenv("CMC_SCRATCH") ? strdup(getenv("CMC_SCRATCH")) : NULL;
+
+		setenv("CMC_SCRATCH", getenv("CMC_BUILD") ? getenv("CMC_BUILD") : ".", 1);
+		same_search(&wide_model, NULL, &o, 4, 4096);
+		setenv("CMC_SCRATCH", "/nonexistent/cmc-spill", 1);
+		CHECK(spill_refused());
+		if (keep)
+			setenv("CMC_SCRATCH", keep, 1);
+		else
+			unsetenv("CMC_SCRATCH");
+		free(keep);
+	}
+	o.max_states = 70000;
+	same_search(&wide_model, NULL, &o, 4, 0);
+	cmc_options_default(&o);
+	o.stop_on_witness = true;
+	same_search(&toy_model, NULL, &o, 4, 0);
+	/* the options a search cannot honour are refused */
+	cmc_options_default(&o);
+	o.search = CMC_DFS;
+	o.workers = 2;
+	CHECK(cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) == NULL &&
+		  strstr(err, "breadth-first"));
+	o.workers = 0;
+	o.queue_mem = 1;
+	CHECK(cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) == NULL &&
+		  strstr(err, "breadth-first"));
+	o.search = CMC_BFS;
+	o.queue_mem = 0;
+	o.workers = 257;
+	CHECK(cmc_run_new(&toy_model, "", NULL, &o, err, sizeof(err)) == NULL &&
+		  strstr(err, "workers"));
+}
+
 /* ---- the command line (cmc_main) ------------------------------------ */
 
 /* toy-bug1 with its first property (Mutex) always checked, under a
@@ -2509,6 +2647,16 @@ test_cli_input(void)
 		"--simulate", "--walks", "0");
 	CLI(3, "--drops needs a number from 0 to 255, not 'two'",
 		"--model-file", none, "--drops", "two");
+	/* the search resources: numbers in range, BFS only, and not --spec */
+	CLI(3, "--workers needs a number from 1 to 256, not '0'", "--model", "toy",
+		"--all-props", "--workers", "0");
+	CLI(3, "--queue-mem needs a number from 1", "--model", "toy", "--all-props",
+		"--queue-mem", "0");
+	CLI(3, "more than one worker needs breadth-first search", "--model", "toy",
+		"--all-props", "--dfs", "20", "--workers", "2");
+	CLI(3, "--workers is not supported with --spec", "--spec", "examples/spec/paxos.cml",
+		"--workers", "2");
+	CLI(1, "27 distinct states", "--model", "toy-bug1", "--inv", "Mutex", "--workers", "4");
 	/* --refine belongs to the process front end, which needs a model file */
 	CLI(3, "--refine needs --model-file", "--refine", "x.cml", "--bind", "x.bind");
 	/* TLC's one-line forms: CONSTANT k = v and INVARIANT name */
@@ -2774,6 +2922,7 @@ main(void)
 	test_replay_refusals();
 	test_fair_schedule();
 	test_search_limits();
+	test_workers_agree();
 	test_apply_refuses();
 	test_cli_input();
 	test_cli_runs();

@@ -20,6 +20,9 @@ CFG=$HERE/cfg
 OUT=${CMC_SCRATCH:-$HOME/tmp/cmc-build}/calib/$(date +%Y%m%d-%H%M%S)-$$
 # the determinism gate doubles the cost; on by default, DET= turns it off
 DET=${DET---det}
+# each row runs again with this many BFS workers and must print the same
+# (verdict, counts, depth, trace); WORKERS= turns it off
+WORKERS=${WORKERS-4}
 mkdir -p "$OUT"
 
 # cfg | extra cmc args | expected verdict (property or PASS) | depth |
@@ -73,6 +76,13 @@ while IFS="|" read -r cfg extra exp edepth edist egen; do
 	[ "$depth" != "$edepth" ] && ok=MISMATCH
 	[ -n "$edist" ] && [ "$dist" != "$edist" ] && ok=MISMATCH
 	[ -n "${egen:-}" ] && [ "$gen" != "$egen" ] && ok=MISMATCH
+	if [ -n "$WORKERS" ]; then
+		# shellcheck disable=SC2086
+		"$MC" --model hc --tlc-cfg "$CFG/$cfg.cfg" --cfg tlc_mult=TRUE $extra --progress 0 $DET \
+			--workers "$WORKERS" > "$log.w$WORKERS" 2>&1
+		cmp -s <(grep -v '^Finished in' "$log") <(grep -v '^Finished in' "$log.w$WORKERS") ||
+			ok="MISMATCH(workers=$WORKERS)"
+	fi
 	[ $ok != ok ] && fail=1
 	printf '%-44s %-28s %-28s %5s %5s %10s %10s %11s %11s %8s %s\n' "$cfg" "$exp" "$got" "$depth" "$edepth" "$dist" "${edist:--}" "$gen" "${egen:--}" "$wall" "$ok"
 done <<< "$ROWS"

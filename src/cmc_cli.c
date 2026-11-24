@@ -51,7 +51,7 @@ usage(void)
 			"         [--trace-out FILE] [--progress S] [--quiet] [--list]\n"
 			"         [--clients N] [--drops N] [--dups N] [--crashes N]\n"
 			"         [--net-cap N] [--persist-cap N] [--reply-cap N]\n"
-			"         [--net fifo|bag] [--live-steps K]\n"
+			"         [--net fifo|bag] [--live-steps K] [--workers N] [--queue-mem MB]\n"
 			"       cmc --spec | --emit-tla | --emit-cfg FILE.cml\n"
 			"         [--define TAG ...] [--no-deadlock]\n"
 			"       cmc --spec | --emit-cml FILE.tla [--config FILE.cfg] [--no-deadlock]\n"
@@ -744,6 +744,10 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 		}
 		else if (!strcmp(a, "--live-steps"))
 			o.live_steps = (int) num_arg(a, ARG(), 1, INT_MAX), set[8] = true;
+		else if (!strcmp(a, "--workers"))
+			o.workers = (int) num_arg(a, ARG(), 1, 256);
+		else if (!strcmp(a, "--queue-mem"))
+			o.queue_mem = num_arg(a, ARG(), 1, UINT64_MAX >> 20) << 20;
 		else
 			usage();
 #undef ARG

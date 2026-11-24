@@ -5,6 +5,24 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+- The in-process engine's BFS (`cmc --model`, `cmc_check()`) keeps a
+  32-byte record per state (fingerprint, parent record number, action)
+  in 256 shards whose index grows without a second copy, instead of a
+  48-byte table entry that doubled; the queue holds record numbers, not
+  parent fingerprints.  pg_chain's 161,613,053-state Paxos row peaks at
+  17.5 GB instead of 28.8 GB, with the same counts
+  (docs/measurements/2026-11-24-library-engine-memory.md).
+- `--workers N` (`CmcOptions.workers`): BFS expands each batch of queued
+  states in N threads (C11 `<threads.h>`).  Counts, depth, witness
+  depths, coverage and the counterexample are those of one worker.
+  Other searches, and `--spec`, refuse it.  Cores and properties must be
+  reentrant.
+- `--queue-mem MB` (`CmcOptions.queue_mem`): BFS queue chunks beyond the
+  budget spill to files in `$CMC_SCRATCH` or `$TMPDIR`.
+- `make check-pgchain` runs the fast rows of pg_chain's gate
+  (test/pgchain) with 8 workers; `PGCHAIN_MC_EXTRA` adds options to the
+  gate's runs.
+
 ## 2.3.1 (2026-11-24)
 
 The release of 2.3.0 stopped before publishing: its tag's CI ran the

@@ -21,6 +21,17 @@ else
 	echo "control: FAILED (see $OUT/control.txt)"; fail=1
 fi
 
+# four BFS workers print what one does, for the control and each bug
+for model in toy toy-bug1 toy-bug2 toy-bug3; do
+	"$MC" --model "$model" $PROPS --det > "$OUT/$model.w1" 2>&1
+	"$MC" --model "$model" $PROPS --det --workers 4 > "$OUT/$model.w4" 2>&1
+	if cmp -s <(grep -v '^Finished in' "$OUT/$model.w1") <(grep -v '^Finished in' "$OUT/$model.w4"); then
+		echo "$model: --workers 4 prints the same"
+	else
+		echo "$model: --workers 4 DIFFERS (see $OUT/$model.w4)"; fail=1
+	fi
+done
+
 # bug | expected property | max distinct states
 for row in "toy-bug1|Mutex|100" "toy-bug2|AllReplied|100" "toy-bug3|PhaseMonotone|100"; do
 	IFS='|' read -r model prop budget <<< "$row"

@@ -218,6 +218,8 @@ in the kernel, untouched.
 | determinism of a core | checked | `--det` runs every step twice | toy_gate |
 | uninitialised reads in a core | checked | MemorySanitizer | `make check-msan` |
 | crash, simulation, replay, the fair schedule | exact | a crash clears the node's self-channel; simulation and replay check every state; an armed timer is never starved (Phase 2 of the plan) | test_cmc |
+| parallel BFS (`--workers N`) | exact | the result of one worker: counts, depth, witness depths, coverage and the same counterexample; BFS only, other searches refuse it; cores and properties must be reentrant | test_cmc `test_workers_agree`, check-pgchain `--workers 8` |
+| BFS queue spill (`--queue-mem MB`) | exact | files in `$CMC_SCRATCH` or `$TMPDIR` (refused with neither); an I/O error is exit 3 | test_cmc `test_workers_agree` |
 
 ## Examples
 
