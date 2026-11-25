@@ -766,6 +766,8 @@ cmc_main(int argc, char **argv, const CmcModelEntry *tab, size_t ntab)
 			o.time_bound = num_arg(a, ARG(), 1, ((uint64_t) 1 << 39) - 1), set[12] = true;
 		else if (!strcmp(a, "--time-check"))
 			o.time_check = true;
+		else if (!strcmp(a, "--no-time-check"))
+			o.no_time_check = true;
 		else if (!strcmp(a, "--req-cap"))
 			o.req_cap = (int) num_arg(a, ARG(), 0, 64);
 		else if (!strcmp(a, "--net"))

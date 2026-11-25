@@ -365,7 +365,13 @@ typedef struct CmcOptions
 								 * and time fields shifted with it, and past
 								 * times older than B saturated (cmc(7)) */
 	bool		time_check;		/* --time-check: every step again with the
-								 * node's times shifted; needs time_bound */
+								 * node's times shifted; needs time_bound.  On
+								 * by default once a core declares time_fields,
+								 * unless no_time_check turns it off. */
+	bool		no_time_check;	/* --no-time-check: do not default time_check
+								 * on for a core with time_fields (the bound is
+								 * then trusted; a too-small one can hide a
+								 * violation) */
 	int			req_cap;		/* request log slots (nodes taking clients
 								 * x client budget must fit), at most 64 */
 	CmcNet		net;

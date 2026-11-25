@@ -1173,11 +1173,11 @@ time_setup(CmcRun *r, char *err, size_t errlen)
 
 	if ((r->o.time_bound || r->o.time_check) && r->direct)
 		bad = "time_bound and time_check need actor mode";
-	else if (r->o.time_check && !r->o.time_bound)
-		bad = "time_check needs time_bound";
 	else if (r->core->time_fields && !r->o.time_bound)
 		bad = "a core with time_fields needs time_bound (--time-bound B): the largest"
 			" time difference it compares against";
+	else if (r->o.time_check && !r->o.time_bound)
+		bad = "time_check needs time_bound";
 	else if (r->o.time_bound >= TB_MAX)
 		bad = "time_bound must be below 2^39";
 	else if (r->o.time_bound && r->o.max_time)
@@ -1274,6 +1274,12 @@ cmc_run_new(const CmcModel *m, const char *cfg, const char *const *props,
 	r->o = *o;
 	if (!r->o.out)
 		r->o.out = stdout;
+	/* A core that stores times trusts --time-bound; a bound smaller than a
+	 * difference it compares hides a violation silently.  time_check runs
+	 * each step again shifted and catches that, so default it on for such
+	 * a core unless the caller opts out. */
+	if (m->core->time_fields && !r->o.no_time_check)
+		r->o.time_check = true;
 	if (r->core->cfg_size > CMC_CFG_MAX)
 		return run_reject(r, err, errlen, "core cfg too large");
 	if (parse_cfg(r, cfg, err, errlen) != 0)

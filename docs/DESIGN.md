@@ -366,7 +366,10 @@ canonical form.  This catches an undeclared time field (its value does
 not move with the clock), a core that reads an absolute time, a bound
 below a constant the core compares an old time against, and arithmetic
 on a saturated value.  Like `--det` it checks the steps the search
-takes, not every step the core could take.
+takes, not every step the core could take.  A core that declares `time_fields`
+turns `--time-check` on by default, because a `--time-bound` too small
+to cover a difference the core compares would otherwise pass a reachable
+violation silently; `--no-time-check` trusts the bound instead.
 
 `--time-bound` takes 1 to 2^39 - 1, refuses `--max-time` (the reference
 time is not kept), refuses a model with a history variable

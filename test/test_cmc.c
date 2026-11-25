@@ -627,6 +627,13 @@ verdict_of(const CmcModel *m, CmcOptions *o, const char *const *props, char *pro
 	cmc_run_free(r);
 	return v;
 }
+/* the why of the last run (for a check on the message, not the verdict) */
+static const char *
+verdict_why(const CmcModel *m, CmcOptions *o, char *why, size_t wlen)
+{
+	verdict_of(m, o, NULL, NULL, 0, why, wlen, NULL);
+	return why;
+}
 
 static void
 zero8(const void *cfg, int node, void *sv)
@@ -1433,9 +1440,21 @@ test_time_bound(void)
 	CHECK(verdict_of(&ld_model, &o, NULL, NULL, 0, why, sizeof(why), NULL) == CMC_INCOMPLETE &&
 		  strstr(why, "max_states"));
 	o.time_bound = LD_VET;
-	o.time_check = true;
 	o.det = true;
+	/* time_check defaults on for a core with time_fields, so no explicit
+	 * o.time_check here; the correct core passes */
 	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, NULL, 0, NULL) == CMC_PASS);
+	/* the default turns time_check on for this core: an undeclared time
+	 * field is reported, with no explicit o.time_check.  --no-time-check
+	 * turns the check off, so the time-check error does not fire (the run
+	 * is then unsound, as the message warns) */
+	ld_tf_skip = 1;
+	CHECK(verdict_of(&ldr_model, &o, NULL, NULL, 0, why, sizeof(why), NULL)
+		  == CMC_VIOLATION && strstr(why, "time check"));
+	o.no_time_check = true;
+	CHECK(!strstr(verdict_why(&ldr_model, &o, why, sizeof(why)), "time check"));
+	o.no_time_check = false;
+	ld_tf_skip = 0;
 	/* a larger bound than the core needs is sound, only bigger (at drift
 	 * 0: under drift each round multiplies the ages first can have) */
 	o.drift = 0;
@@ -1588,7 +1607,7 @@ test_time_bound_refusals(void)
 		{1, 25, 0, 9, false, 0, "outside the volatile part"},
 		{1, 40, 0, 9, false, 0, "outside the volatile part"},
 		{2, 8, 12, 9, false, 0, "overlap"},
-		{0, 8, 0, 0, true, 0, "time_check needs time_bound"},
+		{0, 8, 0, 0, true, 0, "needs time_bound"},
 		{0, 8, 0, (uint64_t) 1 << 39, false, 0, "below 2^39"},
 		{0, 8, 0, 9, false, 100, "max_time has no meaning"},
 	};

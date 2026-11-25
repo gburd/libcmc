@@ -5,6 +5,12 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+`--time-check` is on by default once a core declares `time_fields`, so a
+`--time-bound` too small to cover a time difference the core compares no
+longer passes a reachable violation in silence; `--no-time-check`
+trusts the bound instead.  This was the one finding of the 2.4
+pre-release review.
+
 - `CmcCore.crashable(cfg, node)`, like `clients()`: from the settings
   only, it says which nodes may crash; `CRASH` is not offered for a
   node it excludes.  NULL keeps every node crashable (API addition).
