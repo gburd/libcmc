@@ -122,7 +122,13 @@ check-unit: $(B)/test_cmc $(B)/cmc $(PRELOAD) check-purity check-docs
 check-docs: $(LIB) $(B)/cmc $(PRELOAD)
 	CC=$(CC) test/docs_gate.sh $(B)
 
-check: check-unit check-examples check-calibration-fast check-pgchain-hist check-pgchain-sym
+# CHECK_PGCHAIN defaults to the two pg_chain gates, so a plain make check
+# runs them (about 7 minutes at -O2).  The coverage build sets it empty:
+# those rows are hundreds of thousands of states each, hours under
+# -O0 --coverage, and they add no engine-code coverage the engine's own
+# tests do not; CI runs them in their own -O2 job (check-pgchain).
+CHECK_PGCHAIN ?= check-pgchain-hist check-pgchain-sym
+check: check-unit check-examples check-calibration-fast $(CHECK_PGCHAIN)
 
 # pg_chain's cores (test/pgchain), built as pg_chain builds them: the
 # correct binary and one per planted bug, $(B)/pgchain_mc-bugN
@@ -303,7 +309,7 @@ endif
 coverage:
 	mkdir -p $(COV_B) $(COV_S)
 	find $(COV_B) $(COV_S) -name '*.gcda' -delete
-	$(MAKE) B=$(COV_B) CC=$(COV_CC) CFLAGS="$(COV_FLAGS)" COV_BUILD=1 CMC_SCRATCH=$(COV_S) check
+	$(MAKE) B=$(COV_B) CC=$(COV_CC) CFLAGS="$(COV_FLAGS)" COV_BUILD=1 CMC_SCRATCH=$(COV_S) CHECK_PGCHAIN= check
 	$(MAKE) coverage-report
 
 coverage-report:
