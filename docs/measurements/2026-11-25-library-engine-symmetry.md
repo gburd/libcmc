@@ -9,7 +9,7 @@ off, on, and on with `--sym-check`.
 
 Host: EC2 b (c7i.8xlarge class, Intel Xeon Platinum 8488C, 32 vCPU, Fedora
 44), load about 0 before the run, nothing else running.  gcc 16.2.1, `-O2
--g`, branch pr/2.4-sym on f32edb9.  Command:
+-g`, branch pr/2.4-sym on f32edb9 (the table above).  Command:
 `docs/measurements/2026-11-25-library-engine-symmetry/run.sh build-gcc OUT`,
 which runs `pgchain_mc --model paxos --inv OneValuePerSlot,Agreement,
 OneValuePerBallot,LearnedChosen,RefusedNeverChosen,AnsweredOnce --prop
@@ -29,6 +29,13 @@ directory of the same name.  Wall time and RSS come from `/usr/bin/time`.
 
 Every row passes in all three modes, with every named witness reached.
 RSS follows the distinct count: V takes 20.1 GB off and 1.2 GB on.
+
+After the merge of pr/2.4-scale (record store, parallel BFS), row V with
+`--symmetry on --workers 8` gives the same 3997213 distinct states and
+depth 68 in 24.6 s wall, 0.90 GB RSS (same host, single run).  The
+parallel BFS keeps its one-worker order, so symmetry reduction composes
+with it unchanged; test_symmetry checks the orbit count with four
+workers.
 
 Rows B and R have a trivial group: in B, two of three nodes are
 candidates; in R, nodes 1, 2 and 3 each have their own role under
