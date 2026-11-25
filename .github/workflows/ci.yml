@@ -73,9 +73,12 @@ jobs:
 
   coverage:
     # every gate of make check on a gcc --coverage build; fails below 90%
-    # of functions or of branches in any src/*.c file
+    # of functions or of branches in any src/*.c file.  The -O0
+    # instrumented HC calibration-fast rows take about 70 minutes on a
+    # fast host, more on a runner; the slow pg_chain gates are skipped
+    # (CHECK_PGCHAIN= in the coverage target).
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
