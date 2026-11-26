@@ -5,6 +5,26 @@ change the API in `include/cmc.h`; this file says when it does.
 
 ## Unreleased
 
+## 2.4.0 (2026-11-26)
+
+Answers pg_chain's asks for the library engine (`CmcCore`), the engine
+its protocol cores are checked with (docs/plans/2.4-library-engine.md).
+Per-node clocks with bounded drift, finite timeouts and timers that
+carry an argument; a node the model declares never crashes
+(`crashable`); a request log with the real-time precedence of client
+operations, and model-owned history variables, for history properties
+like linearizability; symmetry reduction declared by the core
+(`permute`), with `--sym-check`; and a parallel breadth-first search
+(`--workers`) that gives the same counts, depth and shortest
+counterexample as one worker, with the state store compacted and its
+queue able to spill to disk.  Every addition to `cmc.h` is a field or
+hook that is zero or NULL by default, so the existing cores and their
+distinct-state counts are unchanged; the HC calibration still matches
+TLC.  On pg_chain's models (test/pgchain, a copy of its cores): the
+large Paxos row drops from 34.9 GB to 23.6 GB and from 12 minutes to
+2.4 minutes on 32 workers, and a five-voter row falls from 80.4M to
+4.0M states under symmetry.
+
 `--time-check` is on by default once a core declares `time_fields`, so a
 `--time-bound` too small to cover a time difference the core compares no
 longer passes a reachable violation in silence; `--no-time-check`

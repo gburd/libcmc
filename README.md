@@ -49,7 +49,11 @@ records, sequences and definitions, strong and per-action fairness,
 ITF traces, a reader for TLA+ modules and TLC configurations, and proof
 hooks for TLAPS and Apalache (see the
 [2.3 plan](docs/plans/2.3-tla-users.md) and the
-[guide for TLA+ users](docs/guide/04-from-tla.md)).  A pass covers only the instance and the
+[guide for TLA+ users](docs/guide/04-from-tla.md)); 2.4.0 gives the
+library engine what pg_chain's protocol cores need: per-node clocks with
+drift, a request log and history variables, symmetry reduction and a
+parallel search that keeps shortest counterexamples (see the
+[2.4 plan](docs/plans/2.4-library-engine.md)).  A pass covers only the instance and the
 budgets searched, and only the behaviour
 [docs/qualification.md](docs/qualification.md) lists as modelled; a
 construct outside it is refused, not passed.  Use cmc as one input
@@ -113,7 +117,7 @@ in-process models, C step functions against `include/cmc.h`
 
 ## Status
 
-Release 2.3.1.  `cmc --model-file`
+Release 2.4.0.  `cmc --model-file`
 checks the shipped binary as it runs, under seccomp, with the network,
 timeouts, crashes, connection resets, partitions and short writes as
 search decisions.  Blocking and non-blocking sockets,
